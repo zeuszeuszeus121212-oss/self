@@ -1122,6 +1122,51 @@ async function handleDashboardInteraction(interaction, manager) {
             await manager.logAgent(agentId, 'ai_provider_update', `تم تبديل مزود الذكاء الاصطناعي إلى ${targetP.label}`, { provider: targetP.id });
             return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
         }
+        if (interaction.isStringSelectMenu() && action === 'aiprovider_fb_set') {
+            // إضافة/إزالة مزود من سلسلة Fallback — لا يمس إعدادات المزودين
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const [op, pid] = String(interaction.values[0]).split(':');
+            const targetP = getProviderOrFallback(pid);
+            const chain = Array.isArray(agent.fallback_chain) ? [...agent.fallback_chain] : [];
+            if (op === 'add') {
+                if (targetP.id === agent.provider) {
+                    return interaction.update({ embeds: [embed('ℹ️ لا يمكن', linesBlock([`**${targetP.label}** هو المزود الأساسي نفسه — اختر مزوداً آخر كبديل.`]), COLORS.warning)], components: [] });
+                }
+                if (!chain.includes(targetP.id)) chain.push(targetP.id);
+            } else if (op === 'remove') {
+                const idx = chain.indexOf(targetP.id);
+                if (idx !== -1) chain.splice(idx, 1);
+            }
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { fallback_chain: chain, updated_at: new Date() } },
+            );
+            // تحديث حي للـ Runtime
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.fallback_chain = chain;
+                liveRuntime.runtimeSettings.fallback_configs = extractAllProviderConfigs({ ...agent, fallback_chain: chain });
+            }
+            await manager.logAgent(agentId, 'fallback_update', `${op === 'add' ? 'إضافة' : 'إزالة'} ${targetP.label} ${op === 'add' ? 'إلى' : 'من'} سلسلة Fallback`, { chain });
+            return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
+        }
+        if (action === 'aiprovider_fb_toggle') {
+            // تفعيل/تعطيل سلسلة Fallback بالكامل
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const newValue = !agent.fallback_enabled;
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { fallback_enabled: newValue, updated_at: new Date() } },
+            );
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.fallback_enabled = newValue;
+            }
+            await manager.logAgent(agentId, 'fallback_update', `سلسلة Fallback: ${newValue ? 'تفعيل' : 'تعطيل'}`, { enabled: newValue });
+            return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
+        }
         if (action === 'aiprovider_test') {
             // اختبار اتصال حقيقي مع مزود الوكيل الحالي
             const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
@@ -1310,7 +1355,7 @@ async function renderAgentProvider(agentId, guildId) {
 }
 
 /**
- * صفحة مزود الذكاء الاصطناعي للوكيل — عرض/تبديل/اختبار.
+ * صفحة مزود الذكاء الاصطناعي للوكيل — عرض/تبديل/اختبار + سلسلة Fallback.
  * منفصلة تماماً عن صفحة مزود POW (أمور مختلفة تماماً).
  */
 async function renderAgentAIProvider(agentId, guildId) {
@@ -1318,6 +1363,14 @@ async function renderAgentAIProvider(agentId, guildId) {
     const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
     if (!agent) return { embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف.']), COLORS.danger)], components: [] };
     const current = getProviderOrFallback(agent.provider);
+    const fbEnabled = Boolean(agent.fallback_enabled);
+    const fbChain = Array.isArray(agent.fallback_chain) ? agent.fallback_chain : [];
+    const fbLine = fbEnabled
+        ? (fbChain.length
+            ? `مفعّلة ✅ — الترتيب: ${fbChain.map(pid => `${getProviderOrFallback(pid).emoji} ${getProviderOrFallback(pid).label}`).join(' → ')}`
+            : 'مفعّلة لكن السلسلة فارغة — أضف مزوداً بديلاً أدناه')
+        : 'معطلة — فشل المزود يعني رسالة خطأ (السلوك الكلاسيكي)';
+
     const emb = embed('🧠 مزود الذكاء الاصطناعي للوكيل', linesBlock([
         `الوكيل: **${agent.name || 'غير معروف'}**`,
         `المزود الحالي: ${current.emoji} **${current.label}**`,
@@ -1326,6 +1379,9 @@ async function renderAgentAIProvider(agentId, guildId) {
         '',
         '**المزودون المتاحون:**',
         ...listProviders().map(p => `${p.emoji} **${p.label}** — ${p.id === current.id ? 'الحالي' : (p.validate(extractProviderConfig({ ...agent, provider: p.id })).ok ? 'جاهز للتبديل' : 'يحتاج إعدادات')}`),
+        '',
+        `**🔄 سلسلة Fallback:** ${fbLine}`,
+        'عند فشل المزود الأساسي يُجرَّب البديل التالي تلقائياً لنفس الطلب — بشرط أن تكون إعداداته محفوظة.',
         '',
         'التبديل لا يمس إعدادات المزودين الآخرين المحفوظة، ويُطبق حياً بدون إعادة تشغيل.',
         'جلسات المحادثات القديمة تُصفّر عند التبديل (كل مزود له جلساته الخاصة).',
@@ -1341,7 +1397,22 @@ async function renderAgentAIProvider(agentId, guildId) {
                 emoji      : p.emoji,
             }))),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([
+    // صف إدارة Fallback: إضافة/إزالة مزود من السلسلة
+    const fbRow = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:agent:${agentId}:aiprovider_fb_set`)
+            .setPlaceholder('إضافة أو إزالة مزود من سلسلة Fallback')
+            .addOptions(listProviders()
+                .filter(p => p.id !== current.id)
+                .map(p => ({
+                    label      : `${fbChain.includes(p.id) ? '➖ إزالة' : '➕ إضافة'} ${p.label}`,
+                    value      : `${fbChain.includes(p.id) ? 'remove' : 'add'}:${p.id}`,
+                    description: p.validate(extractProviderConfig({ ...agent, provider: p.id })).ok ? 'إعداداته محفوظة — جاهز' : 'يحتاج حفظ إعداداته أولاً (من نافذة تعديل الوكيل)',
+                    emoji      : p.emoji,
+                }))),
+    );
+    return { embeds: [emb], components: [row, fbRow, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:aiprovider_fb_toggle`, fbEnabled ? 'تعطيل Fallback' : 'تفعيل Fallback', fbEnabled ? ButtonStyle.Danger : ButtonStyle.Success, '🔄'),
         button(`${DASH_PREFIX}:agent:${agentId}:aiprovider_test`, 'اختبار الاتصال', ButtonStyle.Primary, '🧪'),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),

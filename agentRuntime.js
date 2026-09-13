@@ -24,6 +24,7 @@ const {
     InteractionType,
     ApplicationCommandOptionType,
     ApplicationCommandType,
+    EmbedBuilder,
 } = require('discord.js');
 const axios = require('axios');
 
@@ -82,6 +83,82 @@ const {
 const { dashboardCommands, isDashboardCommand } = require('./managerDashboard');
 const { getAccountSettings, updateAccountSettings, forwardMessage, handleAccountInteraction, handleControlReply, trackGameMessage, startEvent, runEventSeries, rememberActivity, maybeAutoEvent, maybeScheduledEvent, humanizeDisplayName } = require('./accountAgent');
 const { getProviderOrFallback, isValidProvider, listProviders, extractProviderConfig, extractAllProviderConfigs } = require('./providers');
+const remindersModule = require('./reminders');
+const { startReminderEngine } = remindersModule;
+const reminder_SCAN_MS = remindersModule.SCAN_INTERVAL_MS;
+const memory = require('./memory');
+
+// ══════════════════════════════════════════════════════════════
+//  🎨 نظام التصميم الموحد — لكل ردومات الوكيل (embeds أنيقة ومتسقة)
+// ══════════════════════════════════════════════════════════════
+const AGENT_COLORS = Object.freeze({
+    primary: 0x9B59B6,  // بنفسجي هوية الوكيل
+    success: 0x57F287,
+    danger : 0xED4245,
+    warning: 0xFEE75C,
+    info   : 0x3498DB,
+});
+
+/**
+ * بناء Embed موحد للوكيل — نفس الهوية البصرية في كل الأوامر
+ * @param {object} opts {title, description, color, botName, footer}
+ */
+function agentEmbed({ title, description = '', color = AGENT_COLORS.primary, botName = 'Agent', footer = null }) {
+    const emb = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(title)
+        .setDescription(description)
+        .setTimestamp();
+    emb.setFooter({ text: footer || `${botName} • Disor Platform` });
+    return emb;
+}
+
+/** دليل الأوامر الكامل — مصنف ومصمم موحداً */
+function buildHelpEmbeds(botName, extra = {}) {
+    const footerTxt = `${botName} • Disor Agent Platform`;
+    const e1 = new EmbedBuilder()
+        .setColor(AGENT_COLORS.primary)
+        .setTitle(`📖 دليل ${botName} — 1/2`)
+        .setDescription(
+            'أنا وكيل ذكاء اصطناعي كامل داخل ديسكورد — أتحادث، أنفذ مهام إدارية، أبحث في الإنترنت، أتذكر، وأذكّرك.\n\n' +
+            '**💬 التحدث معي**\n' +
+            'منشنني `@` أو رد على رسالة مني — لا حاجة لأي أمر.\n' +
+            '**/محادثة-جديدة** — صفّر محادثة قناة أو غيّر وضعها (عادي/خبير + تفكير عميق)\n' +
+            '**/عرض-المحادثات** — المحادثات المحفوظة للقنوات\n\n' +
+            '**🌐 قدراتي الذكية (للجميع)**\n' +
+            'اكتب طلبك في المحادثة مباشرة، مثلاً:\n' +
+            '• «ابحث لي عن أحسن لابتوب لعام 2025 واقرأ أول نتيجة» ← بحث ويب + قراءة صفحات\n' +
+            '• «تذكر أنني أعمل مبرمجاً» / «ماذا تذكر عني؟» / «انسي ذلك» ← ذاكرة شخصية دائمة\n' +
+            '• «ذكرني بعد 30 دقيقة» / «ذكّرني كل يوم 8 مساءً» ← تذكيرات حقيقية تصلك في وقتها\n' +
+            '• «من الأكثر نشاطاً هذا الأسبوع؟» ثم «امسح رسائله» ← قراءة السيرفر ثم تنفيذ (للأدمن)')
+        .setFooter({ text: footerTxt })
+        .setTimestamp();
+
+    const e2 = new EmbedBuilder()
+        .setColor(AGENT_COLORS.info)
+        .setTitle(`📡 دليل ${botName} — 2/2 (أوامر الأدمن)`)
+        .setDescription(
+            '**📡 قنوات المحادثة**\n' +
+            '**/قناة-محادثة** — أضف قناة أتكلم فيها (الحد الأقصى 5)\n' +
+            '**/قنوات-مسموحة** — القنوات النشطة حالياً\n' +
+            '**/حذف-قناة** — أزل قناة من قائمتي\n\n' +
+            '**🧠 الذكاء الاصطناعي**\n' +
+            '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI-Compatible)\n' +
+            '**/اختبار-المزود** — اختبار اتصال حقيقي مع مزودي الحالي\n' +
+            '**/مزود-باو** — إعدادات POW (خاص بـ DeepSeek فقط)\n\n' +
+            '**⚙️ الصلاحيات والإدارة**\n' +
+            '**/رتبة-التحكم** — حدد رتبة من يستطيع إدارتي\n' +
+            '**/الرتبة-الحالية** — اعرض رتبة التحكم\n\n' +
+            '**🎮 الحساب الحقيقي والفعاليات**\n' +
+            '**/ابدأ-فعالية** — شغّل فعالية أو سلسلة فوراً\n' +
+            '**/فعاليات-وضع** — تلقائي أو يدوي\n' +
+            '**/حساب-خاص** / **/حساب-منشن** / **/حساب-تسليمات** — قنوات تحويل الحساب الحقيقي\n' +
+            '**/حساب-قناة-فعاليات** / **/حساب-رول-فعاليات** — إعدادات فعاليات الحساب\n\n' +
+            '> للوحة تحكم كاملة (إنشاء وكلاء، إحصائيات، سجلات) استخدم /panel من بوت المدير')
+        .setFooter({ text: footerTxt })
+        .setTimestamp();
+    return [e1, e2];
+}
 
 function agentRuntimeCommands() {
     const channelOption = (option) => option
@@ -93,21 +170,24 @@ function agentRuntimeCommands() {
     return [
         new SlashCommandBuilder()
             .setName('اوامر')
-            .setDescription('عرض أوامر هذا الوكيل'),
+            .setDescription('📖 دليل الأوامر والقدرات الكاملة لهذا الوكيل'),
+        new SlashCommandBuilder()
+            .setName('مساعدة')
+            .setDescription('📖 نفس دليل الأوامر — مصنف ومفصل'),
         new SlashCommandBuilder()
             .setName('قناة-محادثة')
-            .setDescription('إضافة قناة يتكلم فيها هذا الوكيل')
+            .setDescription('➕ إضافة قناة أتكلم فيها (أدمن)')
             .addStringOption(channelOption),
         new SlashCommandBuilder()
             .setName('قنوات-مسموحة')
-            .setDescription('عرض قنوات المحادثة المفعلة لهذا الوكيل'),
+            .setDescription('📡 عرض قنوات المحادثة المفعلة (أدمن)'),
         new SlashCommandBuilder()
             .setName('حذف-قناة')
-            .setDescription('حذف قناة من قنوات محادثة هذا الوكيل')
+            .setDescription('➖ حذف قناة من قنوات محادثتي (أدمن)')
             .addStringOption(channelOption),
         new SlashCommandBuilder()
             .setName('محادثة-جديدة')
-            .setDescription('بدء/تصفير محادثة قناة لهذا الوكيل')
+            .setDescription('🔄 بدء/تصفير محادثة قناة (وضع + تفكير)')
             .addStringOption(option => option
                 .setName('قناة')
                 .setDescription('القناة، واتركها فارغة لاستخدام القناة الحالية')
@@ -131,21 +211,21 @@ function agentRuntimeCommands() {
                 )),
         new SlashCommandBuilder()
             .setName('عرض-المحادثات')
-            .setDescription('عرض محادثات/جلسات القنوات المحفوظة لهذا الوكيل'),
+            .setDescription('💬 عرض محادثات القنوات المحفوظة'),
         new SlashCommandBuilder()
             .setName('حذف-محادثة')
-            .setDescription('حذف/تصفير محادثة قناة لهذا الوكيل')
+            .setDescription('🗑️ حذف/تصفير محادثة قناة')
             .addStringOption(channelOption),
         new SlashCommandBuilder()
             .setName('رتبة-التحكم')
-            .setDescription('تحديد رتبة التحكم لهذا الوكيل')
+            .setDescription('🛡️ تحديد رتبة من يستطيع إدارتي (أدمن)')
             .addStringOption(option => option
                 .setName('role')
                 .setDescription('اسم الرتبة، أو اتركه فارغًا لإزالة القيد')
                 .setRequired(false)),
         new SlashCommandBuilder()
             .setName('الرتبة-الحالية')
-            .setDescription('عرض رتبة التحكم الحالية لهذا الوكيل'),
+            .setDescription('🛡️ عرض رتبة التحكم الحالية'),
         new SlashCommandBuilder()
             .setName('حساب-خاص')
             .setDescription('تحديد قناة تحويل رسائل الخاص للحساب الحقيقي')
@@ -270,6 +350,10 @@ const runtimeSettings = {
     personality : agentConfig.personality || '',
     provider    : providerId,
     providerConfig : extractProviderConfig(agentConfig),
+    // 🔄 سلسلة Fallback — البدائل تُستخدم فقط عند فشل الأساسي
+    fallback_enabled : Boolean(agentConfig.fallback_enabled),
+    fallback_chain   : Array.isArray(agentConfig.fallback_chain) ? agentConfig.fallback_chain.map(String) : [],
+    fallback_configs : extractAllProviderConfigs(agentConfig),
 };
 // لقطة من وثيقة الوكيل عند الإقلاع — تُستخدم للتحقق من إعدادات المزودين الآخرين
 const agentConfigSnapshot = { ...agentConfig };
@@ -299,6 +383,15 @@ client.once('ready', async () => {
     console.log(`📡 Guilds (${client.guilds.cache.size}): ${client.guilds.cache.map(g => g.name).join(', ')}`);
 
     if (agentConfig.onReady) await agentConfig.onReady();
+
+    // ⏰ محرك تذكيرات هذا الوكيل — يرسل عبر عميل الوكيل نفسه
+    try {
+        const reminderEngine = startReminderEngine({ agentId, client });
+        client.__reminderEngine = reminderEngine;
+        console.log(`⏰ محرك التذكيرات يعمل لـ ${agentId} (مسح كل ${Math.round(reminder_SCAN_MS / 1000)} ث)`);
+    } catch (e) {
+        console.error(`❌ فشل بدء محرك التذكيرات لـ ${agentId}:`, e.message);
+    }
 
     // تسجيل أوامر السلاش للبوتات فقط؛ حسابات user لا تدعم application commands
     if (tokenType !== 'bot') return;
@@ -372,33 +465,12 @@ client.on('interactionCreate', async (interaction) => {
 
         // أوامر إدارة الوكلاء نُقلت بالكامل إلى Manager Dashboard.
 
-        if (commandName === 'اوامر') {
+        if (commandName === 'اوامر' || commandName === 'مساعدة') {
             const botName = client.user.displayName || client.user.username;
-            const helpText = `# أوامر ${botName}\n\n` +
-                `## 💬 التفاعل\nمنشن البوت أو رد على رسالته للتحدث معه\n\n` +
-                `## 📡 إدارة قنوات المحادثة (أدمن فقط)\n` +
-                `**/قناة-محادثة** — أضف قناة للبوت (حد أقصى ${MAX_CHANNELS_PER_GUILD} قنوات)\n` +
-                `**/قنوات-مسموحة** — عرض القنوات النشطة\n` +
-                `**/حذف-قناة** — احذف قناة من القائمة\n` +
-                `**/محادثة-جديدة** — أعد تعيين محادثة قناة (اختر نوع الموديل والتفكير)\n\n` +
-                `## ⚙️ إعدادات (أدمن فقط)\n` +
-                `**/رتبة-التحكم** — حدد رتبة الإدارة\n` +
-                `**/الرتبة-الحالية** — عرض رتبة التحكم\n` +
-                `**/المزود** — عرض/تبديل مزود الذكاء الاصطناعي (DeepSeek / Qwen / OpenAI)\n` +
-                `**/اختبار-المزود** — اختبار اتصال حقيقي مع المزود الحالي\n` +
-                `**/مزود-باو** — تبديل مزود POW\n` +
-                `**/حساب-خاص** — قناة تحويل رسائل الخاص للحساب الحقيقي\n` +
-                `**/حساب-منشن** — قناة تحويل المنشن/الردود للحساب الحقيقي\n` +
-                `**/حساب-تسليمات** — قناة نقل نتائج وفوز الألعاب\n` +
-                `**/حساب-قناة-فعاليات** — قناة الفعاليات التلقائية\n` +
-                `**/حساب-رول-فعاليات** — رول منشن الفعاليات\n` +
-                `**/فعاليات-وضع** — تلقائي/يدوي للفعاليات\n` +
-                `**/ابدأ-فعالية** — بدء لعبة من قائمة الألعاب المحددة\n\n` +
-                `## 🧠 قدرات البوت\n` +
-                `**قراءة:** قنوات، رتب، أعضاء، رسائل، تدقيق، دعوات، بانات، إيموجيات، ملصقات، ثريدات، ويبهوكس، فعاليات، نيترو بوسترز، قائمة البوتات، معلومات عضو تفصيلية، فويس\n` +
-                `**إدارة:** إنشاء/حذف/تعديل قنوات ورتب، منح/سحب رتب، كيك/بان/فك بان، تايم آوت، تغيير نكنيم، صلاحيات قنوات **لعضو بعينه بدون رتبة** ✨، سلو مود، قفل/فتح قناة، ثريد، ويبهوك، تصويت (poll)، استنساخ سيرفر\n\n` +
-                `> **جديد:** صلاحيات القنوات تدعم الآن إضافة أعضاء بشكل مباشر بدون رتبة`;
-            await interaction.reply({ content: helpText });
+            const embeds = buildHelpEmbeds(botName);
+            await interaction.reply({ embeds, ephemeral: true }).catch(async () => {
+                await interaction.reply({ embeds });
+            });
         }
 
         else if (commandName === 'قناة-محادثة') {
@@ -828,8 +900,12 @@ client.on('messageCreate', async (message) => {
         `  كتب في             : #${message.channel.name}\n`
     );
 
-    // بناء سياق البوت
-    const botContext = await buildBotContext(client, message.guild, message.channel, agentId, allowed_channels_cache);
+    // بناء سياق البوت + 🧠 حقن ذكريات المستخدم تلقائياً
+    let botContext = await buildBotContext(client, message.guild, message.channel, agentId, allowed_channels_cache);
+    try {
+        const memCtx = await memory.buildMemoryContext({ agentId, guildId: message.guild.id, userId: author.id });
+        if (memCtx) botContext = `${botContext}\n\n${memCtx}`;
+    } catch (_) {}
 
     // جلسة القناة (per-channel)
     const chKey = `${message.guild.id}_${message.channel.id}`;
@@ -878,6 +954,7 @@ client.on('messageCreate', async (message) => {
             accessLevel,
             client,
             runtimeSettings,
+            { userId: author.id, username: author.username, channelId: message.channel.id },
         );
 
         // تحديث الجلسة في RAM و DB
@@ -985,6 +1062,7 @@ client.on('invalidated', () => {
         },
         stop: () => {
             intentionalStop = true;
+            try { client.__reminderEngine?.stop?.(); } catch (_) {} // ⏰ إيقاف محرك التذكيرات
             channel_sessions.clear();
             allowed_channels_cache.clear();
             client.removeAllListeners();

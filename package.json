@@ -1,20 +1,21 @@
 {
   "name": "disor-bot",
-  "version": "7.1.0",
-  "description": "Disor Bot v7.1 Ironclad — Multi-Provider AI Agent Platform (DeepSeek / Qwen / OpenAI-Compatible)",
+  "version": "7.2.0",
+  "description": "Disor Bot v7.2 Real Agent — Multi-Provider AI Agent Platform (DeepSeek / Qwen / OpenAI-Compatible + Web + Memory + Reminders + Fallback)",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
     "dev": "node bot.js",
     "update": "npm update",
-    "test": "node --check config.js && node --check discordAdapter.js && node --check managerDashboard.js && node --check agentRuntime.js && node --check bot.js && node --check utils.js && node --check providers/index.js && node --check providers/deepseek.js && node --check providers/qwen.js && node --check providers/openai.js && node --check tools/index.js && node --check tools/agent.js && node --check tools/systemPrompt.js && node --check tools/readTools.js && node --check tools/executeAction.js && node --check accountAgent.js"
+    "test": "node --check config.js && node --check discordAdapter.js && node --check managerDashboard.js && node --check agentRuntime.js && node --check bot.js && node --check utils.js && node --check memory.js && node --check reminders.js && node --check providers/index.js && node --check providers/deepseek.js && node --check providers/qwen.js && node --check providers/openai.js && node --check tools/index.js && node --check tools/agent.js && node --check tools/systemPrompt.js && node --check tools/webTools.js && node --check tools/readTools.js && node --check tools/executeAction.js && node --check accountAgent.js && node tests/e2e_create_flow.js && node tests/webTools.test.js && node tests/memory.test.js && node tests/reminders.test.js && node tests/fallback.test.js"
   },
   "dependencies": {
-    "discord.js": ">=14.0.0",
-    "mongodb": ">=5.0.0",
     "axios": ">=1.0.0",
+    "cheerio": "^1.2.0",
+    "discord.js": ">=14.0.0",
+    "discord.js-selfbot-v13": ">=3.6.1",
     "dotenv": ">=16.0.0",
-    "discord.js-selfbot-v13": ">=3.6.1"
+    "mongodb": ">=5.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

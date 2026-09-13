@@ -538,13 +538,20 @@ function isBotOwner(userId) {
  * @param {'owner'|'admin'|'member'} accessLevel
  * @returns {boolean}
  */
+// أدوات شخصية آمنة متاحة لـ member — محصورة بهوية المستخدم نفسه ولا تلمس السيرفر
+const MEMBER_SAFE_TOOLS = Object.freeze([
+    'web_search', 'read_url',                        // 🌐 ويب (قراءة فقط)
+    'remember', 'recall', 'forget_memory',           // 🧠 ذاكرته هو فقط
+    'set_reminder', 'list_reminders', 'cancel_reminder', // ⏰ تذكيراته هو فقط
+]);
+
 function toolAllowedForAccess(tool, accessLevel) {
     if (accessLevel === 'owner') return true;
     if (accessLevel === 'admin') {
         const adminBlocked = ['list_all_guilds', 'mass_dm', 'get_bot_list'];
         return !adminBlocked.includes(tool);
     }
-    return false; // member لا يستطيع استخدام أي أداة
+    return MEMBER_SAFE_TOOLS.includes(tool); // member: أدواته الشخصية الآمنة فقط
 }
 
 /**

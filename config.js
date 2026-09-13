@@ -75,6 +75,9 @@ let settings_col = null; // إعدادات السيرفر
 let channels_col = null; // القنوات المسموحة
 let agents_col   = null; // إعدادات الوكلاء
 let logs_col     = null; // سجلات الوكلاء
+let memories_col = null; // 🧠 الذاكرة طويلة المدى للوكلاء
+let reminders_col = null; // ⏰ تذكيرات الوكلاء
+let knowledge_col = null; // 📚 قاعدة المعرفة (المستوى 2)
 
 /**
  * يقوم بالاتصال بـ MongoDB وتهيئة المتغيرات
@@ -89,6 +92,9 @@ async function connectMongo() {
         channels_col = db.collection('allowed_channels');
         agents_col   = db.collection('agents');
         logs_col     = db.collection('agent_logs');
+        memories_col = db.collection('agent_memories');
+        reminders_col = db.collection('agent_reminders');
+        knowledge_col = db.collection('agent_knowledge');
         console.log('✅ MongoDB متصل بنجاح');
     } catch (err) {
         console.error('❌ فشل الاتصال بـ MongoDB:', err.message);
@@ -174,6 +180,9 @@ module.exports = {
     get channels_col() { return channels_col; },
     get agents_col()   { return agents_col; },
     get logs_col()     { return logs_col; },
+    get memories_col() { return memories_col; },
+    get reminders_col() { return reminders_col; },
+    get knowledge_col() { return knowledge_col; },
 
     // RAM Cache
     channel_sessions,

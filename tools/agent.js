@@ -20,7 +20,10 @@ const {
     toolAllowedForAccess, executeAllowedForAccess,
 } = require('../utils');
 
-const { getProviderOrFallback, extractProviderConfig } = require('../providers');
+const { getProviderOrFallback, extractProviderConfig, buildFallbackChain } = require('../providers');
+const webTools = require('./webTools');
+const memory   = require('../memory');
+const reminders = require('../reminders');
 
 const { buildSystem } = require('./systemPrompt');
 
@@ -170,15 +173,16 @@ async function runAgent(
     mode = 'default', thinking = false, accessLevel = 'member',
     client,
     runtime = {},
+    requester = {}, // {userId, username, channelId} — هوية طالب الطلب (للذاكرة والتذكيرات)
 ) {
     const system    = buildSystem(botName, mode, thinking, accessLevel, runtime.personality || '');
 
-    // ── نظام المزودين: تحديد مزود هذا الوكيل وإعداداته ──
-    // التوافق القديم: وكلاء بدون حقل provider يعاملون كـ DeepSeek (نفس السلوك الأصلي)
-    const provider     = getProviderOrFallback(runtime.provider);
-    const providerConf = (runtime.providerConfig && Object.keys(runtime.providerConfig).length)
-        ? runtime.providerConfig
-        : extractProviderConfig({ ...runtime, provider: provider.id });
+    // ── نظام المزودين + سلسلة Fallback ──
+    // [0] الأساسي دائماً — البدائل فقط عند تفعيل fallback وتوفر إعداداتها كاملة
+    const chain     = buildFallbackChain(runtime);
+    let chainIdx    = 0;
+    const provider     = chain[0].obj;
+    const providerConf = chain[0].config;
 
     let curSid      = sessionId;
     let curPmid     = parentMessageId;
@@ -191,26 +195,39 @@ async function runAgent(
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
     for (let step = 0; step < MAX_STEPS; step++) {
-        console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${provider.id} mode=${mode} thinking=${thinking} access=${accessLevel}`);
+        const activeProvider = chain[chainIdx];
+        console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${activeProvider.id}${chainIdx > 0 ? ' (fallback)' : ''} mode=${mode} thinking=${thinking} access=${accessLevel}`);
 
         let raw;
         try {
-            const aiResult = await provider.chat({
+            const aiResult = await activeProvider.obj.chat({
                 prompt           : curPrompt,
                 guildId,
                 sessionId        : curSid,
                 parentMessageId  : curPmid,
                 mode,
                 thinking,
-                config           : providerConf,
+                config           : activeProvider.config,
                 agentId          : runtime.agentId || 'default',
             });
             raw     = aiResult.fullText;
             curSid  = aiResult.sessionId;
             curPmid = aiResult.newParentMessageId;
         } catch (e) {
+            // ── Fallback تلقائي: جرّب المزود التالي في السلسلة ──
+            if (chainIdx < chain.length - 1) {
+                const failed = activeProvider;
+                chainIdx++;
+                const next = chain[chainIdx];
+                console.warn(`⚠️ [Fallback] فشل ${failed.obj.label} (${String(e.message).slice(0, 120)}) — التحويل إلى ${next.obj.label}`);
+                // جلسات كل مزود مستقلة — نبدأ جلسة جديدة لدى البديل
+                curSid  = null;
+                curPmid = null;
+                step--; // إعادة نفس الخطوة على البديل (لا تستهلك محاولة)
+                continue;
+            }
             return {
-                reply      : `⚠️ خطأ في الاتصال بالنموذج (${provider.label}): ${e.message}`,
+                reply      : `⚠️ خطأ في الاتصال بالنموذج (${activeProvider.label}): ${e.message}`,
                 newSid     : curSid,
                 newPmid    : curPmid,
                 filesToSend: [],
@@ -292,6 +309,12 @@ async function runAgent(
                 'server_blueprint', 'permission_audit', 'channel_activity', 'agent_config_audit',
                 // الأدوات الجديدة (مرفقات)
                 'get_server_icon', 'get_server_banner', 'send_image',
+                // 🌐 أدوات الويب — حواس خارج ديسكورد
+                'web_search', 'read_url',
+                // 🧠 الذاكرة طويلة المدى (مخصصة لمستخدم الطلب فقط)
+                'remember', 'recall', 'forget_memory',
+                // ⏰ التذكيرات (مخصصة لمستخدم الطلب فقط)
+                'set_reminder', 'list_reminders', 'cancel_reminder',
             ];
 
             if (readTools.includes(tool)) {
@@ -393,6 +416,130 @@ async function runAgent(
                             result = await toolChannelActivity(targetGuild, Number(params.limit_per_channel || 50)); break;
                         case 'agent_config_audit':
                             result = await toolAgentConfigAudit(targetGuild, runtime.agentId || 'default'); break;
+
+                        // ═══════════════════════════════════════════
+                        //  🌐 أدوات الويب — حقيقية عبر webTools
+                        // ═══════════════════════════════════════════
+                        case 'web_search': {
+                            const q = String(params.query || params.q || params.search || '').trim();
+                            if (!q) {
+                                result = _err('حدد استعلام البحث: {"query": "..."}');
+                            } else {
+                                const r = await webTools.webSearch({ query: q, count: Number(params.count || 8) });
+                                result = r.ok
+                                    ? { ok: true, provider: r.provider, count: r.results.length, results: r.results, note: r.note || (r.results.length ? 'استخدم read_url لقراءة أي نتيجة بالتفصيل' : '') }
+                                    : _err(r.error || 'فشل البحث');
+                            }
+                            break;
+                        }
+                        case 'read_url': {
+                            const u = String(params.url || params.link || '').trim();
+                            if (!u) {
+                                result = _err('حدد الرابط: {"url": "https://..."}');
+                            } else {
+                                const r = await webTools.readUrl({ url: u });
+                                result = r.ok
+                                    ? { ok: true, url: r.url, title: r.title || undefined, type: r.type, content: r.content, truncated: r.truncated || false }
+                                    : _err(r.error || 'فشل جلب الصفحة');
+                            }
+                            break;
+                        }
+
+                        // ═══════════════════════════════════════════
+                        //  🧠 الذاكرة — مخصصة لمستخدم الطلب نفسه
+                        // ═══════════════════════════════════════════
+                        case 'remember': {
+                            const content = String(params.content || params.text || params.fact || '').trim();
+                            if (!content) {
+                                result = _err('حدد ما تريد حفظه: {"content": "..."}');
+                            } else if (!requester.userId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم هنا');
+                            } else {
+                                result = await memory.rememberFact({
+                                    agentId : runtime.agentId || 'default',
+                                    guildId,
+                                    userId  : requester.userId,
+                                    content,
+                                    kind    : String(params.kind || 'fact'),
+                                    tags    : Array.isArray(params.tags) ? params.tags : [],
+                                });
+                            }
+                            break;
+                        }
+                        case 'recall': {
+                            if (!requester.userId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم هنا');
+                            } else {
+                                const r = await memory.recallFacts({
+                                    agentId : runtime.agentId || 'default',
+                                    userId  : requester.userId,
+                                    query   : String(params.query || params.q || ''),
+                                    limit   : Number(params.limit || 8),
+                                });
+                                result = r.ok
+                                    ? { ok: true, count: r.results.length, memories: r.results.map(m => ({ id: m.id, content: m.content, kind: m.kind })) }
+                                    : _err(r.error || 'فشل استدعاء الذكريات');
+                            }
+                            break;
+                        }
+                        case 'forget_memory': {
+                            if (!requester.userId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم هنا');
+                            } else {
+                                result = await memory.forgetFacts({
+                                    agentId : runtime.agentId || 'default',
+                                    userId  : requester.userId, // النسيان محصور بذكريات المستخدم نفسه — دائماً
+                                    id      : params.id ? String(params.id) : null,
+                                    query   : String(params.query || ''),
+                                    all     : Boolean(params.all),
+                                });
+                            }
+                            break;
+                        }
+
+                        // ═══════════════════════════════════════════
+                        //  ⏰ التذكيرات — مخصصة لمستخدم الطلب نفسه
+                        // ═══════════════════════════════════════════
+                        case 'set_reminder': {
+                            if (!requester.userId || !requester.channelId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم أو القناة هنا');
+                            } else {
+                                result = await reminders.createReminder({
+                                    agentId  : runtime.agentId || 'default',
+                                    guildId,
+                                    channelId: requester.channelId,
+                                    userId   : requester.userId,
+                                    username : requester.username || '',
+                                    text     : String(params.text || params.content || params.message || ''),
+                                    when     : {
+                                        in_minutes  : params.in_minutes ?? params.minutes ?? undefined,
+                                        at_iso      : params.at_iso ?? params.at ?? undefined,
+                                        daily_hhmm  : params.daily_hhmm ?? params.daily ?? undefined,
+                                        weekly_day  : params.weekly_day ?? params.weekday ?? undefined,
+                                        weekly_hhmm : params.weekly_hhmm ?? undefined,
+                                    },
+                                });
+                            }
+                            break;
+                        }
+                        case 'list_reminders': {
+                            if (!requester.userId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم هنا');
+                            } else {
+                                result = await reminders.listReminders({ agentId: runtime.agentId || 'default', userId: requester.userId });
+                            }
+                            break;
+                        }
+                        case 'cancel_reminder': {
+                            if (!requester.userId) {
+                                result = _err('لا يمكن تحديد هوية المستخدم هنا');
+                            } else if (!params.id) {
+                                result = _err('حدد معرف التذكير من list_reminders: {"id": "..."}');
+                            } else {
+                                result = await reminders.cancelReminder({ agentId: runtime.agentId || 'default', userId: requester.userId, id: String(params.id) });
+                            }
+                            break;
+                        }
                         // الأدوات الجديدة
                         case 'get_server_icon':
                         case 'get_server_banner':

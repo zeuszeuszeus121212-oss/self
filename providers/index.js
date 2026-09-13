@@ -82,6 +82,37 @@ function extractAllProviderConfigs(agentDoc) {
     return all;
 }
 
+/**
+ * بناء سلسلة Fallback للوكيل — الأساسي أولاً ثم البدائل الجاهزة بالترتيب.
+ * @param {object} runtime - runtimeSettings للوكيل:
+ *   { provider, providerConfig, fallback_enabled, fallback_chain, fallback_configs }
+ * @returns {Array<{id, obj, config}>} الأساسي دائماً موجود؛ البدائل فقط إن كانت مفعلة وصالحة
+ */
+function buildFallbackChain(runtime = {}) {
+    const primary = getProviderOrFallback(runtime.provider);
+    const primaryCfg = (runtime.providerConfig && Object.keys(runtime.providerConfig).length)
+        ? runtime.providerConfig
+        : extractProviderConfig({ ...runtime, provider: primary.id });
+
+    const chain = [{ id: primary.id, obj: primary, config: primaryCfg }];
+
+    if (!runtime.fallback_enabled) return chain;
+    const ids = Array.isArray(runtime.fallback_chain) ? runtime.fallback_chain : [];
+    const allCfg = runtime.fallback_configs || {};
+
+    for (const pid of ids) {
+        if (chain.length >= 4) break; // حد أقصى 4 مستويات — حماية من التأخير المتراكم
+        if (chain.some(c => c.id === String(pid))) continue;
+        const p = getProvider(pid);
+        if (!p) continue;
+        const cfg = allCfg[pid] || extractProviderConfig({ ...(runtime.fallback_agent_doc || {}), provider: pid });
+        // البديل يجب أن تكون إعداداته كاملة — وإلا تخطّاه بصمت
+        if (!p.validate(cfg).ok) continue;
+        chain.push({ id: p.id, obj: p, config: cfg });
+    }
+    return chain;
+}
+
 module.exports = {
     DEFAULT_PROVIDER,
     PROVIDERS,
@@ -91,4 +122,5 @@ module.exports = {
     listProviders,
     extractProviderConfig,
     extractAllProviderConfigs,
+    buildFallbackChain,
 };

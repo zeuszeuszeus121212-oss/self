@@ -336,7 +336,7 @@ async function generateAiReply({ client, runtime, sourceMessage, controlMessage,
     const botContext = guild ? await buildBotContext(client, guild, channel, runtime.agentId, runtime.allowed_channels_cache) : '[DM Context]';
     const key = `${runtime.agentId}:${guild?.id || 'dm'}:${channel.id}`;
     let cs = memory.get(key) || await db_load_channel_session(guild?.id || 'dm', channel.id, runtime.agentId) || { session_id: null, parent_message_id: null, mode: 'account', thinking: false };
-    const result = await runAgent(guild, channel, sourceMessage.content || '', userInfo, botContext, humanizeDisplayName(client.user.displayName || client.user.username), cs.session_id, cs.parent_message_id, guild?.id || 'dm', 'account', false, 'owner', client, runtime);
+    const result = await runAgent(guild, channel, sourceMessage.content || '', userInfo, botContext, humanizeDisplayName(client.user.displayName || client.user.username), cs.session_id, cs.parent_message_id, guild?.id || 'dm', 'account', false, 'owner', client, runtime, { userId: sourceMessage.author.id, username: sourceMessage.author.username, channelId: channel.id });
     cs = { ...cs, session_id: result.newSid, parent_message_id: result.newPmid };
     memory.set(key, cs);
     if (result.newSid) await db_save_channel_session(guild?.id || 'dm', channel.id, result.newSid, result.newPmid, 'account', false, runtime.agentId).catch(() => {});
