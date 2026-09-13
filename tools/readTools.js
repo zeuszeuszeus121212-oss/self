@@ -247,14 +247,19 @@ async function toolGetInvites(guild) {
 
 /** يجيب الإيموجيات */
 function toolGetEmojis(guild) {
-    const emojis = guild.emojis.cache.map(e => ({
-        id       : e.id,
-        name     : e.name,
-        animated : e.animated,
-        available: e.available,
-        url      : e.url,
-    }));
-    return { emojis, count: emojis.length };
+    // المالك طلب: عرض الإيموجيات المتاحة فعلاً فقط (غير المقفلة/المحذوفة) —
+    // الإيموجي بـ available=false سيفشل إرساله بسبب مستوى التعزيز، فلا يظهر أصلاً.
+    const emojis = guild.emojis.cache
+        .filter(e => e.available !== false && !e.deleted)
+        .map(e => ({
+            id       : e.id,
+            name     : e.name,
+            animated : e.animated,
+            available: e.available,
+            url      : e.url,
+        }));
+    const lockedCount = guild.emojis.cache.size - emojis.length;
+    return { emojis, count: emojis.length, locked_excluded: lockedCount > 0 ? lockedCount : undefined };
 }
 
 /** يجيب الملصقات */

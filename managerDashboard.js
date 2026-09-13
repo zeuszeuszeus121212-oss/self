@@ -202,6 +202,8 @@ async function updateManagerSettings(guildId, patch) {
 async function hasDashboardAccess(interaction) {
     const cfg = require('./config');
     if (String(interaction.user.id) === String(cfg.BOT_OWNER_ID)) return true;
+    // أدمن ديسكورد (صلاحية Administrator) دائماً مسموح — لا يشترط ضبط رتبة يدوياً.
+    if (interaction.member?.permissions?.has?.('Administrator')) return true;
     const settings = interaction.guildId ? await managerSettings(interaction.guildId).catch(() => null) : null;
     const roleId = settings?.admin_role_id;
     if (!roleId || !interaction.member?.roles) return false;

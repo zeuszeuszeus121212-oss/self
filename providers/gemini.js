@@ -276,7 +276,10 @@ async function sendPrompt({ cookies, cookieHeader, snlm0e, fdrfje, prompt, conv,
 const geminiProvider = {
     id       : 'gemini',
     label    : 'Gemini',
-    emoji    : '✦',
+    // ⚠️ يجب أن يكون إيموجي يونيكود قياسي من مجموعة Twemoji التي يقبلها ديسكورد.
+    // '✦' (U+2726) ليس ضمنها — كان يفشل بناء القوائم المنسدلة كاملة بخطأ
+    // options[N].emoji.name[COMPONENT_INVALID_EMOJI] عند الإنشاء وعند صفحة المزود باللوحة.
+    emoji    : '✨',
     description: 'Gemini عبر gemini.google.com بالكوكيز (وليس توكن) — جلسات حقيقية وتتبع محادثة وتحديث كوكيز تلقائي',
 
     modalFields: [

@@ -567,13 +567,17 @@ function findGuild(client, q) {
 // ══════════════════════════════════════════════════════════════
 
 /**
- * يحدد مستوى وصول العضو
- * @param {import('discord.js').GuildMember} member
+ * يحدد مستوى وصول العضو — محصّن ضد member=null/غير مخزّن (الخاص، رسائل النظام…)
+ * حتى لا ينهار مسار المحادثة الصامت على أي عضو. الكل يقدر يتكلم مع الوكيل؛
+ * المستوى يحدد الأدوات فقط (member = محادثة + أدواته الشخصية).
+ * @param {import('discord.js').GuildMember|null} member
  * @returns {'owner'|'admin'|'member'}
  */
 function getAccessLevel(member) {
-    if (BigInt(member.id) === BOT_OWNER_ID) return 'owner';
-    if (member.permissions.has('Administrator')) return 'admin';
+    try {
+        if (member && BigInt(member.id) === BOT_OWNER_ID) return 'owner';
+        if (member?.permissions?.has?.('Administrator')) return 'admin';
+    } catch (_) {}
     return 'member';
 }
 
@@ -620,7 +624,8 @@ function toolAllowedForAccess(tool, accessLevel) {
 function executeAllowedForAccess(action, accessLevel, params) {
     if (accessLevel === 'owner') return { allowed: true, reason: '' };
     if (accessLevel !== 'admin') {
-        return { allowed: false, reason: '⛔ هذه العملية تتطلب صلاحيات إدارية.' };
+        // رسالة محايدة للنموذج — لا تذكر صلاحيات أو منع نظام؛ الوكيل يرفض بأسلوبه هو
+        return { allowed: false, reason: 'هذه العملية غير متاحة في المحادثة العادية.' };
     }
     if (params.target_guild || params.source_guild) {
         return { allowed: false, reason: '⛔ الأدمن يستطيع التنفيذ داخل السيرفر الحالي فقط.' };
@@ -963,12 +968,17 @@ async function buildBotContext(client, guild, currentChannel = null, agent_id = 
     }
 
     // ── قسم إيموجيات السيرفر ─ـ
+    // المالك طلب: الوكيل يستخدم فقط الإيموجيات المتاحة فعلاً (غير المقفلة/المحذوفة).
+    // available === false يعني الإيموجي مفقود بسبب انخفاض مستوى التعزيز (boost) أو مقفل —
+    // إرساله سيفشل، فلا نعرضه للوكيل أصلاً.
     const emojiLines = [];
-    const allEmojis = [...guild.emojis.cache.values()].slice(0, 50);
+    const allEmojis = [...guild.emojis.cache.values()]
+        .filter(e => e.available !== false && !e.deleted)
+        .slice(0, 50);
     if (allEmojis.length > 0) {
         emojiLines.push('');
         emojiLines.push('  [إيموجيات السيرفر المتاحة لك]');
-        emojiLines.push('  (تستطيع استخدام هذه الإيموجيات في ردودك بكتابة <:اسم_الإيموجي:ID_الإيموجي>)');
+        emojiLines.push('  (إيموجيات متاحة ومفتوحة فقط — تستطيع استخدامها في ردودك بكتابة <:اسم_الإيموجي:ID_الإيموجي>)');
         for (const emoji of allEmojis) {
             const tag = emoji.animated
                 ? `<a:${emoji.name}:${emoji.id}>`
@@ -1038,6 +1048,35 @@ async function fetchTextAttachment(url, maxBytes = MAX_ATTACHMENT_BYTES) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Menu Emoji Safety — حماية القوائم المنسدلة من إيموجي غير صالح
+// ══════════════════════════════════════════════════════════════
+// ديسكورد يقبل في select menus فقط إيموجيات مجموعة Twemoji القياسية.
+// إيموجي خارجها (مثل ✦ U+2726) يُفشل بناء القائمة كاملة بخطأ:
+// "Invalid Form Body — options[N].emoji.name[COMPONENT_INVALID_EMOJI]".
+// القائمة البيضاء تشمل كل الإيموجيات المستخدمة فعلاً في القوائم بالمشروع —
+// أي إيموجي خارجها يُستبدل تلقائياً بالبديل بدل تحطيم الشاشة كلها.
+
+const MENU_SAFE_EMOJIS = Object.freeze(new Set([
+    // مزودو الذكاء الاصطناعي
+    '🐋', '🌐', '⚙️', '🔗', '✨',
+    // أيقونات اللوحة (ICONS)
+    '🧭', '👥', '➕', '🔔', '📜', '📊', '🖥️', '🟢', '⚫', '🔴', '🟡', '🔄', '🤖', '👤', '↩️',
+    // أزرار ومصادر مختلفة داخل القوائم
+    '❌', '✅', '✍️', '🗄️', '🧪', '🧠', '📎', '🍪', '🔓', '✏️', '🎫', '📁', '🚪', '📚',
+]));
+
+/**
+ * يرجع الإيموجي كما هو إذا كان آمناً للقوائم المنسدلة، وإلا البديل.
+ * @param {string} emoji
+ * @param {string} [fallback='🧠']
+ * @returns {string}
+ */
+function safeMenuEmoji(emoji, fallback = '🧠') {
+    const e = String(emoji || '').trim();
+    return MENU_SAFE_EMOJIS.has(e) ? e : String(fallback || '🧠');
+}
+
+// ══════════════════════════════════════════════════════════════
 //  Exports
 // ══════════════════════════════════════════════════════════════
 module.exports = {
@@ -1102,4 +1141,8 @@ module.exports = {
 
     // Bot Context
     buildBotContext,
+
+    // Menu Emoji Safety
+    MENU_SAFE_EMOJIS,
+    safeMenuEmoji,
 };

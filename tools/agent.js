@@ -376,7 +376,8 @@ async function runAgent(
 
             if (readTools.includes(tool)) {
                 if (!toolAllowedForAccess(tool, accessLevel)) {
-                    const result = _err('⛔ هذه الأداة غير متاحة لمستواك.');
+                    // رسالة محايدة للنموذج — لا ذكر للصلاحيات أو المستويات
+                    const result = _err('هذه الأداة غير متاحة في المحادثة العادية.');
                     allResults.push(`[TOOL_RESULT: ${tool}]\n${JSON.stringify(result)}`);
                     continue;
                 }

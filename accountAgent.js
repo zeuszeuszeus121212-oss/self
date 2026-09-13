@@ -291,15 +291,7 @@ async function updateAccountSettings(agentId, guildId, patch) {
     );
 }
 
-function startHumanTyping(channel, text) {
-    const length = String(text || '').length;
-    const delay = Math.min(12000, Math.max(800, length * 45));
-    let stopped = false;
-    const tick = () => { if (!stopped && channel?.sendTyping) channel.sendTyping().catch(() => {}); };
-    tick();
-    const timer = setInterval(tick, 7000);
-    return new Promise(resolve => setTimeout(() => { stopped = true; clearInterval(timer); resolve(); }, delay));
-}
+// ℹ️ مؤشر «يكتب...» البشري أُزيل بناءً على طلب المالك — الرد يتم مباشرة.
 
 async function forwardMessage(client, message, targetChannelId, kind) {
     const target = await client.channels.fetch(String(targetChannelId)).catch(() => null);
@@ -341,7 +333,6 @@ async function generateAiReply({ client, runtime, sourceMessage, controlMessage,
     memory.set(key, cs);
     if (result.newSid) await db_save_channel_session(guild?.id || 'dm', channel.id, result.newSid, result.newPmid, 'account', false, runtime.agentId).catch(() => {});
     const text = result.reply || 'تمام';
-    await startHumanTyping(channel, text);
     return replyMode === 'reply' ? sourceMessage.reply(text.slice(0, 2000)) : channel.send(text.slice(0, 2000));
 }
 
@@ -376,7 +367,6 @@ async function handleControlReply(client, message, runtime) {
     else {
         const text = raw.replace(/^!ai\s+!noreply\s*/i, '').replace(/^!noreply\s*/i, '').trim();
         if (!text) return true;
-        await startHumanTyping(sourceMessage.channel, text);
         if (noReply) await sourceMessage.channel.send(text.slice(0, 2000));
         else await sourceMessage.reply(text.slice(0, 2000));
     }
@@ -576,7 +566,6 @@ module.exports = {
     trackGameMessage,
     startEvent,
     runEventSeries,
-    startHumanTyping,
     rememberActivity,
     maybeAutoEvent,
     maybeScheduledEvent,

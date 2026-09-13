@@ -158,7 +158,7 @@ function buildHelpEmbeds(botName, extra = {}) {
             '**/قنوات-مسموحة** — القنوات النشطة حالياً\n' +
             '**/حذف-قناة** — أزل قناة من قائمتي\n\n' +
             '**🧠 الذكاء الاصطناعي**\n' +
-            '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI / ✦ Gemini)\n' +
+            '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI / ✨ Gemini)\n' +
             '**/اختبار-المزود** — اختبار اتصال حقيقي مع مزودي الحالي\n' +
             '**/مزود-باو** — إعدادات POW (خاص بـ DeepSeek فقط)\n\n' +
             '**⚙️ القدرات والميزات والإحصائيات**\n' +
@@ -337,20 +337,8 @@ function uniqueCommands(commands) {
     });
 }
 
-function startTypingLoop(channel) {
-    let stopped = false;
-    const sendTyping = () => {
-        if (!stopped && typeof channel?.sendTyping === 'function') {
-            channel.sendTyping().catch(() => {});
-        }
-    };
-    sendTyping();
-    const timer = setInterval(sendTyping, 8_000);
-    return () => {
-        stopped = true;
-        clearInterval(timer);
-    };
-}
+// ℹ️ مؤشر «يكتب...» (Typing) أُزيل بناءً على طلب المالك — الوكيل يرد مباشرة
+// بدون تظاهر بالكتابة.
 
 function resolveChannelValue(guild, value) {
     const raw = String(value || '').trim();
@@ -1241,8 +1229,6 @@ client.on('messageCreate', async (message) => {
         await message.reactions.cache.get('👀')?.users.remove(client.user.id).catch(() => {});
     } catch (_) {}
 
-    const stopTyping = startTypingLoop(message.channel);
-
     try {
         // 📊 تتبع الاستخدام — رسالة مستخدم مُعالجة
         usage.track(agentId, message.guild.id, 'message').catch(() => {});
@@ -1289,8 +1275,6 @@ client.on('messageCreate', async (message) => {
             );
         }
 
-        stopTyping();
-
         const replyText = result.reply || '✅ تم.';
         const chunks = [];
         for (let i = 0; i < replyText.length; i += 1990) {
@@ -1328,7 +1312,6 @@ client.on('messageCreate', async (message) => {
         } catch (_) {}
 
     } catch (error) {
-        stopTyping();
         console.error('[Agent Error]', error);
         try {
             await message.reply(`⚠️ خطأ غير متوقع: ${String(error.message || error).slice(0, 300)}`);

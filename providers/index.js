@@ -53,12 +53,13 @@ function isValidProvider(id) {
     return Boolean(getProvider(id));
 }
 
-/** كل المزودين — للقوائم المنسدلة */
+/** كل المزودين — للقوائم المنسدلة (الإيموجي مُصفّى بقائمة آمنة لحماية ديسكورد) */
 function listProviders() {
+    const { safeMenuEmoji } = require('../utils');
     return Object.values(PROVIDERS).map(p => ({
         id          : p.id,
         label       : p.label,
-        emoji       : p.emoji,
+        emoji       : safeMenuEmoji(p.emoji, '🧠'),
         description : p.description,
     }));
 }
