@@ -1,7 +1,7 @@
 /**
  * tests/features.test.js — اختبارات الميزات القابلة للتعطيل + الشخصية من ملف (المستوى 2A/2B)
  * ─────────────────────────────────────────────────────────────
- * يغطي: تعطيل web_search داخل حلقة الوكيل (النموذج يستدعي الأداة → النظام يرفضها
+ * يغطي: تعطيل read_url داخل حلقة الوكيل (النموذج يستدعي الأداة → النظام يرفضها
  * برسالة تعطيل)، بقاء الأداة عند التفعيل، قسم الويب في system prompt،
  * أدوات المعرفة للأدمن فقط، أدوات رفع الشخصية (تحليل/تحقق/تنظيف).
  */
@@ -32,7 +32,7 @@ const { runAgent } = require('../tools');
 const { buildSystem } = require('../tools/systemPrompt');
 const utils = require('../utils');
 
-// ── مزود وهمي: أول استدعاء يطلب web_search، ثم رد نهائي ──
+// ── مزود وهمي: أول استدعاء يطلب read_url، ثم رد نهائي ──
 let phase = 0;
 const fakeProvider = {
     id: 'fake_feat', label: 'وهمي الميزات', emoji: '🧪', description: 'w',
@@ -43,7 +43,7 @@ const fakeProvider = {
     async chat() {
         phase++;
         if (phase === 1) {
-            return { fullText: '```json\n{"tool":"web_search","params":{"query":"اختبار"}}\n```', sessionId: 's1', newParentMessageId: null };
+            return { fullText: '```json\n{"tool":"read_url","params":{"url":"https://example.com"}}\n```', sessionId: 's1', newParentMessageId: null };
         }
         if (phase === 2) {
             return { fullText: '```json\n{"tool":"read_url","params":{"url":"https://example.com"}}\n```', sessionId: 's1', newParentMessageId: null };
@@ -66,36 +66,42 @@ let passed = 0;
 const ok = (n) => { passed++; console.log(`✅ ${n}`); };
 
 async function run() {
-    // ── 1) web_search معطّل → النظام يرفض الاستدعاء برسالة تعطيل ──
+    // ── 1) read_url معطّل → النظام يرفض الاستدعاء برسالة تعطيل ──
     {
         phase = 0;
-        const runtime = { ...runtimeBase, features: { web_search: false } };
+        const runtime = { ...runtimeBase, features: { read_url: false } };
         const result = await runAgent(guildStub, channelStub, 'ابحث عن شيء',
             '[معلومات]', '[سياق]', 'Bot', null, null, 'g1',
             'default', false, 'owner', null, runtime, { userId: 'u1', username: 'x', channelId: 'c1' });
         assert.ok(result.reply.includes('رد نهائي'), 'الحلقة اكتملت حتى التعطيل');
-        ok('1) حلقة الوكيل تكتمل عند تعطيل web_search (بدون انهيار)');
+        ok('1) حلقة الوكيل تكتمل عند تعطيل read_url (بدون انهيار)');
     }
 
-    // ── 2) systemPrompt عند التعطيل: قسم الويب يتحول لقسم معطّل ──
+    // ── 2) systemPrompt عند التعطيل: قسم الروابط يتحول لقسم معطّل + البحث المدمج ──
     {
-        const off = buildSystem('Bot', 'default', false, 'owner', '', { web_search: false });
-        assert.ok(off.includes('أدوات الويب — معطّلة'));
-        assert.ok(off.includes('لا تستدعيهما أصلاً'));
-        assert.ok(!off.includes('بحث فعلي في الإنترنت'));
+        const off = buildSystem('Bot', 'default', false, 'owner', '', { read_url: false });
+        assert.ok(off.includes('قراءة الروابط — معطّلة'));
+        assert.ok(off.includes('لا تستدعِها أصلاً'));
+        assert.ok(!off.includes('read_url: [url, link]'));
         const on = buildSystem('Bot', 'default', false, 'owner', '', {});
-        assert.ok(on.includes('بحث فعلي في الإنترنت'));
-        assert.ok(!on.includes('أدوات الويب — معطّلة'));
-        ok('2) قسم الويب في system prompt يتغير حسب الميزة');
+        assert.ok(on.includes('read_url: [url, link]'));
+        assert.ok(on.includes('البحث في الإنترنت ليس من أدواتك'), 'البحث مسؤولية النموذج المدمج');
+        assert.ok(!on.includes('web_search'), 'لا أثر لـ web_search في البرومبت');
+        // البحث المدمج — قدرة النموذج
+        const searchOn = buildSystem('Bot', 'default', false, 'owner', '', {}, { search: true });
+        assert.ok(searchOn.includes('البحث المدمج في النموذج مفعّل'));
+        const searchOff = buildSystem('Bot', 'default', false, 'owner', '', {}, {});
+        assert.ok(!searchOff.includes('البحث المدمج في النموذج مفعّل'));
+        ok('2) قسم الروابط والبحث المدمج في system prompt يتغيران حسب الإعدادات');
     }
 
     // ── 3) سطر member يتحرك مع الميزة ──
     {
-        const memberOff = buildSystem('Bot', 'default', false, 'member', '', { web_search: false });
-        assert.ok(memberOff.includes('البحث الخارجي معطّل'));
-        assert.ok(!memberOff.includes('web_search وread_url وremember'));
+        const memberOff = buildSystem('Bot', 'default', false, 'member', '', { read_url: false });
+        assert.ok(memberOff.includes('قراءة الروابط معطّلة'));
+        assert.ok(!memberOff.includes('read_url وgenerate_image وremember'));
         const memberOn = buildSystem('Bot', 'default', false, 'member', '', {});
-        assert.ok(memberOn.includes('web_search وread_url وremember'));
+        assert.ok(memberOn.includes('read_url وgenerate_image وremember'));
         ok('3) قائمة أدوات member في الـ prompt تعكس التعطيل');
     }
 
@@ -109,14 +115,15 @@ async function run() {
         ok('4) أدوات المعرفة في الـ prompt للأدمن فقط');
     }
 
-    // ── 5) البحث/القراءة أدوات member آمنة؛ المعرفة ليست كذلك ──
+    // ── 5) القراءة/الصور أدوات member آمنة؛ المعرفة ليست كذلك؛ web_search محذوفة ──
     {
-        assert.strictEqual(utils.toolAllowedForAccess('web_search', 'member'), true);
+        assert.strictEqual(utils.toolAllowedForAccess('web_search', 'member'), false, 'web_search لم تعد أداة معتمدة');
         assert.strictEqual(utils.toolAllowedForAccess('read_url', 'member'), true);
+        assert.strictEqual(utils.toolAllowedForAccess('generate_image', 'member'), true);
         assert.strictEqual(utils.toolAllowedForAccess('search_knowledge', 'member'), false);
         assert.strictEqual(utils.toolAllowedForAccess('list_knowledge', 'member'), false);
         assert.strictEqual(utils.toolAllowedForAccess('search_knowledge', 'admin'), true);
-        ok('5) MEMBER_SAFE_TOOLS لا تشمل أدوات المعرفة');
+        ok('5) MEMBER_SAFE_TOOLS: read_url/generate_image داخلها، web_search محذوفة، المعرفة ليست');
     }
 
     // ── 6) parsePersonalityCommand: الأشكال المقبولة والمرفوضة ──
@@ -168,8 +175,11 @@ async function run() {
         const src = fs.readFileSync(path.join(__dirname, '..', 'agentRuntime.js'), 'utf8');
         assert.ok(src.includes(".setName('الميزات')"));
         assert.ok(src.includes(".setName('الاحصائيات')"));
-        assert.ok(src.includes('web_search : agentConfig.features?.web_search !== false'), 'توافق قديم: بلا إعداد = مفعّل');
-        ok('9) أوامر /الميزات و/الاحصائيات مسجلة + توافق قديم في runtimeSettings');
+        assert.ok(src.includes('read_url : agentConfig.features?.read_url !== false'), 'توافق قديم: بلا إعداد = مفعّل');
+        assert.ok(src.includes('thinking : agentConfig.capabilities?.thinking === true'), 'قدرات النموذج من الوثيقة');
+        assert.ok(src.includes('search   : agentConfig.capabilities?.search === true'), 'قدرة البحث المدمج من الوثيقة');
+        assert.ok(!src.includes("'web_search'"), 'لا أثر لأمر web_search في runtime');
+        ok('9) /الميزات و/الاحصائيات مسجلة + القدرات الجديدة في runtimeSettings');
     }
 
     console.log('\n════════════════════════════════');

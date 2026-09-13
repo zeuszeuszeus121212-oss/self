@@ -1,12 +1,14 @@
 /**
- * providers/qwen.js — Disor Bot v7.1 "Ironclad"
+ * providers/qwen.js — Disor Bot v7.4 "Nexus"
  * ═══════════════════════════════════════════════════════════
  * مزود Qwen — منفصل تماماً عن DeepSeek.
- * نقل حقيقي لمنطق qwen.py v10.0 (Universal AI Proxy) إلى JavaScript:
+ * نقل حقيقي ومنذم لـ qwen.py v10.0 (Universal AI Proxy) إلى JavaScript:
  *   • يتصل مباشرة بـ chat.qwen.ai/api/v2 (تطبيق Qwen للاندرويد)
  *   • جلسات حقيقية: chats/new + parent_id threading
  *   • Streaming مع كشف RateLimited / Antibot / الحظر
- *   • التفكير العميق (thinking) مدعوم عبر feature_config
+ *   • التفكير العميق (thinking) + البحث المدمج (auto_search) عبر feature_config
+ *   • رؤية الصور: رفع صور إلى Qwen OSS (getstsToken → multipart → complete)
+ *   • توليد الصور (t2i) — generateImage
  *   • يدعم تبديل النموذج (qwen_model) لكل وكيل
  * ═══════════════════════════════════════════════════════════
  */
@@ -140,7 +142,7 @@ async function createQwenChat(token, baseUrl = QWEN_BASE) {
 //  بناء الحمولة — مطابقة لـ _qwen_build_payload
 // ══════════════════════════════════════════════════════════════
 
-function buildQwenPayload(chatId, prompt, parentId, { thinking = false, modelId = DEFAULT_MODEL } = {}) {
+function buildQwenPayload(chatId, prompt, parentId, { thinking = false, modelId = DEFAULT_MODEL, autoSearch = false, chatType = 't2t', files = [], size = '1:1' } = {}) {
     const ts  = Math.floor(Date.now() / 1000);
     const fid = uuid();
     return {
@@ -153,7 +155,7 @@ function buildQwenPayload(chatId, prompt, parentId, { thinking = false, modelId 
         messages              : [{
             id        : null,
             fid       : fid,
-            chat_type : 't2t',
+            chat_type : chatType,
             content   : prompt,
             role      : 'user',
             feature_config : {
@@ -161,20 +163,20 @@ function buildQwenPayload(chatId, prompt, parentId, { thinking = false, modelId 
                 thinking_enabled : thinking,
                 thinking_format  : 'summary',
                 auto_thinking    : thinking,
-                auto_search      : false,
+                auto_search      : Boolean(autoSearch),
             },
             timestamp     : ts,
-            sub_chat_type : 't2t',
+            sub_chat_type : chatType,
             models        : [modelId],
             model         : '',
-            files         : [],
+            files,
             user_action   : 'chat',
-            extra         : { meta: { subChatType: 't2t' } },
+            extra         : { meta: { subChatType: chatType } },
             parentId      : parentId || '',
             parent_id     : parentId || '',
         }],
         timestamp               : ts,
-        size                    : '1:1',
+        size                    : size,
         share_id                : '',
         version                 : '2.1',
         origin_branch_message_id: '',
@@ -262,6 +264,141 @@ function stripQwen(text) {
         .trim();
 }
 
+// ═════════════════════════════════════════════════════════
+//  رفع الصور إلى Qwen OSS — من qwen.py/البروكسي v10
+//  (getstsToken → توقيع OSS → multipart upload → complete)
+// ═════════════════════════════════════════════════════════
+
+function ossSignature(secretKey, method, contentMd5, contentType, date, canonicalHeaders, canonicalResource) {
+    const stringToSign = `${method}\n${contentMd5}\n${contentType}\n${date}\n${canonicalHeaders}${canonicalResource}`;
+    return crypto.createHmac('sha1', secretKey).update(stringToSign, 'utf8').digest('base64');
+}
+
+function gmtNow() {
+    return new Date().toUTCString();
+}
+
+async function uploadImageToQwenOss(token, imageBuffer, filename, baseUrl = QWEN_BASE) {
+    filename = filename || `${uuid()}_IMG.jpg`;
+    const fileSize = String(imageBuffer.length);
+
+    // ── 1. STS token
+    const stsResp = await axios.post(
+        `${baseUrl}/files/getstsToken`,
+        { filename, filetype: 'image', filesize: fileSize },
+        {
+            headers: {
+                'User-Agent'   : UA_APP,
+                'Content-Type' : 'application/json',
+                'Authorization': `Bearer ${token}`,
+                'x-device-id'  : '0',
+                'source'       : 'app',
+                'x-request-id' : uuid(),
+                'Cookie'       : `x-ap=eu-central-1; token=${token}`,
+            },
+            timeout: 60_000,
+            validateStatus: () => true,
+        },
+    );
+    const res = stsResp.data || {};
+    if (!res.data) throw new Error(`Qwen OSS STS فشل: ${JSON.stringify(res).slice(0, 200)}`);
+    const sts = res.data;
+    const accessKeyId = sts.access_key_id;
+    const accessKeySecret = sts.access_key_secret;
+    const securityToken = sts.security_token;
+    const filePath = sts.file_path;
+    const fileId = sts.file_id;
+    const bucket = sts.bucketname;
+    const host = `${bucket}.${sts.endpoint}`;
+    const canonSecHeader = `x-oss-security-token:${securityToken}\n`;
+
+    const ossBaseHeaders = (method, contentMd5, contentType, canonResource, contentLength = '0') => {
+        const gmt = gmtNow();
+        const sig = ossSignature(accessKeySecret, method, contentMd5, contentType, gmt, canonSecHeader, canonResource);
+        return {
+            'Authorization'        : `OSS ${accessKeyId}:${sig}`,
+            'User-Agent'           : 'aliyun-sdk-android/2.9.21',
+            'Host'                 : host,
+            'x-oss-security-token' : securityToken,
+            'Date'                 : gmt,
+            'Content-Type'         : contentType,
+            'Content-Length'       : contentLength,
+        };
+    };
+
+    // ── 2. Initiate multipart upload
+    const initResp = await axios.post(`https://${host}/${filePath}?uploads`, null, {
+        headers: ossBaseHeaders('POST', '', 'image/jpeg', `/${bucket}/${filePath}?uploads`),
+        timeout: 60_000,
+        validateStatus: () => true,
+    });
+    const initText = String(initResp.data || '');
+    const uploadIdMatch = initText.match(/<UploadId>([^<]+)<\/UploadId>/);
+    if (!uploadIdMatch) throw new Error('Qwen OSS: لم أجد UploadId في رد البدء');
+    const uploadId = uploadIdMatch[1];
+
+    // ── 3. رفع الجزء الوحيد
+    const contentMd5 = crypto.createHash('md5').update(imageBuffer).digest('base64');
+    const partResp = await axios.put(
+        `https://${host}/${filePath}?uploadId=${encodeURIComponent(uploadId)}&partNumber=1`,
+        imageBuffer,
+        {
+            headers: {
+                ...ossBaseHeaders('PUT', contentMd5, 'image/jpeg', `/${bucket}/${filePath}?partNumber=1&uploadId=${encodeURIComponent(uploadId)}`, fileSize),
+                'Content-MD5': contentMd5,
+            },
+            timeout: 120_000,
+            validateStatus: () => true,
+        },
+    );
+    const etag = String(partResp.headers && partResp.headers.etag || '').replace(/"/g, '');
+
+    // ── 4. Complete multipart upload
+    const completeBody = `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${etag}</ETag></Part></CompleteMultipartUpload>`;
+    await axios.post(
+        `https://${host}/${filePath}?uploadId=${encodeURIComponent(uploadId)}`,
+        completeBody,
+        {
+            headers: ossBaseHeaders('POST', '', 'image/jpeg', `/${bucket}/${filePath}?uploadId=${encodeURIComponent(uploadId)}`, String(completeBody.length)),
+            timeout: 60_000,
+            validateStatus: () => true,
+        },
+    );
+
+    const signedUrl = sts.file_url || `https://${host}/${filePath}`;
+    return {
+        type: 'image',
+        file: { data: {}, filename, id: fileId, meta: { name: filename } },
+        id  : fileId,
+        filename,
+        name: filename,
+        url : signedUrl,
+        image_width : 1024,
+        image_height: 1024,
+    };
+}
+
+// ── نقطة حقن للاختبارات (تُستبدل دوال الشبكة دون تلمس السلوك) ──
+const internals = { uploadImage: uploadImageToQwenOss };
+
+/**
+ * استخراج كل روابط الصور من نص الرد (توليد الصور)
+ */
+function extractImageUrls(text) {
+    const out = [];
+    const re = /https?:\/\/[^\s"'<>\\]+/g;
+    const matches = String(text || '').match(re) || [];
+    for (const m of matches) {
+        const clean = m.replace(/[),.]+$/, '');
+        // نستبعد الفيديو صراحة (توليد الفيديو ت2v منفصل عن الصور)
+        if (/\.(mp4|mov|webm|avi)(\?|$)/i.test(clean)) continue;
+        if (/(\.png|\.jpe?g|\.webp|\.gif)(\?|$)/i.test(clean) || clean.includes('cdn.qwenlm.ai')) {
+            if (!out.includes(clean)) out.push(clean);
+        }
+    }
+    return out;
+}
+
 // ══════════════════════════════════════════════════════════════
 //  تعريف المزود — نفس عقد DeepSeek بالضبط
 // ══════════════════════════════════════════════════════════════
@@ -270,7 +407,7 @@ const qwenProvider = {
     id       : 'qwen',
     label    : 'Qwen',
     emoji    : '🌐',
-    description: 'Qwen عبر chat.qwen.ai (توكن حساب Qwen) — جلسات حقيقية وStreaming وThinking',
+    description: 'Qwen عبر chat.qwen.ai (توكن حساب Qwen) — جلسات حقيقية وStreaming وتفكير وبحث مدمج ورؤية وتوليد صور',
 
     /** حقول نوافذ الإنشاء/التعديل الخاصة بهذا المزود */
     modalFields: [
@@ -297,14 +434,36 @@ const qwenProvider = {
     /**
      * إرسال prompt والحصول على الرد — نفس عقد _stream_ds
      * @param {object} opts
+     * @param {Array}  opts.images - [{url, name}] صور مرفقة (رؤية النموذج — تُرفع OSS)
+     * @param {boolean} opts.search - البحث المدمج للنموذج (feature_config.auto_search)
      * @returns {Promise<{fullText: string, sessionId: string, newParentMessageId: string|null}>}
      */
-    async chat({ prompt, sessionId = null, parentMessageId = null, thinking = false, config = {}, agentId = 'default' }) {
+    async chat({ prompt, sessionId = null, parentMessageId = null, thinking = false, search = false, images = [], config = {}, agentId = 'default' }) {
         const token = config.qwen_token;
         if (!token) throw new Error('qwen_token مفقود لهذا الوكيل');
 
         const modelId = config.qwen_model || DEFAULT_MODEL;
         const baseUrl = resolveBaseUrl(config);
+
+        // 🖼️ رفع الصور إلى OSS (رؤية النموذج) — الفشل هنا لا يعطل الرد النصي
+        let files = [];
+        if (Array.isArray(images) && images.length) {
+            for (const img of images.slice(0, 4)) { // حد 4 صور لكل رسالة
+                try {
+                    const resp = await axios.get(img.url, {
+                        responseType: 'arraybuffer',
+                        timeout: 60_000,
+                        maxContentLength: 10 * 1024 * 1024,
+                        validateStatus: () => true,
+                    });
+                    if (resp.status !== 200) continue;
+                    const payload = await internals.uploadImage(token, Buffer.from(resp.data), img.name, baseUrl);
+                    files.push(payload);
+                } catch (e) {
+                    console.warn(`[Qwen] فشل رفع صورة (${img.name}): ${e.message}`);
+                }
+            }
+        }
 
         // جلسة Qwen الحقيقية: sessionId = qwen chat_id (يُخزن في نفس مكان جلسة DeepSeek)
         let chatId = sessionId && !String(sessionId).includes(':') ? String(sessionId) : null;
@@ -312,7 +471,12 @@ const qwenProvider = {
             chatId = await createQwenChat(token, baseUrl);
         }
 
-        const payload = buildQwenPayload(chatId, prompt, parentMessageId, { thinking, modelId });
+        const payload = buildQwenPayload(chatId, prompt, parentMessageId, {
+            thinking,
+            modelId,
+            autoSearch : Boolean(search), // 🔍 البحث المدمج — النموذج يبحث بواجهته
+            files,
+        });
         const { fullText, responseId } = await streamQwenChat(token, chatId, payload, baseUrl);
 
         const text = stripQwen(fullText);
@@ -323,6 +487,32 @@ const qwenProvider = {
             sessionId          : chatId,
             newParentMessageId : responseId || parentMessageId,
         };
+    },
+
+    /**
+     * 🎨 توليد صورة من وصف نصي (t2i) — من qwen.py/البروكسي v10
+     * @returns {Promise<{ok: boolean, urls: string[], error?: string}>}
+     */
+    async generateImage({ prompt, size = '1:1', config = {}, agentId = 'default' }) {
+        const token = config.qwen_token;
+        if (!token) throw new Error('qwen_token مفقود لهذا الوكيل');
+        const modelId = config.qwen_model || DEFAULT_MODEL;
+        const baseUrl = resolveBaseUrl(config);
+
+        const chatId = await createQwenChat(token, baseUrl);
+        const payload = buildQwenPayload(chatId, String(prompt || ''), null, {
+            thinking : false,
+            modelId,
+            chatType : 't2i',
+            size     : /^(1:1|16:9|9:16)$/.test(String(size)) ? String(size) : '1:1',
+        });
+        const { fullText } = await streamQwenChat(token, chatId, payload, baseUrl);
+
+        const urls = extractImageUrls(fullText);
+        if (!urls.length) {
+            return { ok: false, error: 'لم أجد رابط صورة في رد Qwen — قد يكون الوصف مرفوضاً أو الخدمة مشغولة', urls: [] };
+        }
+        return { ok: true, urls };
     },
 
     /** اختبار اتصال حقيقي — يُستخدم من أمر /المزود ولوحة التحكم */
@@ -336,3 +526,6 @@ const qwenProvider = {
 };
 
 module.exports = qwenProvider;
+module.exports.__internals = internals; // للاختبارات فقط
+module.exports.extractImageUrls = extractImageUrls;
+module.exports.buildQwenPayload = buildQwenPayload;

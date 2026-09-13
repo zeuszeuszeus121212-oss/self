@@ -594,7 +594,8 @@ function isBotOwner(userId) {
  */
 // أدوات شخصية آمنة متاحة لـ member — محصورة بهوية المستخدم نفسه ولا تلمس السيرفر
 const MEMBER_SAFE_TOOLS = Object.freeze([
-    'web_search', 'read_url',                        // 🌐 ويب (قراءة فقط)
+    'read_url',                                      // 🌐 قراءة الروابط فقط (البحث للنموذج نفسه)
+    'generate_image',                                // 🎨 توليد الصور
     'remember', 'recall', 'forget_memory',           // 🧠 ذاكرته هو فقط
     'set_reminder', 'list_reminders', 'cancel_reminder', // ⏰ تذكيراته هو فقط
 ]);
@@ -789,7 +790,7 @@ function _strip(text) {
  * @param {boolean} thinking
  * @returns {Promise<{fullText: string, sessionId: string, newParentMessageId: string|null}>}
  */
-async function _stream_ds(prompt, guildId, sessionId = null, parentMessageId = null, mode = 'default', thinking = false, deepseekToken = DEEPSEEK_TOKEN, agent_id = 'default') {
+async function _stream_ds(prompt, guildId, sessionId = null, parentMessageId = null, mode = 'default', thinking = false, deepseekToken = DEEPSEEK_TOKEN, agent_id = 'default', searchEnabled = false) {
     const token = deepseekToken;
     if (!token) throw new Error('DEEPSEEK_TOKEN not set');
 
@@ -805,7 +806,7 @@ async function _stream_ds(prompt, guildId, sessionId = null, parentMessageId = n
         prompt            : prompt,
         ref_file_ids      : [],
         thinking_enabled  : Boolean(thinking),
-        search_enabled    : false,
+        search_enabled    : Boolean(searchEnabled),
         model_type        : modelType,
         action            : null,
         preempt           : false,

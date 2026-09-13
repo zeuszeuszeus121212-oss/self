@@ -79,6 +79,7 @@ let memories_col = null; // 🧠 الذاكرة طويلة المدى للوكل
 let reminders_col = null; // ⏰ تذكيرات الوكلاء
 let knowledge_col = null; // 📚 قاعدة المعرفة (المستوى 2)
 let usage_col = null; // 📊 تتبع استخدام الوكلاء (المستوى 2)
+let providers_col = null; // 🗄️ المزودون المحفوظون (2.5 — إضافة مزود مرة واحدة واختياره عند إنشاء الوكلاء)
 
 /**
  * يقوم بالاتصال بـ MongoDB وتهيئة المتغيرات
@@ -97,6 +98,7 @@ async function connectMongo() {
         reminders_col = db.collection('agent_reminders');
         knowledge_col = db.collection('agent_knowledge');
         usage_col = db.collection('agent_usage');
+        providers_col = db.collection('ai_providers');
         console.log('✅ MongoDB متصل بنجاح');
     } catch (err) {
         console.error('❌ فشل الاتصال بـ MongoDB:', err.message);
@@ -186,6 +188,7 @@ module.exports = {
     get reminders_col() { return reminders_col; },
     get knowledge_col() { return knowledge_col; },
     get usage_col() { return usage_col; },
+    get providers_col() { return providers_col; },
 
     // RAM Cache
     channel_sessions,

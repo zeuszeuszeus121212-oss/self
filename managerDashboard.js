@@ -24,12 +24,22 @@ const secrets = require('./secrets');
 const knowledge = require('./knowledge');
 const usage = require('./usage');
 const proactive = require('./proactive');
-const { is_text_attachment, fetchTextAttachment } = require('./utils');
+const { is_text_attachment, fetchTextAttachment, clampPersonalityText, PERSONALITY_MAX_CHARS } = require('./utils');
 
 // 📚 حالة رفع ملفات المعرفة: `${guildId}:${userId}` → { agentId, expiresAt }
 const pendingKnowledgeUploads = new Map();
 const KNOWLEDGE_UPLOAD_WINDOW_MS = 3 * 60 * 1000;
 const KNOWLEDGE_MAX_FILE_BYTES = 1_000_000;
+
+// 📎 حالة رفع الشخصية من ملف (2.5-G): زر ينتظرك → أرسل الملف → يصبح هو الشخصية
+// `${guildId}:${userId}` → { agentId, expiresAt }
+const pendingPersonalityUploads = new Map();
+const PERSONALITY_UPLOAD_WINDOW_MS = 3 * 60 * 1000;
+const PERSONALITY_MAX_FILE_BYTES = 1_000_000;
+
+// 🗄️ مسودات إضافة مزود (2.5-E): `${guildId}:${userId}` → { name, base_url, api_key, models, from_db }
+const pendingProviderDrafts = new Map();
+const PROVIDER_DRAFT_TTL_MS = 15 * 60 * 1000;
 
 /** تسميات عربية لحقول الأسرار — لأزرار الكشف */
 const SECRET_LABELS = Object.freeze({
@@ -37,6 +47,7 @@ const SECRET_LABELS = Object.freeze({
     deepseek_token: 'توكن DeepSeek',
     qwen_token    : 'توكن Qwen',
     openai_api_key: 'مفتاح OpenAI',
+    gemini_cookies: 'كوكيز Gemini',
 });
 
 const COLORS = Object.freeze({
@@ -65,6 +76,8 @@ const DASHBOARD_COMMAND_ROUTES = Object.freeze({
     'الاحصائيات': 'stats',
     'النظام': 'system',
     'تشغيل-يدوي': 'manual_run',
+    'المزودون': 'providers',
+    'اضافة-مزود': 'prov_add_cmd',
 });
 
 // ---------- حالة بناء الجدولة ----------
@@ -98,6 +111,8 @@ function dashboardCommands() {
                         { name: 'مع كردت', value: 'credits' },
                         { name: 'بدون كردت', value: 'no_credits' }
                     )),
+        new SlashCommandBuilder().setName('المزودون').setDescription('🗄️ عرض المزودين المحفوظين في قاعدة البيانات (OpenAI-Compatible والبروكسيات)'),
+        new SlashCommandBuilder().setName('اضافة-مزود').setDescription('➕ معالج تفاعلي لإضافة مزود جديد (base_url + مفتاح + نماذجه) وحفظه في قاعدة البيانات'),
     ];
 }
 
@@ -419,6 +434,80 @@ function createAgentModal(type, providerId = 'deepseek') {
     return modal;
 }
 
+/**
+ * 🗄️ الخطوة 3: مصدر بيانات OpenAI-Compatible — مزود محفوظ من قاعدة البيانات أو إدخال يدوي
+ */
+function renderCreateOpenAiSource(type, savedProviders) {
+    const emb = embed('➕ إنشاء وكيل — OpenAI-Compatible', linesBlock([
+        '**اختر مزوداً محفوظاً من قاعدة البيانات** — تُنسخ بياناته (base_url + المفتاح) للوكيل تلقائياً.',
+        'أو اختر **إدخال يدوي** لكتابة البيانات مباشرة كما كان.',
+        '',
+        `المزودون المحفوظون: **${savedProviders.length}**`,
+        ...savedProviders.slice(0, 10).map(p => `• ${p.name} — \`${p.base_url}\``),
+        '',
+        `نوع الوكيل: **${type === 'user' ? 'User Account' : 'Bot Token'}**`,
+    ]), COLORS.success);
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:create_openai_source:${type}`)
+            .setPlaceholder('اختر مزوداً محفوظاً أو إدخالاً يدوياً')
+            .addOptions([
+                ...savedProviders.slice(0, 24).map(p => ({
+                    label: `🗄️ ${p.name}`.slice(0, 100),
+                    value: String(p._id),
+                    description: `${p.base_url} — ${Array.isArray(p.models) ? p.models.length : 0} نموذج`.slice(0, 100),
+                    emoji: '🗄️',
+                })),
+                { label: '✍️ إدخال يدوي', value: 'manual', description: 'كتابة base_url والمفتاح والنموذج يدوياً', emoji: '✍️' },
+            ]),
+    );
+    return { embeds: [emb], components: [row, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:create`, 'رجوع', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+    ])] };
+}
+
+/**
+ * 🗄️ الخطوة 4: اختيار النموذج من نماذج المزود المحفوظ
+ */
+function renderCreateOpenAiModel(type, doc, models) {
+    const emb = embed(`➕ إنشاء وكيل — «${doc.name}»`, linesBlock([
+        `**Base URL:** \`${doc.base_url}\` (سيُنسخ تلقائياً)`,
+        '**اختر نموذج الوكيل من نماذج هذا المزود:**',
+    ]), COLORS.success);
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:create_openai_model:${type}:${doc._id}`)
+            .setPlaceholder('اختر النموذج')
+            .addOptions(models.slice(0, 25).map(m => ({
+                label: String(m).slice(0, 100),
+                value: String(m),
+            }))),
+    );
+    return { embeds: [emb], components: [row, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:create`, 'رجوع', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+    ])] };
+}
+
+/**
+ * 🗄️ نافذة إنشاء وكيل من مزود محفوظ — base_url جاهز والنموذج مُحدد مسبقاً،
+ * المفتاح لا يُطلب (يُنسخ من قاعدة البيانات عند الحفظ) إلا إن أُدخل بديل.
+ */
+function createAgentModalFromDb(type, providerDocId, model = '') {
+    const modal = new ModalBuilder()
+        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:openai:${providerDocId}`)
+        .setTitle(trim('إنشاء وكيل — مزود محفوظ', 45));
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel(type === 'user' ? 'User Token' : 'Discord Bot Token').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('openai_model').setLabel('النموذج (مُحدد مسبقاً — يمكنك تغييره)').setStyle(TextInputStyle.Short).setRequired(false).setValue(safeModalValue(model, 100))),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('openai_api_key').setLabel('مفتاح بديل (فارغ = مفتاح المزود المحفوظ)').setStyle(TextInputStyle.Short).setRequired(false)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية / Personality').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500)),
+    );
+    return modal;
+}
+
 function safeModalValue(value, max) {
     return String(value || '').slice(0, max);
 }
@@ -466,6 +555,7 @@ function editAgentModal(agent) {
         openai_base_url: safeModalValue(agent.openai_base_url, 300),
         openai_api_key : '',
         openai_model   : safeModalValue(agent.openai_model, 100),
+        gemini_cookies : '',
     };
     for (const field of providerObj.modalFields.slice(0, 3)) {
         modal.addComponents(new ActionRowBuilder().addComponents(
@@ -597,6 +687,145 @@ async function updateInteraction(interaction, payload) {
     if (interaction.isChatInputCommand()) return interaction.reply(payload);
     if (interaction.isStringSelectMenu() || interaction.isButton() || interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu()) return interaction.update(payload);
     return interaction.reply(payload);
+}
+
+// ═════════════════════════════════════════════════════════
+//  🗄️ قاعدة المزودين المحفوظين (2.5-E/F) — إضافة تفاعلية + عرض + حذف
+//  المزود المحفوظ = OpenAI-Compatible (أو بروكسي) تُختار منه بياناته
+//  مباشرة عند إنشاء وكلاء جدد بدل كتابتها يدوياً كل مرة.
+// ═════════════════════════════════════════════════════════
+
+/** قراءة كل المزودين المحفوظين — آمن بلا DB */
+async function listSavedProviders() {
+    const cfg = require('./config');
+    if (!cfg.providers_col) return [];
+    try {
+        const docs = await cfg.providers_col.find({}).sort({ created_at: -1 }).limit(25).toArray();
+        // فك المفتاح للاستخدام الداخلي (لا يُعرض خاماً أبداً في الواجهات)
+        return docs.map(d => ({ ...d, api_key_plain: d.api_key ? (secrets.decryptSecret(d.api_key) || '') : '' }));
+    } catch (_) {
+        return [];
+    }
+}
+
+async function renderProviders(notice = null) {
+    const providers = await listSavedProviders();
+    const emb = embed('🗄️ المزودون المحفوظون', linesBlock([
+        '**مزودات OpenAI-Compatible والبروكسيات المحفوظة في قاعدة البيانات.**',
+        'عند إنشاء وكيل جديد واختيار «OpenAI-Compatible» تُختار بياناته من هنا مباشرة — بدون كتابة base_url ومفتاح كل مرة.',
+        '',
+        ...(providers.length
+            ? providers.map(p => {
+                const masked = p.api_key ? secrets.maskSecret(p.api_key_plain || '') : '—';
+                return `• **${p.name}** — \`${p.base_url}\`\n  ↳ النماذج: ${Array.isArray(p.models) && p.models.length ? p.models.slice(0, 5).join('، ') + (p.models.length > 5 ? ` +${p.models.length - 5}` : '') : '—'} | المفتاح: ${masked}`;
+            })
+            : ['لا يوجد مزودون محفوظون بعد — استخدم «إضافة مزود».']),
+        '',
+        '💡 البروكسي الخاص بك (مثل Universal AI Proxy): أضفه هنا بـ base_url مثل `http://host:8000/v1` والمفتاح = توكن المزود داخله، ونماذجه مثل qwen / deepseek / gemini.',
+        notice ? `\n${notice}` : null,
+    ]), COLORS.info);
+
+    const components = [];
+    if (providers.length) {
+        components.push(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`${DASH_PREFIX}:prov_delete`)
+                .setPlaceholder('اختر مزوداً لحذفه')
+                .addOptions(providers.slice(0, 25).map(p => ({
+                    label: `🗑️ ${p.name}`.slice(0, 100),
+                    value: String(p._id),
+                    description: String(p.base_url || '').slice(0, 100),
+                }))),
+        ));
+    }
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:prov_add`, '➕ إضافة مزود', ButtonStyle.Success, ICONS.add),
+        button(`${DASH_PREFIX}:home`, 'عودة للوحة', ButtonStyle.Secondary, ICONS.back),
+    ]));
+    return { embeds: [emb], components };
+}
+
+/** نافذة إضافة مزود — الخطوة 1 من المعالج التفاعلي */
+function providerAddModal() {
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:prov_add_modal`).setTitle(trim('إضافة مزود جديد', 45));
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم المزود (مثل: بروكسي الرئيسي)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_url').setLabel('Base URL (مثل http://host:8000/v1)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('api_key').setLabel('API Key / Token (اختياري)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(300)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('models').setLabel('النماذج مفصولة بفاصلة (اتركه فارغاً لجلبها تلقائياً)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
+    );
+    return modal;
+}
+
+/** جلب النماذج من /models — يعيد {ok, models[], error} */
+async function fetchProviderModels(baseUrl, apiKey) {
+    try {
+        const axios = require('axios');
+        const url = `${String(baseUrl).replace(/\/+$/, '')}/models`;
+        const resp = await axios.get(url, {
+            headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+            timeout: 15_000,
+            validateStatus: () => true,
+        });
+        if (resp.status !== 200) {
+            return { ok: false, error: `HTTP ${resp.status} من ${url}` };
+        }
+        const ids = Array.isArray(resp.data?.data)
+            ? resp.data.data.map(m => String(m?.id || m?.name || '')).filter(Boolean)
+            : [];
+        return { ok: true, models: ids.slice(0, 25) };
+    } catch (e) {
+        return { ok: false, error: String(e.message || e).slice(0, 150) };
+    }
+}
+
+/** حفظ مزود في قاعدة البيانات — المفتاح يُشفّر دائماً */
+async function saveProviderToDb({ name, base_url, api_key, models, userId }) {
+    const cfg = require('./config');
+    if (!cfg.providers_col) throw new Error('قاعدة البيانات غير متصلة');
+    const doc = {
+        name: String(name).trim().slice(0, 60),
+        base_url: String(base_url).trim().replace(/\/+$/, ''),
+        api_key: api_key ? secrets.encryptSecret(String(api_key)) : '',
+        models: (Array.isArray(models) ? models : []).map(String).slice(0, 50),
+        created_by: userId ? String(userId) : null,
+        created_at: new Date(),
+    };
+    const r = await cfg.providers_col.insertOne(doc);
+    return r.insertedId;
+}
+
+/** الخطوة 2: عرض النماذج المكتشفة للاختيار (أو حفظ كما هو) */
+function renderProviderModelsStep(interaction, draft, fetchNote) {
+    const emb = embed(`🗄️ إضافة مزود — «${draft.name}»`, linesBlock([
+        `**Base URL:** \`${draft.base_url}\``,
+        `**المفتاح:** ${draft.api_key ? secrets.maskSecret(draft.api_key) : '— (بلا مفتاح)'}`,
+        '',
+        fetchNote,
+        draft.models.length
+            ? '**اختر النماذج التي تريد إبقاءها من القائمة (اختيار متعدد):**'
+            : 'لم تُكتشف نماذج تلقائياً — يمكنك الحفظ بدون نماذج وإدخالها يدوياً لاحقاً.',
+    ]), COLORS.success);
+
+    const components = [];
+    if (draft.models.length) {
+        components.push(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`${DASH_PREFIX}:prov_models`)
+                .setPlaceholder('اختر نماذج المزود (اختيار متعدد)')
+                .setMinValues(1)
+                .setMaxValues(Math.min(draft.models.length, 25))
+                .addOptions(draft.models.slice(0, 25).map(m => ({
+                    label: String(m).slice(0, 100),
+                    value: String(m),
+                }))),
+        ));
+    }
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:prov_save_anyway`, 'حفظ كما هو', ButtonStyle.Success, '💾'),
+        button(`${DASH_PREFIX}:providers`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+    ]));
+    return { embeds: [emb], components };
 }
 
 // ---------- واجهة بناء الجدولة ----------
@@ -839,6 +1068,14 @@ async function handleDashboardInteraction(interaction, manager) {
     }
 
     if (commandOk) {
+        if (commandRoute === 'prov_add_cmd') {
+            // /اضافة-مزود — فتح معالج الإضافة مباشرة
+            await interaction.showModal(providerAddModal());
+            return true;
+        }
+        if (commandRoute === 'providers') {
+            return updateInteraction(interaction, await renderProviders());
+        }
         if (commandRoute === 'manual_run') {
             const cfg = require('./config');
             const count = interaction.options.getInteger('count', true);
@@ -954,9 +1191,148 @@ async function handleDashboardInteraction(interaction, manager) {
         // ⚠️ المزود المختار يأتي من قيم القائمة المنسدلة (interaction.values[0])
         // وليس من customId — customId يحمل نوع الوكيل فقط (dash:create_provider:<type>)
         const selectedProviderId = (Array.isArray(interaction.values) && interaction.values[0]) || 'deepseek';
+
+        // 🗄️ OpenAI-Compatible: إن وُجد مزودون محفوظون في قاعدة البيانات نعرض
+        // خطوة اختيار منهم (بدل كتابة البيانات يدوياً) — 2.5-F
+        if (selectedProviderId === 'openai') {
+            const saved = await listSavedProviders();
+            if (saved.length) {
+                return updateInteraction(interaction, renderCreateOpenAiSource(type, saved));
+            }
+            // لا يوجد محفوظون → الإدخال اليدوي كما كان
+            await interaction.showModal(createAgentModal(type, 'openai'));
+            return true;
+        }
+
         await interaction.showModal(createAgentModal(type, selectedProviderId));
         return true;
     }
+
+    // ── 🗄️ الخطوة 3: اختيار مزود محفوظ أو إدخال يدوي (OpenAI-Compatible) ──
+    if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_openai_source:`)) {
+        const type = parts[2] === 'user' ? 'user' : 'bot';
+        const chosen = String(interaction.values[0] || '');
+        if (chosen === 'manual') {
+            await interaction.showModal(createAgentModal(type, 'openai'));
+            return true;
+        }
+        const cfg = require('./config');
+        const doc = cfg.providers_col ? await cfg.providers_col.findOne({ _id: new ObjectId(chosen) }).catch(() => null) : null;
+        if (!doc) {
+            return updateInteraction(interaction, await renderProviders('❌ المزود المحفوظ المختار لم يعد موجوداً.'));
+        }
+        const models = Array.isArray(doc.models) ? doc.models.filter(Boolean) : [];
+        if (!models.length) {
+            // بلا نماذج محفوظة → نافذة الإنشاء مع base_url جاهز والنموذج يُكتب يدوياً
+            await interaction.showModal(createAgentModalFromDb(type, String(doc._id), ''));
+            return true;
+        }
+        return updateInteraction(interaction, renderCreateOpenAiModel(type, doc, models));
+    }
+
+    // ── 🗄️ الخطوة 4: اختيار النموذج من نماذج المزود المحفوظ ──
+    if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_openai_model:`)) {
+        const type = parts[2] === 'user' ? 'user' : 'bot';
+        const docId = parts[3];
+        const model = String(interaction.values[0] || '');
+        await interaction.showModal(createAgentModalFromDb(type, docId, model));
+        return true;
+    }
+
+    // ── 🗄️ معالج إضافة مزود (الخطوة 1: النافذة → الخطوة 2: النماذج) ──
+    if (interaction.isModalSubmit() && id === `${DASH_PREFIX}:prov_add_modal`) {
+        const name = interaction.fields.getTextInputValue('name').trim();
+        const baseUrl = interaction.fields.getTextInputValue('base_url').trim().replace(/\/+$/, '');
+        const apiKey = String(interaction.fields.getTextInputValue('api_key') || '').trim();
+        const modelsRaw = String(interaction.fields.getTextInputValue('models') || '').trim();
+
+        if (!/^https?:\/\//i.test(baseUrl)) {
+            return updateInteraction(interaction, await renderProviders('❌ Base URL يجب أن يبدأ بـ http:// أو https://'));
+        }
+
+        let models = modelsRaw
+            ? modelsRaw.split(/[،,\n]/).map(x => x.trim()).filter(Boolean).slice(0, 25)
+            : [];
+        let fetchNote = models.length
+            ? 'تم استخدام النماذج التي أدخلتها يدوياً.'
+            : null;
+
+        // لم تُدخل النماذج يدوياً؟ نجرب الجلب التلقائي من /models (خطوة تفاعلية حقيقية)
+        if (!models.length) {
+            const fetched = await fetchProviderModels(baseUrl, apiKey);
+            if (fetched.ok && fetched.models.length) {
+                models = fetched.models;
+                fetchNote = `✅ تم اكتشاف **${models.length}** نموذجاً من \'/models\' تلقائياً — اختر ما تريد إبقاءه أو احفظ كما هو.`;
+            } else {
+                fetchNote = `⚠️ تعذر جلب النماذج تلقائياً${fetched.error ? ` (${fetched.error})` : ''} — يمكنك الحفظ كما هو وإدخال النماذج يدوياً لاحقاً.`;
+            }
+        }
+
+        // تنظيف المسودات المنتهية
+        for (const [k, v] of pendingProviderDrafts) {
+            if (Date.now() > v.expiresAt) pendingProviderDrafts.delete(k);
+        }
+        const key = `${interaction.guildId}:${interaction.user.id}`;
+        pendingProviderDrafts.set(key, {
+            name, base_url: baseUrl, api_key: apiKey, models,
+            expiresAt: Date.now() + PROVIDER_DRAFT_TTL_MS,
+        });
+
+        return updateInteraction(interaction, renderProviderModelsStep(interaction, { name, base_url: baseUrl, api_key: apiKey, models }, fetchNote));
+    }
+
+    // ── 🗄️ حفظ المزود بعد اختيار النماذج ──
+    if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:prov_models`) {
+        const key = `${interaction.guildId}:${interaction.user.id}`;
+        const draft = pendingProviderDrafts.get(key);
+        if (!draft) return updateInteraction(interaction, await renderProviders('⚠️ انتهت صلاحية مسودة الإضافة — أعد المحاولة.'));
+        const chosen = Array.isArray(interaction.values) ? interaction.values : [];
+        try {
+            await saveProviderToDb({ name: draft.name, base_url: draft.base_url, api_key: draft.api_key, models: chosen, userId: interaction.user.id });
+        } catch (e) {
+            return updateInteraction(interaction, await renderProviders(`❌ فشل الحفظ: ${e.message}`));
+        }
+        pendingProviderDrafts.delete(key);
+        return updateInteraction(interaction, await renderProviders(`✅ تم حفظ المزود «${draft.name}» بـ ${chosen.length} نموذجاً — ستجده الآن عند إنشاء وكيل جديد (OpenAI-Compatible).`));
+    }
+
+    // ── 🗄️ حفظ المزود كما هو (بلا اختيار نماذج) ──
+    if (id === `${DASH_PREFIX}:prov_save_anyway`) {
+        const key = `${interaction.guildId}:${interaction.user.id}`;
+        const draft = pendingProviderDrafts.get(key);
+        if (!draft) return updateInteraction(interaction, await renderProviders('⚠️ انتهت صلاحية مسودة الإضافة — أعد المحاولة.'));
+        try {
+            await saveProviderToDb({ name: draft.name, base_url: draft.base_url, api_key: draft.api_key, models: draft.models, userId: interaction.user.id });
+        } catch (e) {
+            return updateInteraction(interaction, await renderProviders(`❌ فشل الحفظ: ${e.message}`));
+        }
+        pendingProviderDrafts.delete(key);
+        return updateInteraction(interaction, await renderProviders(`✅ تم حفظ المزود «${draft.name}» — ستجده الآن عند إنشاء وكيل جديد (OpenAI-Compatible).`));
+    }
+
+    // ── 🗄️ حذف مزود محفوظ ──
+    if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:prov_delete`) {
+        const docId = String(interaction.values[0] || '');
+        const cfg = require('./config');
+        const doc = cfg.providers_col ? await cfg.providers_col.findOne({ _id: new ObjectId(docId) }).catch(() => null) : null;
+        if (!doc) return updateInteraction(interaction, await renderProviders('❌ المزود غير موجود.'));
+        const emb = embed('⚠️ تأكيد حذف المزود', linesBlock([
+            `**${doc.name}** — \`${doc.base_url}\``,
+            '',
+            'لن يُحذف أي وكيل — لكن الوكلاء الذين يستخدمون بياناته لن يتأثرون إطلاقاً (بياناتهم منسوخة عندهم).',
+        ]), COLORS.warning);
+        return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            button(`${DASH_PREFIX}:prov_delete_confirm:${docId}`, 'تأكيد الحذف', ButtonStyle.Danger, '🗑️'),
+            button(`${DASH_PREFIX}:providers`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+        ]) });
+    }
+    if (id.startsWith(`${DASH_PREFIX}:prov_delete_confirm:`)) {
+        const docId = parts[2];
+        const cfg = require('./config');
+        try { if (cfg.providers_col) await cfg.providers_col.deleteOne({ _id: new ObjectId(docId) }); } catch (_) {}
+        return updateInteraction(interaction, await renderProviders('🗑️ تم حذف المزود المحفوظ.'));
+    }
+
     if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:agent_select`) {
         await interaction.update(await renderAgent(manager, interaction.values[0]));
         return true;
@@ -973,9 +1349,10 @@ async function handleDashboardInteraction(interaction, manager) {
     }
 
     if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:create_modal:`)) {
-        // الصيغة: dash:create_modal:<type>:<provider> — التوافق القديم: بدون مزود = deepseek
+        // الصيغة: dash:create_modal:<type>:<provider> — أو مع مزود محفوظ: dash:create_modal:<type>:openai:<providerDocId>
         const type = parts[2] === 'user' ? 'user' : 'bot';
         const providerObj = getProviderOrFallback(parts[3] || 'deepseek');
+        const providerDocId = providerObj.id === 'openai' && parts[4] ? String(parts[4]) : null;
 
         // جمع إعدادات المزود من الحقول الخاصة به فقط
         const providerConfig = {};
@@ -985,6 +1362,23 @@ async function handleDashboardInteraction(interaction, manager) {
                 if (v && String(v).trim() !== '') providerConfig[field.id] = String(v).trim();
             } catch (_) { /* حقل اختياري غير مُدخل */ }
         }
+
+        // 🗄️ مزود محفوظ: ننسخ base_url والمفتاح من قاعدة البيانات (المفتاح يبقى مشفراً حتى الحفظ)
+        if (providerDocId) {
+            const cfgDb = require('./config');
+            const provDoc = cfgDb.providers_col ? await cfgDb.providers_col.findOne({ _id: new ObjectId(providerDocId) }).catch(() => null) : null;
+            if (provDoc) {
+                if (!providerConfig.openai_base_url && provDoc.base_url) providerConfig.openai_base_url = String(provDoc.base_url);
+                if (!providerConfig.openai_api_key && provDoc.api_key) {
+                    const plain = secrets.decryptSecret(provDoc.api_key);
+                    if (plain) providerConfig.openai_api_key = plain;
+                }
+                if (!providerConfig.openai_model && Array.isArray(provDoc.models) && provDoc.models.length) {
+                    providerConfig.openai_model = String(provDoc.models[0]);
+                }
+            }
+        }
+
         let personality = '';
         try { personality = interaction.fields.getTextInputValue('personality') || ''; } catch (_) {}
 
@@ -996,7 +1390,7 @@ async function handleDashboardInteraction(interaction, manager) {
             provider: providerObj.id,
             providerConfig,
         });
-        await manager.logAgent(String(agent._id), 'create', `تم إنشاء وكيل من Dashboard بمزود ${providerObj.label}`, { token_type: type, provider: providerObj.id });
+        await manager.logAgent(String(agent._id), 'create', `تم إنشاء وكيل من Dashboard بمزود ${providerObj.label}${providerDocId ? ' (من مزود محفوظ في قاعدة البيانات)' : ''}`, { token_type: type, provider: providerObj.id, from_saved_provider: Boolean(providerDocId) });
         await interaction.reply(await renderAgent(manager, String(agent._id)));
         return true;
     }
@@ -1417,16 +1811,16 @@ async function handleDashboardInteraction(interaction, manager) {
             return true;
         }
         if (action === 'features_toggle') {
-            // ⚙️ تبديل ميزة — web_search حالياً
+            // ⚙️ تبديل ميزة — read_url حالياً (web_search حُذفت نهائياً في v7.4)
             const feature = String(parts[4] || '');
-            if (feature !== 'web_search') {
+            if (feature !== 'read_url') {
                 return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
             }
             const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             const features = { ...(agent.features || {}) };
-            const newValue = features.web_search === false; // false → true (تفعيل)، true/undefined → false
-            features.web_search = newValue;
+            const newValue = features.read_url === false; // false → true (تفعيل)، true/undefined → false
+            features.read_url = newValue;
             await cfg.agents_col.updateOne(
                 { _id: new ObjectId(agentId) },
                 { $set: { features, updated_at: new Date() } },
@@ -1435,8 +1829,56 @@ async function handleDashboardInteraction(interaction, manager) {
             if (liveRuntime?.runtimeSettings) {
                 liveRuntime.runtimeSettings.features = features;
             }
-            await manager.logAgent(agentId, 'features_update', `web_search: ${newValue ? 'تفعيل' : 'تعطيل'}`, { features });
+            await manager.logAgent(agentId, 'features_update', `read_url: ${newValue ? 'تفعيل' : 'تعطيل'}`, { features });
             return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+        }
+        if (action === 'cap_toggle') {
+            // 🧠 تبديل قدرة النموذج الأصلية — thinking / search (2.5-B)
+            const cap = String(parts[4] || '');
+            if (!['thinking', 'search'].includes(cap)) {
+                return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+            }
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const capabilities = { ...(agent.capabilities || {}) };
+            const newValue = !(capabilities[cap] === true);
+            capabilities[cap] = newValue;
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { capabilities, updated_at: new Date() } },
+            );
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.capabilities = capabilities;
+            }
+            const labels = { thinking: 'التفكير العميق', search: 'البحث المدمج للنموذج' };
+            await manager.logAgent(agentId, 'capabilities_update', `${labels[cap]}: ${newValue ? 'تفعيل' : 'تعطيل'}`, { capabilities });
+            return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+        }
+        if (action === 'personality_file') {
+            // 📎 فتح نافذة انتظار ملف الشخصية — أرسل الملف الآن وسيصبح هو الشخصية
+            for (const [k, v] of pendingPersonalityUploads) {
+                if (Date.now() > v.expiresAt) pendingPersonalityUploads.delete(k);
+            }
+            const key = `${interaction.guildId}:${interaction.user.id}`;
+            pendingPersonalityUploads.set(key, {
+                agentId  : String(agentId),
+                expiresAt: Date.now() + PERSONALITY_UPLOAD_WINDOW_MS,
+            });
+            const emb = embed('📎 رفع الشخصية من ملف', linesBlock([
+                `أرسل الآن ملف الشخصية (\`.txt\` أو \`.md\`) في هذه القناة (<#${interaction.channelId}>).`,
+                '',
+                '**الشروط:**',
+                '• ملف نصي واحد: .txt أو .md (≤ 1MB)',
+                '• الحد الأقصى 20000 حرف بعد القراءة',
+                '• لديك **3 دقائق** من الآن',
+                '',
+                `عند وصول الملف سيصبح محتواه شخصية الوكيل **${agentId}** فوراً (بدون إعادة تشغيل).`,
+                'إرسال رسالة بلا ملف لا يلغي النافذة — أرسل الملف في رسالة مستقلة.',
+            ]), COLORS.success);
+            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+                button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
+            ]) });
         }
         if (action === 'knowledge_upload_start') {
             // فتح نافذة رفع ملفات المعرفة — 3 دقائق
@@ -1740,7 +2182,10 @@ async function renderAgentSettings(agentId, guildId) {
     const pCfg = extractProviderConfig(agentPlain);
     const pValidation = providerObj.validate(pCfg);
     const features = agent.features || {};
-    const webOn = features.web_search !== false;
+    const readUrlOn = features.read_url !== false;
+    const capabilities = agent.capabilities || {};
+    const thinkingOn = capabilities.thinking === true;
+    const searchOn = capabilities.search === true;
     const personalityLen = (agent.personality || '').length;
 
     // حقول المزود — الأسرار مقنّعة، البقية ظاهرة
@@ -1757,10 +2202,14 @@ async function renderAgentSettings(agentId, guildId) {
         ...providerLines,
         `🎫 **توكن ديسكورد:** ${agent.discord_token ? secrets.maskSecret(agentPlain.discord_token || agent.discord_token) : 'غير محدد ❌'}`,
         `🎭 **الشخصية:** ${personalityLen ? `${personalityLen} حرف (نص/ملف)` : 'افتراضية'}`,
-        `⚙️ **web_search:** ${webOn ? '🟢 مفعّل — البحث والقراءة من الإنترنت' : '🔴 معطّل — يعتمد على بحث النموذج المدمج'}`,
+        '',
+        '**🧠 قدرات النموذج الأصلية:**',
+        `↳ التفكير العميق: ${thinkingOn ? '🟢 مفعّل — النموذج يفكر بعمق قبل كل رد' : '🔴 معطّل'}`,
+        `↳ البحث المدمج: ${searchOn ? '🟢 مفعّل — النموذج يبحث بواجهته الخاصة عند الحاجة (الأفضل والأحدث)' : '🔴 معطّل'}`,
+        `↳ قراءة الروابط: ${readUrlOn ? '🟢 مفعّلة — read_url لروابط يرسلها المستخدم' : '🔴 معطّلة'}`,
         '',
         '**🔒 الأسرار مخفية دائماً** — زر «كشف» يعرض القيمة في رسالة خاصة بك فقط (Ephemeral).',
-        '📎 لتغيير الشخصية من ملف: منشن الوكيل في أي قناة + اكتب **شخصية** + أرفق ملف `.txt`/`.md` (≤ 1MB و20000 حرف).',
+        '📎 لتغيير الشخصية من ملف: اضغط «شخصية من ملف» ثم أرسل الملف `.txt`/`.md` في هذه القناة خلال 3 دقائق (≤ 1MB و20000 حرف).',
         'كل تعديل يُحفظ في قاعدة البيانات ويُطبق حياً بدون إعادة تشغيل.',
     ]), COLORS.info);
 
@@ -1776,9 +2225,14 @@ async function renderAgentSettings(agentId, guildId) {
         button(`${DASH_PREFIX}:agent:${agentId}:edit_identity`, 'الاسم والشخصية', ButtonStyle.Primary, '✏️'),
         button(`${DASH_PREFIX}:agent:${agentId}:edit_token`, 'توكن ديسكورد', ButtonStyle.Secondary, '🎫'),
         button(`${DASH_PREFIX}:agent:${agentId}:edit_creds`, 'بيانات المزود', ButtonStyle.Secondary, '🧠'),
+        button(`${DASH_PREFIX}:agent:${agentId}:personality_file`, 'شخصية من ملف', ButtonStyle.Success, '📎'),
     ]));
     components.push(...rowsFromButtons([
-        button(`${DASH_PREFIX}:agent:${agentId}:features_toggle:web_search`, webOn ? 'تعطيل web_search' : 'تفعيل web_search', webOn ? ButtonStyle.Danger : ButtonStyle.Success, '🌐'),
+        button(`${DASH_PREFIX}:agent:${agentId}:cap_toggle:thinking`, thinkingOn ? 'تعطيل التفكير' : 'تفعيل التفكير', thinkingOn ? ButtonStyle.Danger : ButtonStyle.Success, '🧠'),
+        button(`${DASH_PREFIX}:agent:${agentId}:cap_toggle:search`, searchOn ? 'تعطيل البحث المدمج' : 'تفعيل البحث المدمج', searchOn ? ButtonStyle.Danger : ButtonStyle.Success, '🔍'),
+        button(`${DASH_PREFIX}:agent:${agentId}:features_toggle:read_url`, readUrlOn ? 'تعطيل قراءة الروابط' : 'تفعيل قراءة الروابط', readUrlOn ? ButtonStyle.Danger : ButtonStyle.Success, '🌐'),
+    ]));
+    components.push(...rowsFromButtons([
         button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
     ]));
@@ -1815,6 +2269,7 @@ function editProviderCredsModal(agent) {
         openai_base_url: safeModalValue(agentPlain.openai_base_url, 300),
         openai_api_key : '',
         openai_model   : safeModalValue(agentPlain.openai_model, 100),
+        gemini_cookies : '',
     };
     for (const field of providerObj.modalFields.slice(0, 4)) {
         const isSecret = secrets.SECRET_FIELDS.includes(field.id);
@@ -1929,6 +2384,93 @@ async function handleKnowledgeUploadMessage(message, manager) {
     );
     await message.reply({ embeds: [emb] }).catch(() => {});
     await manager?.logAgent?.(pending.agentId, 'knowledge_upload', `رفع معرفة: ${results.map(r => `${r.name}${r.ok ? ' ✓' : ' ✗'}`).join('، ')}`, { results }).catch(() => {});
+    return true;
+}
+
+/**
+ * 📎 التقاط ملف الشخصية المرسل من صاحب رفع معلّق (2.5-G) — تُستدعى من bot.js على رسائل Manager.
+ * التدفق الصحيح الذي طلبه المستخدم: زر → رسالة تنتظر → المرفق يصبح هو الشخصية.
+ * @returns {Promise<boolean>} هل تمت المعالجة (الرسالة كانت رفع شخصية)
+ */
+async function handlePersonalityUploadMessage(message, manager) {
+    if (!message?.guild || !message.author || message.author.bot) return false;
+    const key = `${message.guild.id}:${message.author.id}`;
+    const pending = pendingPersonalityUploads.get(key);
+    if (!pending) return false;
+    if (Date.now() > pending.expiresAt) {
+        pendingPersonalityUploads.delete(key);
+        return false;
+    }
+
+    const attachments = Array.from(message.attachments.values());
+    if (!attachments.length) return false; // رسالة عادية بلا ملفات — تجاهل
+
+    const textAtts = attachments.filter(a => is_text_attachment(a));
+    if (!textAtts.length) {
+        await message.reply({
+            embeds: [embed('❌ الملف غير نصي', linesBlock([
+                'الملفات المقبولة للشخصية: `.txt` أو `.md` فقط (≤ 1MB).',
+                'أعد إرسال ملف نصي صحيح — النافذة ما زالت مفتوحة.',
+            ]), COLORS.danger)],
+        }).catch(() => {});
+        return true; // الرسالة جزء من رفع معلّق — لا تكمل لمسار آخر
+    }
+
+    const att = textAtts[0];
+    if ((att.size || 0) > PERSONALITY_MAX_FILE_BYTES) {
+        await message.reply({
+            embeds: [embed('❌ الملف كبير', linesBlock([
+                `حجم الملف ${Math.round((att.size || 0) / 1024)}KB — الحد الأقصى 1MB.`,
+                'أعد الإرسال بملف أصغر، أو قسّم المحتوى.',
+            ]), COLORS.danger)],
+        }).catch(() => {});
+        return true;
+    }
+
+    let text = '';
+    try {
+        text = await fetchTextAttachment(att.url);
+    } catch (e) {
+        await message.reply(`❌ فشل قراءة الملف: ${e.message}`).catch(() => {});
+        return true;
+    }
+
+    const personality = clampPersonalityText(text);
+    if (!personality) {
+        await message.reply('❌ الملف فارغ أو غير قابل للقراءة.').catch(() => {});
+        return true;
+    }
+
+    // تحديث قاعدة البيانات + الـ runtime الحي فوراً
+    const cfg = require('./config');
+    try {
+        await cfg.agents_col.updateOne(
+            { _id: new ObjectId(pending.agentId) },
+            { $set: { personality, updated_at: new Date() } },
+        );
+    } catch (e) {
+        await message.reply(`❌ فشل الحفظ في قاعدة البيانات: ${e.message}`).catch(() => {});
+        return true;
+    }
+    const liveRuntime = manager?.runtimes?.get?.(String(pending.agentId));
+    if (liveRuntime?.runtimeSettings) {
+        liveRuntime.runtimeSettings.personality = personality;
+    }
+
+    pendingPersonalityUploads.delete(key);
+
+    const preview = personality.length > 300 ? `${personality.slice(0, 300)}…` : personality;
+    const emb = embed('✅ تم تحديث شخصية الوكيل من الملف', linesBlock([
+        `📎 **المصدر:** ${att.name}`,
+        `📏 **الطول:** ${personality.length} حرف (الحد ${PERSONALITY_MAX_CHARS})`,
+        '',
+        '**معاينة:**',
+        `> ${preview.split('\n').join('\n> ')}`,
+        '',
+        'الشخصية الجديدة تعمل الآن فوراً بدون إعادة تشغيل.',
+    ]), COLORS.success);
+    await message.reply({ embeds: [emb] }).catch(() => {});
+    await manager?.logAgent?.(pending.agentId, 'personality_upload', `تحديث الشخصية من ملف: ${att.name} (${personality.length} حرف)`, { source: att.name, chars: personality.length, by: message.author.id }).catch(() => {});
     return true;
 }
 
@@ -2119,12 +2661,17 @@ module.exports = {
     isDashboardCommand,
     handleDashboardInteraction,
     handleKnowledgeUploadMessage,
+    handlePersonalityUploadMessage,
     renderHome,
     renderAgent,
     renderAgentSettings,
     renderAgentKnowledge,
     renderAgentUsage,
     renderAgentProactive,
+    renderProviders,
+    listSavedProviders,
+    saveProviderToDb,
+    fetchProviderModels,
     COLORS,
     embed,
     linesBlock,

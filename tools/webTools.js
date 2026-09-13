@@ -1,14 +1,14 @@
 /**
- * tools/webTools.js — Disor Bot v7.2 "Real Agent"
+ * tools/webTools.js — Disor Bot v7.4 "Nexus"
  * ═══════════════════════════════════════════════════════════
- * أدوات الويب الحقيقية للوكيل — حواس خارج ديسكورد:
- *   • webSearch({query, count, lang})  → نتائج بحث فعلي
- *       - افتراضياً: DuckDuckGo Lite (بدون أي مفاتيح)
- *       - اختيارياً: Brave Search API  (BRAVE_API_KEY) أو SerpAPI (SERPAPI_KEY)
- *   • readUrl({url})                    → جلب صفحة وتنظيفها لنص مقروء
- *       - حماية: منع SSRF، فحص content-type، حد حجم، timeout
+ * read_url فقط — جلب صفحة وتنظيفها لنص مقروء.
  *
- * قابلية الاختبار: يمكن حقن طبقة HTTP وهمية عبر __setHttp() —
+ * ⚠️ ملاحظة v7.4: أداة البحث (web_search) حُذفت نهائياً —
+ * كل نموذج أصبح يملك بحثاً مدمجاً أفضل (يُفعَّل من قدرات الوكيل:
+ * capabilities.search) ولا حاجة لمتصفح بحث خارجي داخل البوت.
+ * بقي read_url لأنه ليس بحثاً: قراءة رابط يلصقه المستخدم مباشرة.
+ *
+ * قابلية الاختبار: حقن طبقة HTTP وهمية عبر __setHttp() —
  * الاختبارات لا تلمس الشبكة الحقيقية إطلاقاً.
  * ═══════════════════════════════════════════════════════════
  */
@@ -25,7 +25,6 @@ const UA_BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;   // 2MB حد للصفحة
 const READ_TIMEOUT_MS = 20_000;
 const MAX_READ_CHARS = 8_000;
-const SEARCH_TIMEOUT_MS = 15_000;
 
 // ── طبقة HTTP قابلة للحقن (للاختبارات) ──
 let httpImpl = null;
@@ -101,151 +100,6 @@ function normalizeUrl(raw) {
     } catch (_) {
         return null;
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  web_search — DuckDuckGo Lite (بدون مفاتيح) + Brave/SerpAPI اختياري
-// ═══════════════════════════════════════════════════════════
-
-async function webSearch({ query, count = 8, lang = 'en' } = {}) {
-    const q = String(query || '').trim();
-    if (!q) return { ok: false, error: 'استعلام البحث فارغ', results: [] };
-    count = Math.min(Math.max(Number(count) || 8, 1), 15);
-
-    const { BRAVE_API_KEY, SERPAPI_KEY } = process.env;
-
-    try {
-        if (BRAVE_API_KEY) return await braveSearch(q, count, BRAVE_API_KEY);
-        if (SERPAPI_KEY) return await serpApiSearch(q, count, SERPAPI_KEY);
-        return await ddgSearch(q, count, lang);
-    } catch (e) {
-        return { ok: false, error: `فشل البحث: ${String(e.message).slice(0, 200)}`, results: [] };
-    }
-}
-
-/** DuckDuckGo Lite — تحليل HTML بدون مفاتيح */
-async function ddgSearch(q, count, lang) {
-    const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}${lang ? `&kl=${lang}-${lang}` : ''}`;
-    const resp = await httpGet({
-        url,
-        headers: {
-            'User-Agent': UA_BROWSER,
-            'Accept': 'text/html,application/xhtml+xml',
-            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
-        },
-        timeout: SEARCH_TIMEOUT_MS,
-    });
-    if (resp.status !== 200) {
-        return { ok: false, error: `DuckDuckGo رجع HTTP ${resp.status}`, results: [] };
-    }
-    const results = parseDdgLite(String(resp.data)).slice(0, count);
-    if (!results.length) {
-        return { ok: true, results: [], note: 'لا نتائج لهذا الاستعلام' };
-    }
-    return { ok: true, provider: 'duckduckgo', results };
-}
-
-/** تحليل صفحة DDG Lite — يعمل بـ cheerio إن وجد وإلا regex */
-function parseDdgLite(html) {
-    const results = [];
-    if (cheerio) {
-        const $ = cheerio.load(html);
-        $('a.result-link').each((_, el) => {
-            const href = $(el).attr('href') || '';
-            const title = clean($(el).text());
-            const snippet = clean($(el).closest('tr').next().find('td.result-snippet').text());
-            const realUrl = unwrapDdg(href);
-            if (realUrl && title) results.push({ title, url: realUrl, snippet });
-        });
-        return dedupe(results);
-    }
-
-    // regex fallback: روابط بترتيب، ثم snippets
-    const linkRe = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    const snipRe = /class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
-    const snippets = [];
-    let sm;
-    while ((sm = snipRe.exec(html)) !== null) snippets.push(clean(stripTags(sm[1])));
-    let lm; let i = 0;
-    while ((lm = linkRe.exec(html)) !== null) {
-        const realUrl = unwrapDdg(lm[1]);
-        const title = clean(stripTags(lm[2]));
-        if (realUrl && title) {
-            results.push({ title, url: realUrl, snippet: snippets[i] || '' });
-        }
-        i++;
-    }
-    return dedupe(results);
-}
-
-/** روابط DDG تكون موجّهة عبر /l/?uddg= — نستخرج الرابط الحقيقي */
-function unwrapDdg(href) {
-    try {
-        if (href.startsWith('//duckduckgo.com/l/') || href.includes('duckduckgo.com/l/')) {
-            const u = new URL(href.startsWith('//') ? 'https:' + href : href);
-            const real = u.searchParams.get('uddg');
-            if (real) return decodeURIComponent(real);
-            return null;
-        }
-        if (/^https?:\/\//i.test(href)) return href;
-        return null;
-    } catch (_) {
-        return null;
-    }
-}
-
-/** Brave Search API — يتطلب BRAVE_API_KEY */
-async function braveSearch(q, count, key) {
-    const resp = await httpGet({
-        url: `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}`,
-        headers: {
-            'Accept': 'application/json',
-            'X-Subscription-Token': key,
-            'User-Agent': UA_BROWSER,
-        },
-        timeout: SEARCH_TIMEOUT_MS,
-    });
-    if (resp.status !== 200) return { ok: false, error: `Brave رجع HTTP ${resp.status}`, results: [] };
-    let data;
-    try { data = JSON.parse(resp.data); } catch (_) { return { ok: false, error: 'Brave رجع JSON غير صالح', results: [] }; }
-    const items = (data.web && Array.isArray(data.web.results)) ? data.web.results : [];
-    const results = items.slice(0, count).map(r => ({
-        title   : clean(String(r.title || '')),
-        url     : String(r.url || ''),
-        snippet : clean(String(r.description || '')),
-    })).filter(r => r.url);
-    return { ok: true, provider: 'brave', results };
-}
-
-/** SerpAPI — يتطلب SERPAPI_KEY */
-async function serpApiSearch(q, count, key) {
-    const resp = await httpGet({
-        url: `https://serpapi.com/search.json?q=${encodeURIComponent(q)}&num=${count}&api_key=${encodeURIComponent(key)}`,
-        headers: { 'User-Agent': UA_BROWSER },
-        timeout: SEARCH_TIMEOUT_MS,
-    });
-    if (resp.status !== 200) return { ok: false, error: `SerpAPI رجع HTTP ${resp.status}`, results: [] };
-    let data;
-    try { data = JSON.parse(resp.data); } catch (_) { return { ok: false, error: 'SerpAPI رجع JSON غير صالح', results: [] }; }
-    const items = Array.isArray(data.organic_results) ? data.organic_results : [];
-    const results = items.slice(0, count).map(r => ({
-        title   : clean(String(r.title || '')),
-        url     : String(r.link || ''),
-        snippet : clean(String(r.snippet || '')),
-    })).filter(r => r.url);
-    return { ok: true, provider: 'serpapi', results };
-}
-
-function dedupe(results) {
-    const seen = new Set();
-    const out = [];
-    for (const r of results) {
-        const key = r.url.replace(/\/+$/, '').toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(r);
-    }
-    return out;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -381,11 +235,8 @@ function clean(s) {
 }
 
 module.exports = {
-    webSearch,
     readUrl,
     // داخلية — للاختبارات والصيانة
-    parseDdgLite,
-    unwrapDdg,
     normalizeUrl,
     isBlockedHost,
     extractText,

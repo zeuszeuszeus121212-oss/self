@@ -12,7 +12,7 @@ const { ObjectId } = require('mongodb');
 const { Client, GatewayIntentBits, Partials, REST, Routes } = require('discord.js');
 const { DISCORD_TOKEN, connectMongo } = require('./config');
 const { startAgentRuntime } = require('./agentRuntime');
-const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage } = require('./managerDashboard');
+const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage, handlePersonalityUploadMessage } = require('./managerDashboard');
 const secrets = require('./secrets');
 
 const LIFECYCLE = Object.freeze({
@@ -288,11 +288,17 @@ async function startManagerBot() {
     });
     managerClient.on('error', (error) => logAgent('manager', 'error', error.message || String(error)));
     // 📚 التقاط ملفات قاعدة المعرفة المرسلة من صاحب رفع معلّق (من صفحة المعرفة باللوحة)
+    // 📎 التقاط ملف الشخصية المرسل من صاحب رفع معلّق (من زر «شخصية من ملف» في صفحة الإعدادات)
     managerClient.on('messageCreate', async (message) => {
         try {
-            await handleKnowledgeUploadMessage(message, module.exports);
+            if (await handleKnowledgeUploadMessage(message, module.exports)) return;
         } catch (e) {
             console.error('[Knowledge Upload]', e.message);
+        }
+        try {
+            await handlePersonalityUploadMessage(message, module.exports);
+        } catch (e) {
+            console.error('[Personality Upload]', e.message);
         }
     });
     await managerClient.login(DISCORD_TOKEN);

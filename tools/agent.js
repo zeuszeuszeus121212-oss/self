@@ -10,6 +10,8 @@
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
+const crypto = require('crypto');
+const axios = require('axios');
 
 const { ChannelType, AttachmentBuilder } = require('discord.js');
 const { isTextChannel, isUserRuntime } = require('../discordAdapter');
@@ -162,6 +164,27 @@ async function _sendAttachments(ch, attachments) {
     }
 }
 
+/**
+ * تنزيل ملف (صورة مولّدة) إلى مجلد مؤقت لإرساله في ديسكورد
+ * @param {string} url
+ * @returns {Promise<string>} مسار الملف المؤقت
+ */
+async function _downloadToTmp(url) {
+    const safe = String(url || '');
+    const extMatch = safe.match(/\.(png|jpe?g|webp|gif)(?:\?|$)/i);
+    const ext = extMatch ? `.${extMatch[1].toLowerCase().replace('jpeg', 'jpg')}` : '.png';
+    const resp = await axios.get(safe, {
+        responseType: 'arraybuffer',
+        timeout: 120_000,
+        maxContentLength: 15 * 1024 * 1024,
+        validateStatus: () => true,
+    });
+    if (resp.status !== 200) throw new Error(`HTTP ${resp.status} أثناء تنزيل الصورة`);
+    const tmpPath = path.join(os.tmpdir(), `disor_img_${Date.now()}_${crypto.randomBytes(4).toString('hex')}${ext}`);
+    fs.writeFileSync(tmpPath, Buffer.from(resp.data));
+    return tmpPath;
+}
+
 // ══════════════════════════════════════════════════════════════
 //  AGENT LOOP — حلقة الوكيل
 // ══════════════════════════════════════════════════════════════
@@ -177,10 +200,16 @@ async function runAgent(
     runtime = {},
     requester = {}, // {userId, username, channelId} — هوية طالب الطلب (للذاكرة والتذكيرات)
 ) {
-    const system    = buildSystem(botName, mode, thinking, accessLevel, runtime.personality || '', runtime.features || {});
+    // 🧠 قدرات النموذج الأصلية (تفكير/بحث مدمج) — قدرة الوكيل هي الافتراضي،
+    // وتفكير جلسة القناة (محادثة-جديدة تفكير:on) يظل الأعلى أولوية
+    const effThinking = Boolean(thinking) || Boolean(runtime.capabilities?.thinking);
+    const nativeSearch = Boolean(runtime.capabilities?.search);
+
+    const system    = buildSystem(botName, mode, effThinking, accessLevel, runtime.personality || '', runtime.features || {}, runtime.capabilities || {});
 
     // ── ⚙️ ميزات الوكيل القابلة للتعطيل (توافق قديم: بلا إعداد = مفعّلة) ──
-    const webSearchEnabled = runtime.features ? runtime.features.web_search !== false : true;
+    // web_search حُذفت نهائياً في v7.4 — البحث مسؤولية النموذج نفسه (بحثه المدمج)
+    const readUrlEnabled = runtime.features ? runtime.features.read_url !== false : true;
 
     // ── 📊 تتبع الاستخدام — لا يعطل شيئاً أبداً ──
     const track = (kind, meta) => { try { usage.track(runtime.agentId || 'default', guildId, kind, meta).catch(() => {}); } catch (_) {} };
@@ -202,6 +231,9 @@ async function runAgent(
     
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
+    // 📁 ملفات الإرسال المتراكمة عبر كل خطوات الحلقة (صور مولدة، ملفات نصية...)
+    const filesToSend = [];
+
     for (let step = 0; step < MAX_STEPS; step++) {
         const activeProvider = chain[chainIdx];
         console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${activeProvider.id}${chainIdx > 0 ? ' (fallback)' : ''} mode=${mode} thinking=${thinking} access=${accessLevel}`);
@@ -214,7 +246,11 @@ async function runAgent(
                 sessionId        : curSid,
                 parentMessageId  : curPmid,
                 mode,
-                thinking,
+                thinking         : effThinking,
+                // 🔍 البحث المدمج للنموذج (قدرة الوكيل) — لكل مزود طريقته
+                search           : nativeSearch,
+                // 🖼️ صور مرفقة من رسالة المستخدم (رؤية النموذج — يدعمها Qwen وOpenAI)
+                images           : Array.isArray(requester.images) ? requester.images : [],
                 config           : activeProvider.config,
                 agentId          : runtime.agentId || 'default',
             });
@@ -251,7 +287,8 @@ async function runAgent(
 
         const jsonObjects    = extractJsonObjects(raw);
         const allResults     = [];
-        const filesToSend    = [];
+        // ملاحظة: filesToSend مرفوعة لنطاق runAgent كاملاً — الملفات (صور مولدة/ملفات)
+        // المجموعة في أي خطوة تُرسل مع الرد النهائي ولو جاء لاحقاً
         let finalReplyText   = null;
 
         for (const obj of jsonObjects) {
@@ -323,8 +360,10 @@ async function runAgent(
                 'server_blueprint', 'permission_audit', 'channel_activity', 'agent_config_audit',
                 // الأدوات الجديدة (مرفقات)
                 'get_server_icon', 'get_server_banner', 'send_image',
-                // 🌐 أدوات الويب — حواس خارج ديسكورد
-                'web_search', 'read_url',
+                // 🌐 حواس خارج ديسكورد — قراءة الروابط فقط (البحث للنموذج نفسه)
+                'read_url',
+                // 🎨 توليد الصور (مدعوم مع مزود Qwen)
+                'generate_image',
                 // 🧠 الذاكرة طويلة المدى (مخصصة لمستخدم الطلب فقط)
                 'remember', 'recall', 'forget_memory',
                 // ⏰ التذكيرات (مخصصة لمستخدم الطلب فقط)
@@ -434,28 +473,11 @@ async function runAgent(
                             result = await toolAgentConfigAudit(targetGuild, runtime.agentId || 'default'); break;
 
                         // ═══════════════════════════════════════════
-                        //  🌐 أدوات الويب — حقيقية عبر webTools
-                        //  قابلة للتعطيل من إعدادات الوكيل (features.web_search)
+                        //  🌐 قراءة الروابط — عبر webTools (ليست بحثاً؛
+                        //  البحث مسؤولية النموذج نفسه عبر قدراته)
                         // ═══════════════════════════════════════════
-                        case 'web_search': {
-                            if (!webSearchEnabled) {
-                                result = _err('🌐 أداة البحث في الإنترنت معطّلة من إعدادات هذا الوكيل — أخبر المستخدم أن يمكّنها من إعدادات الوكيل (الميزات) أو اعتمد على معرفتك.');
-                                break;
-                            }
-                            const q = String(params.query || params.q || params.search || '').trim();
-                            if (!q) {
-                                result = _err('حدد استعلام البحث: {"query": "..."}');
-                            } else {
-                                const r = await webTools.webSearch({ query: q, count: Number(params.count || 8) });
-                                result = r.ok
-                                    ? { ok: true, provider: r.provider, count: r.results.length, results: r.results, note: r.note || (r.results.length ? 'استخدم read_url لقراءة أي نتيجة بالتفصيل' : '') }
-                                    : _err(r.error || 'فشل البحث');
-                                track('web');
-                            }
-                            break;
-                        }
                         case 'read_url': {
-                            if (!webSearchEnabled) {
+                            if (!readUrlEnabled) {
                                 result = _err('🌐 أداة قراءة صفحات الويب معطّلة من إعدادات هذا الوكيل — أخبر المستخدم أن يمكّنها من إعدادات الوكيل (الميزات).');
                                 break;
                             }
@@ -468,6 +490,46 @@ async function runAgent(
                                     ? { ok: true, url: r.url, title: r.title || undefined, type: r.type, content: r.content, truncated: r.truncated || false }
                                     : _err(r.error || 'فشل جلب الصفحة');
                                 track('web');
+                            }
+                            break;
+                        }
+
+                        // ═══════════════════════════════════════════
+                        //  🎨 توليد الصور — يدعمه مزود Qwen حالياً
+                        //  (chat_type=t2i عبر chat.qwen.ai)
+                        // ═══════════════════════════════════════════
+                        case 'generate_image': {
+                            const gp = String(params.prompt || params.description || params.text || params.q || '').trim();
+                            if (!gp) {
+                                result = _err('حدد وصف الصورة: {"prompt": "وصف مفصل للصورة"}');
+                                break;
+                            }
+                            if (typeof activeProvider.obj.generateImage !== 'function') {
+                                result = _err(`🎨 مزود ${activeProvider.obj.label} لا يدعم توليد الصور — متاح مع مزود Qwen حالياً. أخبر المستخدم بتبديل مزود الوكيل أو وصف الصورة نصياً.`);
+                                break;
+                            }
+                            try {
+                                const r = await activeProvider.obj.generateImage({
+                                    prompt : gp,
+                                    size   : String(params.size || '1:1'),
+                                    config : activeProvider.config,
+                                    agentId: runtime.agentId || 'default',
+                                });
+                                if (!r || !r.ok || !Array.isArray(r.urls) || !r.urls.length) {
+                                    result = _err((r && r.error) || 'لم يتم توليد أي صورة — حاول مجدداً بوصف أوضح');
+                                    break;
+                                }
+                                // نحاول تنزيل أول صورة وإرسالها كملف؛ عند الفشل نعيد الرابط للنموذج
+                                let savedPath = null;
+                                try { savedPath = await _downloadToTmp(r.urls[0]); } catch (_) {}
+                                if (savedPath) {
+                                    filesToSend.push(savedPath);
+                                    result = { ok: true, count: r.urls.length, urls: r.urls, sent: true };
+                                } else {
+                                    result = { ok: true, count: r.urls.length, urls: r.urls, sent: false, note: 'لم يكتمل التنزيل — شارك الرابط مع المستخدم نصياً' };
+                                }
+                            } catch (e) {
+                                result = _err(`فشل توليد الصورة: ${String(e.message).slice(0, 200)}`);
                             }
                             break;
                         }

@@ -1,9 +1,11 @@
 /**
- * providers/openai.js — Disor Bot v7.1 "Ironclad"
+ * providers/openai.js — Disor Bot v7.4 "Nexus"
  * ═══════════════════════════════════════════════════════════
  * مزود عام متوافق مع OpenAI (Chat Completions API).
  * يعمل مع أي خدمة تتبع مواصفة /chat/completions:
  *   OpenAI, OpenRouter, Groq, Together, Ollama, LM Studio, vLLM...
+ *   ويعمل أيضاً مع البروكسيات المخصصة (مثل Universal AI Proxy) —
+ *   أضفها مرة واحدة من /اضافة-مزود ثم اخترها من قاعدة البيانات.
  * ═══════════════════════════════════════════════════════════
  *
  * الفروقات الجوهرية عن DeepSeek (مقصودة وليست نقصاً):
@@ -12,6 +14,9 @@
  *     حقيقية (system + history + user) بدل prompt نصي واحد.
  *   • يُرسل Authorization: Bearer إلى أي base_url يحدده الوكيل.
  *   • Streaming SSE حقيقي مع فك chunks وتجميع النص.
+ *   • التفكير: reasoning_effort=medium عند تفعيله — وإن رفضه المزود
+ *     (400) يعيد المحاولة بدونه تلقائياً (توافق مع كل المزودين).
+ *   • الصور: image_url content parts عند وجود مرفقات (رؤية النموذج).
  */
 
 'use strict';
@@ -90,41 +95,30 @@ function stripOpenAI(text) {
 //  Streaming SSE حقيقي
 // ══════════════════════════════════════════════════════════════
 
-async function streamChatCompletion({ baseUrl, apiKey, model, messages, temperature }) {
+async function streamChatCompletion({ baseUrl, apiKey, model, messages, temperature, reasoningEffort }) {
     const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-    const payload = {
-        model,
-        messages,
-        stream: true,
+    const buildPayload = (withEffort) => {
+        const p = { model, messages, stream: true };
+        if (typeof temperature === 'number' && !Number.isNaN(temperature)) p.temperature = temperature;
+        if (withEffort && reasoningEffort) p.reasoning_effort = reasoningEffort;
+        return p;
     };
-    if (typeof temperature === 'number' && !Number.isNaN(temperature)) {
-        payload.temperature = temperature;
-    }
 
-    const resp = await axios.post(url, payload, {
+    const doRequest = (payload) => axios.post(url, payload, {
         headers: {
             'Content-Type' : 'application/json',
             'Accept'       : 'text/event-stream',
             'Authorization': `Bearer ${apiKey}`,
-            'User-Agent'   : 'DisorBot/7.1 (OpenAI-compatible provider)',
+            'User-Agent'   : 'DisorBot/7.4 (OpenAI-compatible provider)',
         },
         timeout: REQUEST_TIMEOUT_MS,
         responseType: 'stream',
         validateStatus: () => true,
     });
 
-    if (resp.status === 401) throw new Error('OpenAI Provider: مفتاح API غير صالح (401)');
-    if (resp.status === 404) throw new Error(`OpenAI Provider: النموذج أو المسار غير موجود (404) — تحقق من base_url وmodel`);
-    if (resp.status === 429) throw new Error('⏳ مزود OpenAI مزدحم حالياً (429)، حاول بعد لحظة.');
-    if (resp.status !== 200) {
-        let detail = '';
-        try { detail = JSON.stringify(resp.data).slice(0, 200); } catch (_) {}
-        throw new Error(`OpenAI Provider HTTP ${resp.status} ${detail}`);
-    }
-
-    let fullText = '';
-    await new Promise((resolve, reject) => {
+    const collect = (resp) => new Promise((resolve, reject) => {
         let buf = '';
+        let fullText = '';
         resp.data.on('data', (chunk) => {
             buf += chunk.toString('utf8');
             let idx;
@@ -133,7 +127,7 @@ async function streamChatCompletion({ baseUrl, apiKey, model, messages, temperat
                 buf = buf.slice(idx + 1);
                 if (!line.startsWith('data:')) continue;
                 const data = line.slice(5).trim();
-                if (data === '[DONE]') { resolve(); return; }
+                if (data === '[DONE]') { resolve(fullText); return; }
                 try {
                     const obj = JSON.parse(data);
                     const choice = obj.choices && obj.choices[0];
@@ -145,11 +139,27 @@ async function streamChatCompletion({ baseUrl, apiKey, model, messages, temperat
                 } catch (_) { continue; }
             }
         });
-        resp.data.on('end', resolve);
+        resp.data.on('end', () => resolve(fullText));
         resp.data.on('error', reject);
     });
 
-    return fullText;
+    let resp = await doRequest(buildPayload(true));
+
+    // reasoning_effort رفضه المزود (400) — إعادة محاولة بدونه (توافق شامل)
+    if (resp.status === 400 && reasoningEffort) {
+        resp = await doRequest(buildPayload(false));
+    }
+
+    if (resp.status === 401) throw new Error('OpenAI Provider: مفتاح API غير صالح (401)');
+    if (resp.status === 404) throw new Error(`OpenAI Provider: النموذج أو المسار غير موجود (404) — تحقق من base_url وmodel`);
+    if (resp.status === 429) throw new Error('⏳ مزود OpenAI مزدحم حالياً (429)، حاول بعد لحظة.');
+    if (resp.status !== 200) {
+        let detail = '';
+        try { detail = JSON.stringify(resp.data).slice(0, 200); } catch (_) {}
+        throw new Error(`OpenAI Provider HTTP ${resp.status} ${detail}`);
+    }
+
+    return collect(resp);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -186,8 +196,9 @@ const openaiProvider = {
      * بنية الجلسة: sessionId = oai:<uuid> — يُخزن في نفس حقل جلسة القناة.
      * الـ prompt الوارد هنا = "system + سياق + User: ..." كسلسلة واحدة،
      * نقسمها: أول جزء قبل "User:" يوضع كرسالة system، والتاريخ يُدار داخلياً.
+     * @param {object} opts - images: [{url, name}] صور مرفقة (رؤية النموذج)
      */
-    async chat({ prompt, sessionId = null, config = {}, agentId = 'default' }) {
+    async chat({ prompt, sessionId = null, thinking = false, images = [], config = {}, agentId = 'default' }) {
         const baseUrl = (config.openai_base_url || DEFAULT_BASE_URL).trim();
         const apiKey  = config.openai_api_key;
         const model   = config.openai_model;
@@ -230,12 +241,25 @@ const openaiProvider = {
         // متابعة سلسلة نتائج الأدوات: إذا لم توجد رسالة مستخدم جديدة (نتائج أدوات)،
         // يبقى الـ prompt كامل النص — نضيفه كرسالة مستخدم عادية.
         const content = userPart || prompt;
-        conv.messages.push({ role: 'user', content });
+
+        // 🖼️ الصور المرفقة → content parts بصيغة OpenAI (رؤية النموذج إن دعمها المزود)
+        const imgs = (Array.isArray(images) ? images : []).slice(0, 4).filter(i => i && /^https?:\/\//.test(String(i.url || '')));
+        const userMessage = imgs.length
+            ? {
+                role: 'user',
+                content: [
+                    { type: 'text', text: content },
+                    ...imgs.map(i => ({ type: 'image_url', image_url: { url: String(i.url) } })),
+                ],
+            }
+            : { role: 'user', content };
+        conv.messages.push(userMessage);
 
         const fullText = await streamChatCompletion({
             baseUrl, apiKey, model,
-            messages: conv.messages.slice(),
+            messages: conv.messages.map(m => ({ ...m, content: Array.isArray(m.content) ? m.content : m.content })),
             temperature,
+            reasoningEffort: thinking ? 'medium' : null, // 🧠 التفكير — مع إعادة محاولة تلقائية بدونه
         });
 
         const text = stripOpenAI(fullText);

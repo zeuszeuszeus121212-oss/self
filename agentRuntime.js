@@ -158,14 +158,15 @@ function buildHelpEmbeds(botName, extra = {}) {
             '**/قنوات-مسموحة** — القنوات النشطة حالياً\n' +
             '**/حذف-قناة** — أزل قناة من قائمتي\n\n' +
             '**🧠 الذكاء الاصطناعي**\n' +
-            '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI-Compatible)\n' +
+            '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI / ✦ Gemini)\n' +
             '**/اختبار-المزود** — اختبار اتصال حقيقي مع مزودي الحالي\n' +
             '**/مزود-باو** — إعدادات POW (خاص بـ DeepSeek فقط)\n\n' +
-            '**⚙️ الميزات والإحصائيات**\n' +
-            '**/الميزات** — اعرض ميزاتي أو عطّل/فعّل web_search (لو نموذجك يملك بحثاً مدمجاً)\n' +
+            '**⚙️ القدرات والميزات والإحصائيات**\n' +
+            '**/الميزات** — قدراتي: التفكير العميق + البحث المدمج (قدرات النموذج نفسه) + قراءة الروابط\n' +
             '**/الاحصائيات** — إحصائيات استخدامي آخر 7 أيام (رسائل/أدوات/مزودون)\n\n' +
             '**📎 رفع شخصية من ملف**\n' +
-            'منشنني + اكتب `شخصية` + أرفق ملف `.txt` أو `.md` في نفس الرسالة (حتى 1MB و20000 حرف) — أستبدل شخصيتي فوراً.\n\n' +
+            'من لوحة التحكم (/panel): زر «شخصية من ملف» في صفحة الإعدادات → أرسل الملف `.txt`/`.md` في القناة خلال 3 دقائق → يصبح هو الشخصية.\n' +
+            'أو: منشنني + اكتب `شخصية` + أرفق الملف في نفس الرسالة (≤ 1MB و20000 حرف).\n\n' +
             '**⚙️ الصلاحيات والإدارة**\n' +
             '**/رتبة-التحكم** — حدد رتبة من يستطيع إدارتي\n' +
             '**/الرتبة-الحالية** — اعرض رتبة التحكم\n\n' +
@@ -309,12 +310,16 @@ function agentRuntimeCommands() {
 
         new SlashCommandBuilder()
             .setName('الميزات')
-            .setDescription('⚙️ عرض ميزات هذا الوكيل أو تعطيل/تفعيل إحداها')
+            .setDescription('⚙️ عرض قدرات هذا الوكيل (تفكير/بحث مدمج/روابط) أو تبديل إحداها')
             .addStringOption(option => option
                 .setName('التبديل')
                 .setDescription('الميزة المطلوب تبديلها')
                 .setRequired(false)
-                .addChoices({ name: 'web_search — البحث في الإنترنت', value: 'web_search' })),
+                .addChoices(
+                    { name: 'thinking — التفكير العميق (قدرة النموذج)', value: 'thinking' },
+                    { name: 'search — البحث المدمج (قدرة النموذج)', value: 'search' },
+                    { name: 'read_url — قراءة الروابط', value: 'read_url' },
+                )),
 
         new SlashCommandBuilder()
             .setName('الاحصائيات')
@@ -391,9 +396,14 @@ const runtimeSettings = {
     fallback_chain   : Array.isArray(agentConfig.fallback_chain) ? agentConfig.fallback_chain.map(String) : [],
     fallback_configs : extractAllProviderConfigs(agentConfig),
     // ⚙️ ميزات الوكيل القابلة للتعطيل — توافق قديم: بلا إعداد = مفعّلة
-    // (web_search قابل للتعطيل لأن كل نموذج أصبح يملك بحثاً مدمجاً)
+    // (read_url قابل للتعطيل — البحث نفسه مسؤولية النموذج المدمج، web_search حُذفت في v7.4)
     features : {
-        web_search : agentConfig.features?.web_search !== false,
+        read_url : agentConfig.features?.read_url !== false,
+    },
+    // 🧠 قدرات النموذج الأصلية (2.5-B): تفكير عميق + بحث مدمج — تُفعّل من الإعدادات أو /الميزات
+    capabilities : {
+        thinking : agentConfig.capabilities?.thinking === true,
+        search   : agentConfig.capabilities?.search === true,
     },
     // 🤖 الاستباقية — إصغاء قنوات بالكلمات المفتاحية (توافق قديم: بلا إعداد = معطلة)
     proactive_enabled  : Boolean(agentConfig.proactive_enabled),
@@ -578,6 +588,20 @@ client.on('interactionCreate', async (interaction) => {
     const guild = interaction.guild;
     const member = interaction.member;
 
+    // 🛡️ حارس موحد للصلاحيات — الإصلاح الجذري لأمر «حدث خطأ أثناء معالجة الأمر»:
+    // في الخاص (أو غياب member) كان `member.permissions` ينهار مباشرة على كل الأوامر المحمية.
+    // الآن: أدمن السيرفر أو مالك البوت — وإلا رسالة واضحة بدل انهيار صامت.
+    const isAdmin = Boolean(
+        (guild && member?.permissions?.has?.('Administrator')) || isBotOwner(interaction.user?.id),
+    );
+    const denyAdmin = async () => {
+        await interaction.reply({
+            content: guild
+                ? '⛔ هذا الأمر للأدمن فقط.'
+                : '⛔ هذا الأمر للأدمن فقط — استخدمه داخل سيرفر، أو كن مالك البوت.',
+        }).catch(() => {});
+    };
+
     try {
 
         // أوامر إدارة الوكلاء نُقلت بالكامل إلى Manager Dashboard.
@@ -591,8 +615,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'قناة-محادثة') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const chanValue = interaction.options.getString('قناة', true);
@@ -630,8 +654,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'حذف-قناة') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const chanValue = interaction.options.getString('قناة', true);
@@ -699,8 +723,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'حذف-محادثة') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const chanValue = interaction.options.getString('قناة', true);
@@ -715,8 +739,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'رتبة-التحكم') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const roleName = interaction.options.getString('role') || '';
@@ -739,8 +763,8 @@ client.on('interactionCreate', async (interaction) => {
 
 
         else if (['حساب-خاص', 'حساب-منشن', 'حساب-تسليمات', 'حساب-قناة-فعاليات'].includes(commandName)) {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const chanValue = interaction.options.getString('قناة', true);
@@ -755,8 +779,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'حساب-رول-فعاليات') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const roleQ = interaction.options.getString('role', true);
@@ -770,8 +794,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'فعاليات-وضع') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const mode = interaction.options.getString('mode', true);
@@ -780,8 +804,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'ابدأ-فعالية') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             await interaction.deferReply({ ephemeral: true }).catch(() => {});
@@ -793,8 +817,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'مزود-باو') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             // POW خاص بـ DeepSeek — وكلاء Qwen / OpenAI لا يحتاجونه إطلاقاً
@@ -808,8 +832,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'المزود') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const targetId = interaction.options.getString('الاسم');
@@ -876,8 +900,8 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'اختبار-المزود') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             await interaction.deferReply({ ephemeral: true }).catch(() => {});
@@ -891,67 +915,92 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         else if (commandName === 'الميزات') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             const target = interaction.options.getString('التبديل');
+            const caps = runtimeSettings.capabilities || {};
+            const feats = runtimeSettings.features || {};
 
-            if (!target) {
-                const f = runtimeSettings.features || {};
+            // ── تبديل إحدى الميزات/القدرات ──
+            if (target) {
+                const cfg = require('./config');
+                let kind = null, newValue = false, label = '';
+                if (target === 'thinking' || target === 'search') {
+                    kind = 'capabilities';
+                    const capabilities = { ...(caps), [target]: !(caps[target] === true) };
+                    newValue = capabilities[target];
+                    runtimeSettings.capabilities = capabilities;
+                    label = target === 'thinking' ? 'التفكير العميق (قدرة النموذج)' : 'البحث المدمج (قدرة النموذج)';
+                    try {
+                        const doc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+                        const merged = { ...(doc?.capabilities || {}), [target]: newValue };
+                        await cfg.agents_col.updateOne(
+                            { _id: new ObjectId(agentId) },
+                            { $set: { capabilities: merged, updated_at: new Date() } },
+                        );
+                    } catch (_) {}
+                } else if (target === 'read_url') {
+                    kind = 'features';
+                    const features = { ...(feats), read_url: feats.read_url !== false ? false : true };
+                    newValue = features.read_url;
+                    runtimeSettings.features = features;
+                    label = 'قراءة الروابط (read_url)';
+                    try {
+                        const doc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+                        const merged = { ...(doc?.features || {}), read_url: newValue };
+                        await cfg.agents_col.updateOne(
+                            { _id: new ObjectId(agentId) },
+                            { $set: { features: merged, updated_at: new Date() } },
+                        );
+                    } catch (_) {}
+                } else {
+                    await interaction.reply({ content: '❌ ميزة غير معروفة. الخيارات: thinking / search / read_url' });
+                    return;
+                }
+
                 await interaction.reply({
                     embeds: [agentEmbed({
-                        title: '⚙️ ميزات هذا الوكيل',
-                        description: linesBlock([
-                            `${(f.web_search !== false) ? '🟢' : '🔴'} **web_search** — البحث في الإنترنت (web_search + read_url)`,
-                            `${(f.web_search !== false) ? 'مفعّلة' : 'معطّلة'} — ${(f.web_search !== false)
-                                ? 'الوكيل يستطيع البحث وقراءة صفحات الويب.'
-                                : 'الوكيل يعتمد على معرفته الداخلية/بحث النموذج المدمج فقط.'}`,
-                            '',
-                            '> للتبديل: `/الميزات التبديل:web_search`',
-                            '> يُطبق التبديل فوراً بدون إعادة تشغيل — ويُحفظ في اللوحة.',
-                        ]),
-                        color: (f.web_search !== false) ? AGENT_COLORS.success : AGENT_COLORS.warning,
+                        title: newValue ? `🟢 ${label} مفعّلة الآن` : `🔴 ${label} معطّلة الآن`,
+                        description: newValue
+                            ? 'التغيير يعمل فوراً بدون إعادة تشغيل، ويُحفظ في اللوحة.'
+                            : 'التغيير يعمل فوراً بدون إعادة تشغيل، ويُحفظ في اللوحة.',
+                        color: newValue ? AGENT_COLORS.success : AGENT_COLORS.warning,
                         botName,
                     })],
                 });
                 return;
             }
 
-            if (target !== 'web_search') {
-                await interaction.reply({ content: '❌ ميزة غير معروفة.' });
-                return;
-            }
-
-            const newValue = !(runtimeSettings.features?.web_search !== false);
-            runtimeSettings.features = { ...(runtimeSettings.features || {}), web_search: newValue };
-
-            // حفظ في قاعدة البيانات (دمج مع أي ميزات أخرى محفوظة)
-            try {
-                const cfg = require('./config');
-                const doc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
-                const features = { ...(doc?.features || {}), web_search: newValue };
-                await cfg.agents_col.updateOne(
-                    { _id: new ObjectId(agentId) },
-                    { $set: { features, updated_at: new Date() } },
-                );
-            } catch (_) {}
-
+            // ── عرض الحالة ──
+            const lines = [
+                `${(caps.thinking === true) ? '🟢' : '🔴'} **التفكير العميق** (thinking) — قدرة النموذج الأصلية`,
+                `${(caps.thinking === true) ? 'النموذج يفكر بعمق قبل كل رد (Qwen: thinking_enabled — DeepSeek: thinking_enabled — OpenAI: reasoning_effort).' : 'الردود مباشرة بدون تفكير عميق.'}`,
+                '',
+                `${(caps.search === true) ? '🟢' : '🔴'} **البحث المدمج** (search) — قدرة النموذج الأصلية`,
+                `${(caps.search === true) ? 'النموذج يبحث في الإنترنت بواجهته الخاصة عند الحاجة — الأحدث والأدق، بلا أدوات بحث خارجية.' : 'النموذج يعتمد على معرفته الداخلية فقط.'}`,
+                '',
+                `${(feats.read_url !== false) ? '🟢' : '🔴'} **قراءة الروابط** (read_url) — أداة داخلية`,
+                `${(feats.read_url !== false) ? 'يقرأ صفحات الروابط التي ترسلها له مباشرة.' : 'قراءة الروابط معطّلة — البحث والقراءة على النموذج نفسه.'}`,
+                '',
+                '> للتبديل: `/الميزات التبديل:<thinking|search|read_url>`',
+                '> يُطبق التبديل فوراً بدون إعادة تشغيل — ويُحفظ في اللوحة.',
+            ];
+            const anyOn = (caps.thinking === true) || (caps.search === true) || (feats.read_url !== false);
             await interaction.reply({
                 embeds: [agentEmbed({
-                    title: newValue ? '🟢 web_search مفعّلة الآن' : '🔴 web_search معطّلة الآن',
-                    description: newValue
-                        ? 'الوكيل يستطيع البحث في الإنترنت وقراءة الصفحات من جديد.'
-                        : 'الوكيل لن يستدعي web_search/read_url — إن طُلب بحث فسيشرح أن البحث الخارجي معطّل من إعدادات الوكيل.',
-                    color: newValue ? AGENT_COLORS.success : AGENT_COLORS.warning,
+                    title: '⚙️ ميزات وقدرات هذا الوكيل',
+                    description: linesBlock(lines),
+                    color: anyOn ? AGENT_COLORS.success : AGENT_COLORS.warning,
                     botName,
                 })],
             });
         }
 
         else if (commandName === 'الاحصائيات') {
-            if (!member.permissions.has('Administrator')) {
-                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+            if (!isAdmin) {
+                await denyAdmin();
                 return;
             }
             await interaction.deferReply({ ephemeral: true }).catch(() => {});
@@ -990,10 +1039,11 @@ client.on('interactionCreate', async (interaction) => {
     } catch (error) {
         console.error(`[Slash Error] ${commandName}:`, error);
         try {
+            const detail = String(error?.message || error).slice(0, 200);
             if (!interaction.replied && !interaction.deferred) {
-                await interaction.reply({ content: '⚠️ حدث خطأ أثناء معالجة الأمر.' });
+                await interaction.reply({ content: `⚠️ حدث خطأ أثناء معالجة الأمر: ${detail}` });
             } else {
-                await interaction.followUp({ content: '⚠️ حدث خطأ.' });
+                await interaction.followUp({ content: `⚠️ حدث خطأ: ${detail}` });
             }
         } catch (_) {}
     }
@@ -1094,8 +1144,13 @@ client.on('messageCreate', async (message) => {
     }
 
     // معالجة المرفقات
+    const attachedImages = []; // 🖼️ صور للرؤية (Qwen/OpenAI يرونها، Gemini/DeepSeek نصي)
     if (message.attachments.size > 0) {
         for (const [, att] of message.attachments) {
+            if (att.contentType && String(att.contentType).startsWith('image/')) {
+                attachedImages.push({ name: att.name, url: att.url, contentType: att.contentType });
+                continue;
+            }
             if (is_text_attachment(att)) {
                 try {
                     const text = await fetchTextAttachment(att.url);
@@ -1178,7 +1233,8 @@ client.on('messageCreate', async (message) => {
 
     const botName = tokenType === 'user' ? humanizeDisplayName(client.user.displayName || client.user.username) : (client.user.displayName || client.user.username);
     const mode = cs.mode || 'default';
-    const thinking = cs.thinking || false;
+    // 🧠 التفكير: جلسة القناة (محادثة-جديدة تفكير:on) أولوية، وقدرة الوكيل هي الافتراضي
+    const thinking = Boolean(cs.thinking) || Boolean(runtimeSettings.capabilities?.thinking);
 
     try {
         await message.react('⏳');
@@ -1206,7 +1262,12 @@ client.on('messageCreate', async (message) => {
             accessLevel,
             client,
             runtimeSettings,
-            { userId: author.id, username: author.username, channelId: message.channel.id },
+            {
+                userId: author.id,
+                username: author.username,
+                channelId: message.channel.id,
+                images: attachedImages, // 🖼️ صور الرسالة — تُرفع OSS لـ Qwen / image_url لـ OpenAI
+            },
         );
 
         // تحديث الجلسة في RAM و DB

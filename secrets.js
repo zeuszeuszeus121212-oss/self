@@ -1,5 +1,5 @@
 /**
- * secrets.js — Disor Bot v7.3 "Sentinel"
+ * secrets.js — Disor Bot v7.4 "Nexus"
  * ═══════════════════════════════════════════════════════════
  * تشفير الأسرار (التوكنات) — AES-256-GCM.
  *
@@ -13,7 +13,7 @@
  *   البادئة تميّز المشفر عن القديم — فك شفاف عند كل نقطة استخدام.
  *
  * الحقول السرية المعترف بها في وثيقة الوكيل (agents):
- *   discord_token, deepseek_token, qwen_token, openai_api_key
+ *   discord_token, deepseek_token, qwen_token, openai_api_key, gemini_cookies
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -30,6 +30,7 @@ const SECRET_FIELDS = Object.freeze([
     'deepseek_token',
     'qwen_token',
     'openai_api_key',
+    'gemini_cookies',
 ]);
 
 // ── المفتاح: يُحسب مرة واحدة عند أول استدعاء ──

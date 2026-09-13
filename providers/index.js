@@ -1,5 +1,5 @@
 /**
- * providers/index.js — Disor Bot v7.1 "Ironclad"
+ * providers/index.js — Disor Bot v7.4 "Nexus"
  * ═══════════════════════════════════════════════════════════
  * سجل المزودين (Provider Registry) — قلب منصة الوكلاء متعددة النماذج.
  *
@@ -8,8 +8,9 @@
  *   modalFields()                → حقول النوافذ الخاصة به في المعالج والتعديل
  *   validate(config)             → {ok, missing[]}
  *   describe(config)             → سطر حالة للعرض
- *   chat({prompt, guildId, sessionId, parentMessageId, mode, thinking, config, agentId})
+ *   chat({prompt, guildId, sessionId, parentMessageId, mode, thinking, search, images, config, agentId})
  *                                → {fullText, sessionId, newParentMessageId}
+ *   generateImage?(opts)         → {ok, urls[]} — اختيارية (مدعومة مع Qwen)
  *   testConnection(config)       → رسالة نجاح/فشل حقيقية
  *
  * إضافة مزود جديد = ملف جديد + سطر واحد هنا. لا شيء آخر يتغير.
@@ -21,11 +22,13 @@
 const deepseek = require('./deepseek');
 const qwen     = require('./qwen');
 const openai   = require('./openai');
+const gemini   = require('./gemini');
 
 const PROVIDERS = {
     [deepseek.id]: deepseek,
     [qwen.id]   : qwen,
     [openai.id] : openai,
+    [gemini.id] : gemini,
 };
 
 const DEFAULT_PROVIDER = 'deepseek';

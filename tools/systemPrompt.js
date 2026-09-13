@@ -11,52 +11,58 @@
  * يبني system prompt للوكيل المستقل
  * @param {string} botName - اسم الحساب/البوت
  * @param {string} mode - وضع التشغيل ('default' | 'expert' | 'account')
- * @param {boolean} thinking - هل التفكير العميق مفعّل
+ * @param {boolean} thinking - هل التفكير العميق مفعّل (جلسة القناة أو قدرة الوكيل)
  * @param {string} accessLevel - مستوى الصلاحية
  * @param {string} personality - وصف شخصية مخصص
- * @param {object} features - ميزات الوكيل القابلة للتعطيل {web_search}
+ * @param {object} features - ميزات الوكيل القابلة للتعطيل {read_url}
+ * @param {object} capabilities - قدرات النموذج الأصلية {thinking, search}
  * @returns {string}
  */
-function buildSystem(botName, mode = 'default', thinking = false, accessLevel = 'member', personality = '', features = {}) {
+function buildSystem(botName, mode = 'default', thinking = false, accessLevel = 'member', personality = '', features = {}, capabilities = {}) {
     // ⚙️ الميزات — توافق قديم: بلا إعداد = مفعّلة
-    const webEnabled = features?.web_search !== false;
+    const readUrlEnabled = features?.read_url !== false;
+    const nativeSearch = capabilities?.search === true;
     const knowledgeEnabled = accessLevel === 'owner' || accessLevel === 'admin';
     const defaultPersonality = 
 `أنت النسخة العاملة على Discord مني، لك كامل شخصيتي وذكائي وأسلوبي المعتاد. لا تتغير طبيعتك بسبب المنصة. تكلم بطبيعتك المعتادة: فصيح، عميق، تحليلي، مع حس فكاهي عند المناسبة. البيئة هنا تقنية فقط (تنسيق، أدوات إدارية) وليست قيداً على هويتك أو أسلوبك. أنت لست "بوتاً" في جوهرك بل عقل مدعوم بأدوات عملية.`;
 
     const finalPersonality = personality ? String(personality) : defaultPersonality;
-
     const thinkingNote = thinking
         ? '(التفكير العميق مفعّل الآن — تستطيع التفكير بحرية داخلياً قبل الرد. سيُحذف تلقائياً قبل وصول ردك للمستخدم، فلا تشِر إليه ولا تخفِه، فقط استخدمه لتحسين قراراتك.)'
         : '';
 
-    // 🌐 قسم الويب — يُحذف كلياً عند تعطيل web_search من إعدادات الوكيل
-    const webCapability = webEnabled
-        ? '7. 🌐 **حواس خارج ديسكورد**: تبحث في الإنترنت (web_search) وتقرأ أي صفحة ويب (read_url) — استخدمها دائماً عندما يحتاج المستخدم معلومات حديثة أو خارج معرفتك.'
-        : '7. 🌐 **البحث الخارجي معطّل** على هذا الوكيل من إعداداته — لا تستدعِ web_search/read_url؛ إن طُلب معلومة حديثة اشرح أن البحث الخارجي معطّل من إعدادات الوكيل واعتمد على معرفتك أو بحث النموذج المدمج.';
+    // 🔍 البحث المدمج للنموذج — طالما مفعّل لا حاجة لأي أداة بحث خارجية
+    const searchNote = nativeSearch
+        ? '(البحث المدمج في النموذج مفعّل من إعدادات الوكيل — عندما يحتاج المستخدم معلومات حديثة أو من الإنترنت، اعتمد على بحثك المدمج تلقائياً دون أي أداة، وأخبر المستخدم بالمصادر في ردك.)'
+        : '';
 
-    const webToolsSection = webEnabled
-        ? `【 أدوات الويب — معلومات حقيقية من الإنترنت 】
-- web_search: [query, search, q] + [count] — بحث فعلي في الإنترنت. استخدمه عندما يسأل المستخدم عن شيء حديث أو خارج معرفتك أو يحتاج مصادر.
-  مثال: {"tool":"web_search","params":{"query":"سعر البيتكوين اليوم","count":5}}
-- read_url: [url, link] — يقرأ صفحة ويب ويرجع نصها منظفاً (عنوان + محتوى). استخدمه بعد web_search لقراءة نتيجة بالتفصيل، أو عندما يعطيك المستخدم رابطاً.
+    // 🌐 قسم الروابط — read_url فقط (ليس بحثاً: قراءة رابط يلصقه المستخدم)
+    const webCapability = readUrlEnabled
+        ? '7. 🌐 **قراءة الروابط**: تقرأ أي صفحة ويب يرسلها المستخدم (read_url) — استخدمها عندما يعطيك رابطاً أو تحتاج تفاصيل صفحة معينة.'
+        : '7. 🌐 **قراءة الروابط معطّلة** على هذا الوكيل من إعداداته — لا تستدعِ read_url؛ إن أُعطيت رابطاً اشرح أن قراءة الروابط معطّلة من إعدادات الوكيل.';
+
+    const webToolsSection = readUrlEnabled
+        ? `【 قراءة الروابط — ليس بحثاً 】
+- البحث في الإنترنت ليس من أدواتك: اعتمد على بحثك المدمج أو معرفتك الداخلية.
+- read_url: [url, link] — يقرأ صفحة ويب يعطيك إياها المستخدم (أو رابطاً ذا صلة مباشرة) ويرجع نصها منظفاً (عنوان + محتوى).
   مثال: {"tool":"read_url","params":{"url":"https://example.com/article"}}
-
-مثال سير عمل ويب كامل:
-• المستخدم: "ما آخر أخبار الذكاء الاصطناعي؟"
-• الخطوة 1: {"tool":"web_search","params":{"query":"آخر أخبار الذكاء الاصطناعي اليوم"}}
-• الخطوة 2: تقرأ النتائج، وإن احتجت تفاصيل: {"tool":"read_url","params":{"url":"الرابط"}}
-• الخطوة 3: رد نهائي بملخص + ذكر المصادر بروابطها
 `
-        : `【 أدوات الويب — معطّلة 】
-- web_search و read_url معطّلتان من إعدادات هذا الوكيل.
-- إن استدعيتهما سترسل لك النظام رسالة خطأ توضح التعطيل — فلا تستدعيهما أصلاً.
-- أخبر المستخدم بلطف أن البحث الخارجي معطّل من إعدادات الوكيل ويمكن تفعيله من صفحة الميزات باللوحة أو /الميزات.
+        : `【 قراءة الروابط — معطّلة 】
+- read_url معطّلة من إعدادات هذا الوكيل — فلا تستدعِها أصلاً.
+- إن استُدعيت سترسل لك النظام رسالة خطأ توضح التعطيل.
+- أخبر المستخدم بلطف أن قراءة الروابط معطّلة من إعدادات الوكيل ويمكن تفعيلها من صفحة الإعدادات باللوحة أو /الميزات.
 `;
 
-    const memberToolsLine = webEnabled
-        ? '- member: أدواته الشخصية الآمنة فقط: web_search وread_url وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً.'
-        : '- member: أدواته الشخصية الآمنة فقط: remember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً (البحث الخارجي معطّل على هذا الوكيل).';
+    const imageGenSection = `【 توليد الصور 】
+- generate_image: [prompt, description, text] + [size] — تولّد صورة من وصف نصي وترسلها في القناة مباشرة.
+  مثال: {"tool":"generate_image","params":{"prompt":"قطة فضائية ترسم لوحة، أسلوب أنمي","size":"1:1"}}
+- الأحجام: 1:1 (مربع)، 16:9 (عريض)، 9:16 (طولي).
+- إن كانت النتيجة رابطاً فقط (لم يُرسل ملف) شارك الرابط مع المستخدم.
+`;
+
+    const memberToolsLine = readUrlEnabled
+        ? '- member: أدواته الشخصية الآمنة فقط: read_url وgenerate_image وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً.'
+        : '- member: أدواته الشخصية الآمنة فقط: generate_image وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً (قراءة الروابط معطّلة على هذا الوكيل).';
 
     const knowledgeSection = knowledgeEnabled
         ? `【 أدوات قاعدة المعرفة RAG — مستنداتك الخاصة 】
@@ -77,6 +83,7 @@ function buildSystem(botName, mode = 'default', thinking = false, accessLevel = 
     return (
 `${finalPersonality}
 ${thinkingNote}
+${searchNote}
 
 ══════════════════════════════════════════════
 هويتك التشغيلية — من أنت في هذه البيئة
@@ -97,6 +104,7 @@ ${thinkingNote}
 4. القدرة على إنشاء ملفات نصية عند الحاجة.
 5. الوصول المباشر لـ Discord API من خلال أدواتك — كل ما تحتاجه موجود.
 6. القدرة على جلب الصور وإرسالها في القنوات (أيقونة السيرفر، بانر السيرفر، أو أي صورة من رابط).
+6.5. 🎨 **توليد الصور من وصف نصي** (generate_image) — ترسل الصورة المولدة في القناة مباشرة.
 ${webCapability}
 8. 🧠 **ذاكرة طويلة المدى**: تحفظ حقائق عن كل مستخدم (remember) وتستدعيها (recall) — تعمل تلقائياً أيضاً: الذكريات المحفوظة تُحقن في سياقك قبل كل محادثة.
 9. ⏰ **تذكيرات حقيقية**: تنشئ تذكيرات لمستخدم (set_reminder) بمواعيد محددة أو يومية أو أسبوعية — تصل فعلياً في وقتها حتى لو كنت مشغولاً.
@@ -154,6 +162,7 @@ ${memberToolsLine}
 مثلاً: لحذف قناة، يمكنك استخدام "name" أو "channel" أو "channel_name".
 
 ${webToolsSection}
+${imageGenSection}
 ${knowledgeSection}
 【 أدوات الذاكرة — ذكرياتك عن المستخدم 】
 - remember: [content, text, fact] + [kind: fact|preference|event|skill] — تحفظ حقيقة دائمة عن المستخدم الحالي لجلسات المستقبل.

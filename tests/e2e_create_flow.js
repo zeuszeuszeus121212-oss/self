@@ -373,9 +373,13 @@ async function run() {
         assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:reveal:discord_token`), 'زر كشف توكن ديسكورد');
         assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:edit_identity`), 'زر تعديل الاسم/الشخصية');
         assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:edit_creds`), 'زر تعديل بيانات المزود');
-        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search`), 'زر تبديل web_search');
-        assert.ok(text.includes('🟢 مفعّل'), 'web_search الافتراضي مفعّل (توافق قديم)');
-        passed++; console.log('✅ 9) صفحة الإعدادات: أسرار مقنّعة + أزرار كشف/تعديل/ميزات');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:cap_toggle:thinking`), 'زر تبديل التفكير العميق');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:cap_toggle:search`), 'زر تبديل البحث المدمج');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:features_toggle:read_url`), 'زر تبديل قراءة الروابط');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:personality_file`), 'زر شخصية من ملف');
+        assert.ok(!text.includes('web_search'), 'لا أثر لـ web_search في صفحة الإعدادات');
+        assert.ok(text.includes('🔴 معطّل'), 'القدرات الافتراضية معطّلة (توافق قديم)');
+        passed++; console.log('✅ 9) صفحة الإعدادات: أسرار مقنّعة + أزرار كشف/تعديل/قدرات/شخصية-من-ملف');
     }
 
     // ══════════════════════════════════════════════════════════
@@ -393,29 +397,45 @@ async function run() {
     }
 
     // ══════════════════════════════════════════════════════════
-    // اختبار 11: تبديل web_search — DB + runtime حي معاً
+    // اختبار 11: تبديل read_url + قدرات thinking/search — DB + runtime حي معاً
     // ══════════════════════════════════════════════════════════
     {
         capturedAgentUpdates.length = 0;
         currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'FT', provider: 'qwen', qwen_token: 't', status: 'stopped' };
-        const liveRuntime = { runtimeSettings: { features: { web_search: true } } };
+        const liveRuntime = { runtimeSettings: { features: { read_url: true }, capabilities: { thinking: false, search: false } } };
         fakeManager.runtimes.set(FAKE_AGENT_ID, liveRuntime);
 
-        // تعطيل
-        const i1 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search` });
+        // تعطيل read_url
+        const i1 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:read_url` });
         await handleDashboardInteraction(i1, fakeManager);
         const u1 = capturedAgentUpdates.find(u => u.$set && u.$set.features);
         assert.ok(u1, 'يجب أن يُحفظ features في قاعدة البيانات');
-        assert.strictEqual(u1.$set.features.web_search, false, 'بعد التبديل الأول: معطّل');
-        assert.strictEqual(liveRuntime.runtimeSettings.features.web_search, false, 'تحديث حي: معطّل');
+        assert.strictEqual(u1.$set.features.read_url, false, 'بعد التبديل الأول: معطّل');
+        assert.strictEqual(liveRuntime.runtimeSettings.features.read_url, false, 'تحديث حي: معطّل');
 
         // تفعيل مجدداً
-        const i2 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search` });
+        const i2 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:read_url` });
         await handleDashboardInteraction(i2, fakeManager);
         const u2 = capturedAgentUpdates.filter(u => u.$set && u.$set.features).pop();
-        assert.strictEqual(u2.$set.features.web_search, true, 'التبديل الثاني يعيده مفعّلاً');
+        assert.strictEqual(u2.$set.features.read_url, true, 'التبديل الثاني يعيده مفعّلاً');
+
+        // تفعيل التفكير العميق (قدرة نموذج)
+        capturedAgentUpdates.length = 0;
+        const i3 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:cap_toggle:thinking` });
+        await handleDashboardInteraction(i3, fakeManager);
+        const u3 = capturedAgentUpdates.find(u => u.$set && u.$set.capabilities);
+        assert.ok(u3, 'يجب أن تُحفظ capabilities في قاعدة البيانات');
+        assert.strictEqual(u3.$set.capabilities.thinking, true, 'thinking يتفعل');
+        assert.strictEqual(liveRuntime.runtimeSettings.capabilities.thinking, true, 'تحديث حي: thinking');
+
+        // تفعيل البحث المدمج
+        capturedAgentUpdates.length = 0;
+        const i4 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:cap_toggle:search` });
+        await handleDashboardInteraction(i4, fakeManager);
+        const u4 = capturedAgentUpdates.find(u => u.$set && u.$set.capabilities);
+        assert.strictEqual(u4.$set.capabilities.search, true, 'search يتفعل');
         fakeManager.runtimes.delete(FAKE_AGENT_ID);
-        passed++; console.log('✅ 11) تبديل web_search: يُخزن ويُحدّث الـ runtime الحي');
+        passed++; console.log('✅ 11) تبديل read_url + thinking + search: يُخزن ويُحدّث الـ runtime الحي');
     }
 
     // ══════════════════════════════════════════════════════════

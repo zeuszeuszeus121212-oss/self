@@ -38,9 +38,10 @@ const deepseekProvider = {
     /**
      * إرسال prompt والحصول على الرد — تمرير مباشر (passthrough) إلى _stream_ds
      * بنفس ترتيب المعاملات الأصلي حرفياً.
+     * @param {object} opts - search: البحث المدمج للنموذج (search_enabled في payload)
      * @returns {Promise<{fullText: string, sessionId: string, newParentMessageId: string|null}>}
      */
-    async chat({ prompt, guildId, sessionId = null, parentMessageId = null, mode = 'default', thinking = false, config = {}, agentId = 'default' }) {
+    async chat({ prompt, guildId, sessionId = null, parentMessageId = null, mode = 'default', thinking = false, search = false, config = {}, agentId = 'default' }) {
         const token = config.deepseek_token;
         if (!token) throw new Error('deepseek_token مفقود لهذا الوكيل');
 
@@ -53,6 +54,7 @@ const deepseekProvider = {
             thinking,
             token,
             agentId || 'default',
+            Boolean(search), // 🔍 البحث المدمج — search_enabled في payload
         );
 
         return {
