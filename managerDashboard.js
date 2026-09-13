@@ -481,7 +481,9 @@ function renderCreateOpenAiModel(type, doc, models) {
             .setPlaceholder('اختر النموذج')
             .addOptions(models.slice(0, 25).map(m => ({
                 label: String(m).slice(0, 100),
-                value: String(m),
+                // ⚠️ حد ديسكورد الصارم لقيمة الخيار: 100 حرف — معرفات النماذج الطويلة
+                // (مثل بروكسيات OpenAI) تُرمي "Invalid string length" بدون القص
+                value: String(m).slice(0, 100),
             }))),
     );
     return { embeds: [emb], components: [row, ...rowsFromButtons([
@@ -541,13 +543,14 @@ function editAgentModal(agent) {
     const providerObj = getProviderOrFallback(agent.provider);
     const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_modal:${agent._id}`).setTitle(trim(`تعديل الوكيل — ${providerObj.label}`, 45));
 
-    modal.addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(80).setValue(safeModalValue(agent.name, 80))),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500).setValue(safeModalValue(agent.personality, 1500))),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel('Discord Token جديد (اختياري)').setStyle(TextInputStyle.Short).setRequired(false)),
-    );
+    // ⚠️ حد ديسكورد الصارم: 5 صفوف كحد أقصى (BASE_TYPE_MAX_LENGTH) —
+    // نُدخل الحقول حسب الأولوية: الاسم ← الشخصية ← حقول المزود (حتى 3) ← توكن ديسكورد إن بقيت مساحة.
+    // تعديل توكن ديسكورد متاح دائماً أيضاً من صفحة الإعدادات (زر «توكن ديسكورد»).
+    const rows = [];
+    rows.push(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(80).setValue(safeModalValue(agent.name, 80))));
+    rows.push(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500).setValue(safeModalValue(agent.personality, 1500))));
 
-    // حقول المزود الخاصة — حتى 3 حقول ضمن حد ديسكورد
+    // حقول المزود الخاصة — حتى 3 حقول ضمن الحد
     const knownValues = {
         deepseek_token : '',
         qwen_token     : '',
@@ -558,7 +561,7 @@ function editAgentModal(agent) {
         gemini_cookies : '',
     };
     for (const field of providerObj.modalFields.slice(0, 3)) {
-        modal.addComponents(new ActionRowBuilder().addComponents(
+        rows.push(new ActionRowBuilder().addComponents(
             new TextInputBuilder()
                 .setCustomId(field.id)
                 .setLabel(trim(`${field.label} (اتركه فارغاً للإبقاء)`, 45))
@@ -568,6 +571,13 @@ function editAgentModal(agent) {
                 .setValue(knownValues[field.id] || ''),
         ));
     }
+
+    // توكن ديسكورد — فقط إذا بقيت مساحة ضمن حد 5 صفوف
+    if (rows.length < 5) {
+        rows.push(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel('Discord Token جديد (اختياري)').setStyle(TextInputStyle.Short).setRequired(false)));
+    }
+
+    for (const row of rows.slice(0, 5)) modal.addComponents(row);
     return modal;
 }
 
@@ -751,8 +761,8 @@ function providerAddModal() {
     modal.addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم المزود (مثل: بروكسي الرئيسي)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('base_url').setLabel('Base URL (مثل http://host:8000/v1)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(300)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('api_key').setLabel('API Key / Token (اختياري)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(300)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('models').setLabel('النماذج مفصولة بفاصلة (اتركه فارغاً لجلبها تلقائياً)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('api_key').setLabel('API Key / Cookies (حتى 4000 حرف)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(4000)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('models').setLabel('النماذج بفاصلة (فارغ = جلب تلقائي)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1000)),
     );
     return modal;
 }
@@ -817,7 +827,8 @@ function renderProviderModelsStep(interaction, draft, fetchNote) {
                 .setMaxValues(Math.min(draft.models.length, 25))
                 .addOptions(draft.models.slice(0, 25).map(m => ({
                     label: String(m).slice(0, 100),
-                    value: String(m),
+                    // ⚠️ حد ديسكورد 100 حرف للقيمة — بدون القص: "Invalid string length"
+                    value: String(m).slice(0, 100),
                 }))),
         ));
     }
@@ -1236,6 +1247,12 @@ async function handleDashboardInteraction(interaction, manager) {
         const docId = parts[3];
         const model = String(interaction.values[0] || '');
         await interaction.showModal(createAgentModalFromDb(type, docId, model));
+        return true;
+    }
+
+    // ── 🗄️ زر «إضافة مزود» في صفحة المزودين — كان بلا معالج (ضغط صامت بلا أي استجابة!) ──
+    if (interaction.isButton() && id === `${DASH_PREFIX}:prov_add`) {
+        await interaction.showModal(providerAddModal());
         return true;
     }
 

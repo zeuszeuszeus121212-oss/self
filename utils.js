@@ -596,6 +596,7 @@ function isBotOwner(userId) {
 const MEMBER_SAFE_TOOLS = Object.freeze([
     'read_url',                                      // 🌐 قراءة الروابط فقط (البحث للنموذج نفسه)
     'generate_image',                                // 🎨 توليد الصور
+    'create_file',                                   // 📁 إنشاء ملف وإرفاقه في القناة
     'remember', 'recall', 'forget_memory',           // 🧠 ذاكرته هو فقط
     'set_reminder', 'list_reminders', 'cancel_reminder', // ⏰ تذكيراته هو فقط
 ]);

@@ -27,9 +27,18 @@ const DEFAULT_MODEL      = 'qwen3.8-max';
 const REQUEST_TIMEOUT_MS = 180_000;
 const BAN_CODES          = new Set([403, 429, 451]);
 
-const UA_APP = (
+// 🔐 بصمات تطبيق Qwen الأندرويد — من qwen.py حرفياً (الغائب عنها = طلبات مشبوهة/مرفوضة)
+const DEVICE_ID = process.env.QWEN_DEVICE_ID || 'ai41028e1f8c77e8b2786e747bbb688d45';
+const MINI_WUA_NEW = process.env.QWEN_MINI_WUA_NEW || 'aFgR23MLtqLGGJyrcbapgd+3XceWqBxoJgwW5OfWJyoy3xEC7dShaw+ngiFDudGDdY6tt1kIeyR2PVktTjGdU3Bq8hFdQ4COyBLsSGPWyu6LrCN93vNCG600RwsH2PZgTpNQVxwdd5WDtQJl/bbuWLjXYRlDIHL+VeV7aQR6TkveYD25QvPjRymkV';
+const MINI_WUA_CHAT = process.env.QWEN_MINI_WUA_CHAT || 'amQS4zB7f+nI4zFIidbQfWJS4DFq6eY/JGTsMp6g0eEgI1hW/WjAixbY00rXCEfaU1m0k8YFrAS7FdfKBfhdNv3tVDb9W9lKxCkU9N7WoxP6NBjjq7KDfBtkYRQwFDVeAnTLV3as78GbA/GIYRwe/sGfa+Ec4kEd6w8P5tnHKvatdiI6yyDOBdQyG';
+const APP_WAF = process.env.QWEN_APP_WAF || 'Z9Tr56YmQpXcO2K_d_3nAbJvRqMLFW8HTNjvRguWHEowM1xY';
+const ACW_TC = process.env.QWEN_ACW_TC || '0a03e58c17857397926041890e494252933302e11e7e13facd87298e0a89a3';
+
+// مطابقة حرفية لـ UA_CHAT / UA_NEW في qwen.py (ترتيب الجزء الثاني بعد الفاصلة يهم)
+const UA_CHAT = (
     'Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2) ' +
-    'AliApp(QWENCHAT/2.7.2) AppType/Release AplusBridgeLite'
+    'AliApp(QWENCHAT/2.7.2) AppType/Release AplusBridgeLite,' +
+    'Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2)'
 );
 const UA_NEW = (
     'Dalvik/2.1.0 (Linux; U; Android 15; RMX3834 Build/AP3A.240905.015.A2),' +
@@ -44,39 +53,46 @@ const uuid = () => crypto.randomUUID();
 // ══════════════════════════════════════════════════════════════
 
 function qwenHeadersChat(token, { stream = false, host = 'chat.qwen.ai' } = {}) {
+    // مطابقة لـ _headers("chat", auth=True, stream=...) في qwen.py
     return {
-        'User-Agent'    : UA_APP,
-        'Content-Type'  : 'application/json; charset=UTF-8',
-        'Accept'        : stream ? '*/*,text/event-stream' : 'application/json',
+        'X-Platform'     : 'android',
+        'Accept'         : stream ? '*/*,text/event-stream' : 'application/json',
+        'User-Agent'     : UA_CHAT,
+        'x-device-id'    : DEVICE_ID,
+        'source'         : 'app',
+        'x-mini-wua'     : MINI_WUA_CHAT,
+        'x-request-id'   : uuid(),
         'Accept-Language': 'en-US',
+        'Accept-Charset' : 'UTF-8',
+        'Content-Type'   : 'application/json; charset=UTF-8',
+        'Host'           : host,
+        'Connection'     : 'Keep-Alive',
         'Accept-Encoding': 'gzip, deflate',
-        'Cache-Control' : 'no-store',
-        'Connection'    : 'Keep-Alive',
-        'Host'          : host,
-        'X-Platform'    : 'android',
-        'x-device-id'   : '0',
-        'source'        : 'app',
-        'Authorization' : `Bearer ${token}`,
-        'x-request-id'  : uuid(),
-        'Cookie'        : `x-ap=eu-central-1; token=${token}`,
+        'Cache-Control'  : 'no-store',
+        'app_waf'        : APP_WAF, // يُرسل فقط مع طلبات chat — مطابق للبايثون
+        'Authorization'  : `Bearer ${token}`,
+        'Cookie'         : `x-ap=eu-central-1; acw_tc=${ACW_TC}; token=${token}`,
     };
 }
 
 function qwenHeadersNew(token, host = 'chat.qwen.ai') {
+    // مطابقة لـ _headers("new", auth=True) في qwen.py
     return {
-        'User-Agent'    : UA_NEW,
-        'Content-Type'  : 'application/json',
-        'Accept'        : 'application/json',
+        'X-Platform'     : 'android',
+        'Accept'         : 'application/json',
+        'User-Agent'     : UA_NEW,
+        'x-device-id'    : DEVICE_ID,
+        'source'         : 'app',
+        'x-mini-wua'     : MINI_WUA_NEW,
+        'x-request-id'   : uuid(),
         'Accept-Language': 'en-US',
+        'Accept-Charset' : 'UTF-8',
+        'Content-Type'   : 'application/json',
+        'Host'           : host,
+        'Connection'     : 'Keep-Alive',
         'Accept-Encoding': 'gzip',
-        'Connection'    : 'Keep-Alive',
-        'Host'          : host,
-        'X-Platform'    : 'android',
-        'x-device-id'   : '0',
-        'source'        : 'app',
-        'Authorization' : `Bearer ${token}`,
-        'x-request-id'  : uuid(),
-        'Cookie'        : `x-ap=eu-central-1; token=${token}`,
+        'Authorization'  : `Bearer ${token}`,
+        'Cookie'         : `x-ap=eu-central-1; acw_tc=${ACW_TC}; token=${token}`,
     };
 }
 
@@ -158,11 +174,16 @@ function buildQwenPayload(chatId, prompt, parentId, { thinking = false, modelId 
             chat_type : chatType,
             content   : prompt,
             role      : 'user',
+            // ⚙️ مطابق حرفياً لـ feature_config في qwen.py —
+            // thinking_mode: 'Fast' هو ما يوقف التفكير فعلياً لدى Qwen
+            // (بدونه qwen3-max يظل يفكر حتى مع thinking_enabled=false!)
             feature_config : {
+                thinking_enabled : Boolean(thinking),
                 output_schema    : 'phase',
-                thinking_enabled : thinking,
+                research_mode    : 'normal',
+                auto_thinking    : Boolean(thinking),
+                thinking_mode    : thinking ? 'Deep' : 'Fast',
                 thinking_format  : 'summary',
-                auto_thinking    : thinking,
                 auto_search      : Boolean(autoSearch),
             },
             timestamp     : ts,
@@ -288,7 +309,7 @@ async function uploadImageToQwenOss(token, imageBuffer, filename, baseUrl = QWEN
         { filename, filetype: 'image', filesize: fileSize },
         {
             headers: {
-                'User-Agent'   : UA_APP,
+                'User-Agent'   : UA_CHAT,
                 'Content-Type' : 'application/json',
                 'Authorization': `Bearer ${token}`,
                 'x-device-id'  : '0',

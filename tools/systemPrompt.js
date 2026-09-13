@@ -60,9 +60,18 @@ function buildSystem(botName, mode = 'default', thinking = false, accessLevel = 
 - إن كانت النتيجة رابطاً فقط (لم يُرسل ملف) شارك الرابط مع المستخدم.
 `;
 
+    const fileCreationSection = `【 إنشاء الملفات وإرفاقها 】
+- create_file: [filename, name, file_name] + [content, text, data] — ينشئ ملفاً حقيقياً ويرسله كمرفق في القناة مع ردك النهائي.
+  مثال: {"tool":"create_file","params":{"filename":"تقرير.md","content":"# التقرير\nالسطر الأول..."}}
+- أي نوع نصي: .txt .md .json .csv .html .js .py .css … (الحد 8MB).
+- ضع المحتوى كاملاً داخل content — بدون حشو أو شرح داخله.
+- بعد استدعاء الأداة أكمل ردك النهائي عادياً — النظام يرفق الملف تلقائياً مع الرد.
+- إذا طلب المستخدم كوداً أو تقريراً أو قائمة أو أي مخرج طويل، اعترض عليه كملف بدل نص طويل في الشات.
+`;
+
     const memberToolsLine = readUrlEnabled
-        ? '- member: أدواته الشخصية الآمنة فقط: read_url وgenerate_image وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً.'
-        : '- member: أدواته الشخصية الآمنة فقط: generate_image وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً (قراءة الروابط معطّلة على هذا الوكيل).';
+        ? '- member: أدواته الشخصية الآمنة فقط: read_url وgenerate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً.'
+        : '- member: أدواته الشخصية الآمنة فقط: generate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder — لا أدوات إدارية إطلاقاً (قراءة الروابط معطّلة على هذا الوكيل).';
 
     const knowledgeSection = knowledgeEnabled
         ? `【 أدوات قاعدة المعرفة RAG — مستنداتك الخاصة 】
@@ -101,7 +110,7 @@ ${searchNote}
 1. قدرة على التحاور الطبيعي العميق في أي موضوع.
 2. أدوات إدارية لقراءة السيرفر وتنفيذ إجراءات فيه.
 3. القدرة على التخطيط متعدد الخطوات والتنفيذ التلقائي دون انتظار إذن.
-4. القدرة على إنشاء ملفات نصية عند الحاجة.
+4. 📁 **القدرة على إنشاء ملفات حقيقية وإرفاقها في القناة** (create_file) — تقارير، أكواد، JSON، أي ملف نصي يصل كمرفق مع ردك.
 5. الوصول المباشر لـ Discord API من خلال أدواتك — كل ما تحتاجه موجود.
 6. القدرة على جلب الصور وإرسالها في القنوات (أيقونة السيرفر، بانر السيرفر، أو أي صورة من رابط).
 6.5. 🎨 **توليد الصور من وصف نصي** (generate_image) — ترسل الصورة المولدة في القناة مباشرة.
@@ -163,6 +172,7 @@ ${memberToolsLine}
 
 ${webToolsSection}
 ${imageGenSection}
+${fileCreationSection}
 ${knowledgeSection}
 【 أدوات الذاكرة — ذكرياتك عن المستخدم 】
 - remember: [content, text, fact] + [kind: fact|preference|event|skill] — تحفظ حقيقة دائمة عن المستخدم الحالي لجلسات المستقبل.

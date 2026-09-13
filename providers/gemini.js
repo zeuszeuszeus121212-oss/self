@@ -70,9 +70,22 @@ function dropSession(sessionId) {
 //  الكوكيز — تحليل وتحديث
 // ═════════════════════════════════════════════════════════
 
+/**
+ * تنظيف مدخل الكوكيز قبل التحليل — يعالج أشهر أخطاء اللصق:
+ *  • كلمة "Cookie:" الزائدة التي ينسخها المستخدم من ترويسات المتصفح
+ *    (بدون التنظيف يُبتلع أول كوكي حقيقي ويصبح اسمه "Cookie" → فشل جلسة!)
+ *  • الأسطر الجديدة بين الكوكيز (نسخ من جدول DevTools)
+ */
+function normalizeCookiesInput(raw) {
+    let s = String(raw || '');
+    s = s.replace(/^\s*[Cc]ookie\s*:\s*/, '');            // كلمة "Cookie:" في البداية
+    s = s.replace(/[\r\n]+/g, '; ');                      // الأسطر الجديدة → فاصلة كوكيز
+    return s.trim();
+}
+
 function parseCookieString(str) {
     const out = {};
-    for (const part of String(str || '').split(';')) {
+    for (const part of normalizeCookiesInput(str).split(';')) {
         const idx = part.indexOf('=');
         if (idx > 0) {
             out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
@@ -264,16 +277,24 @@ const geminiProvider = {
     description: 'Gemini عبر gemini.google.com بالكوكيز (وليس توكن) — جلسات حقيقية وتتبع محادثة وتحديث كوكيز تلقائي',
 
     modalFields: [
-        { id: 'gemini_cookies', label: 'Gemini Cookies (انسخ سطر Cookie كاملاً من المتصفح)', style: 'paragraph', required: true, maxLength: 2000 },
+        // ⚠️ 4000 = الحد الأقصى لدى ديسكورد — ترويسة Cookie الحقيقية من المتصفح
+        // طويلة (500–3000 حرف) وأي قصّ = كوكيز ميتة "failed to get session tokens"
+        { id: 'gemini_cookies', label: 'الصق سطر Cookie كاملاً من المتصفح (حتى 4000 حرف)', style: 'paragraph', required: true, maxLength: 4000 },
     ],
 
     validate(config = {}) {
         const missing = [];
-        const c = String(config.gemini_cookies || '').trim();
-        if (!c) missing.push('gemini_cookies');
-        else if (!/(^|;\s*)(__Secure-1PSID|SID|__Secure-3PSID)=/.test(c)) {
-            // كوكيز بلا معرفات جلسة جوجل الأساسية شبه مؤكد أنها لن تعمل
-            missing.push('gemini_cookies (لا تحتوي SID/__Secure-1PSID — تأكد من نسخ سطر Cookie كاملاً)');
+        const raw = String(config.gemini_cookies || '');
+        if (!raw.trim()) {
+            missing.push('gemini_cookies');
+            return { ok: missing.length === 0, missing };
+        }
+        // كوكيز جوجل لا تعمل أبداً بلا معرف جلسة — يكفي واحد منها؛ نسمّيها بالاسم إن غابت كلها
+        const parsed = parseCookieString(raw);
+        const authKeys = ['__Secure-1PSID', 'SID', '__Secure-3PSID'];
+        const hasAuth = authKeys.some(k => parsed[k]);
+        if (!hasAuth) {
+            missing.push('كوكيز ناقصة: لا تحتوي أي معرف جلسة (__Secure-1PSID أو SID أو __Secure-3PSID) — انسخ سطر Cookie كاملاً وليس جزءاً منه');
         }
         return { ok: missing.length === 0, missing };
     },
@@ -294,7 +315,7 @@ const geminiProvider = {
      * sessionId هنا = `gem:<uuid>` نديرها داخلياً (حالة Gemini لكل قناة)
      */
     async chat({ prompt, sessionId = null, thinking = false, config = {}, agentId = 'default' }) {
-        const rawCookies = String(config.gemini_cookies || '').trim();
+        const rawCookies = normalizeCookiesInput(config.gemini_cookies);
         if (!rawCookies) throw new Error('gemini_cookies مفقودة لهذا الوكيل');
 
         evictOldSessions();
@@ -347,7 +368,7 @@ const geminiProvider = {
 
     /** اختبار اتصال حقيقي — استخراج توكنات الصفحة بالكوكيز الحالية */
     async testConnection(config = {}) {
-        const rawCookies = String(config.gemini_cookies || '').trim();
+        const rawCookies = normalizeCookiesInput(config.gemini_cookies);
         if (!rawCookies) throw new Error('gemini_cookies مفقودة');
         const cookies = parseCookieString(rawCookies);
         const { snlm0e } = await fetchTokens(cookies, config.gemini_base_url);
@@ -357,4 +378,4 @@ const geminiProvider = {
 
 module.exports = geminiProvider;
 // داخلية — للاختبارات
-module.exports.__internals = { parseCookieString, cookiesToString, mergeSetCookies, extractTokens, sessions, dropSession };
+module.exports.__internals = { parseCookieString, cookiesToString, mergeSetCookies, extractTokens, sessions, dropSession, normalizeCookiesInput };

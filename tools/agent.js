@@ -362,6 +362,8 @@ async function runAgent(
                 'get_server_icon', 'get_server_banner', 'send_image',
                 // 🌐 حواس خارج ديسكورد — قراءة الروابط فقط (البحث للنموذج نفسه)
                 'read_url',
+                // 📁 إنشاء ملفات وإرفاقها في القناة
+                'create_file',
                 // 🎨 توليد الصور (مدعوم مع مزود Qwen)
                 'generate_image',
                 // 🧠 الذاكرة طويلة المدى (مخصصة لمستخدم الطلب فقط)
@@ -490,6 +492,39 @@ async function runAgent(
                                     ? { ok: true, url: r.url, title: r.title || undefined, type: r.type, content: r.content, truncated: r.truncated || false }
                                     : _err(r.error || 'فشل جلب الصفحة');
                                 track('web');
+                            }
+                            break;
+                        }
+
+                        // ═══════════════════════════════════════════
+                        //  📁 إنشاء ملف وإرفاقه في القناة — يصل مع الرد النهائي
+                        //  (الأسماء البديلة القديمة file / tool=file ما زالت مدعومة)
+                        // ═══════════════════════════════════════════
+                        case 'create_file': {
+                            const fname = String(params.filename || params.name || params.file_name || '').trim();
+                            const body = params.content ?? params.text ?? params.data;
+                            if (!fname || body === undefined || body === null || String(body) === '') {
+                                result = _err('حدد اسم الملف ومحتواه: {"filename": "report.txt", "content": "نص الملف الكامل"}');
+                                break;
+                            }
+                            const safeName = (path.basename(fname).replace(/[^\w.\-\u0600-\u06FF ()]/g, '_').slice(0, 100)) || 'file.txt';
+                            const bytes = Buffer.byteLength(String(body), 'utf8');
+                            if (bytes > 8 * 1024 * 1024) {
+                                result = _err(`المحتوى أكبر من 8MB (${bytes} بايت) — قسّمه على عدة ملفات أصغر.`);
+                                break;
+                            }
+                            try {
+                                const tmpPath = path.join(os.tmpdir(), `disor_file_${Date.now()}_${crypto.randomBytes(4).toString('hex')}_${safeName}`);
+                                fs.writeFileSync(tmpPath, String(body), 'utf8');
+                                filesToSend.push(tmpPath);
+                                result = {
+                                    ok: true,
+                                    filename: safeName,
+                                    bytes,
+                                    note: 'سيُرفق الملف تلقائياً مع ردك النهائي — لا تقل للمستخدم أن الملف أُرسل قبل أن تكتب الرد النهائي فعلاً.',
+                                };
+                            } catch (e) {
+                                result = _err(`فشل إنشاء الملف: ${String(e.message).slice(0, 200)}`);
                             }
                             break;
                         }

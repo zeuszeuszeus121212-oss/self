@@ -99,9 +99,9 @@ async function run() {
     {
         const memberOff = buildSystem('Bot', 'default', false, 'member', '', { read_url: false });
         assert.ok(memberOff.includes('قراءة الروابط معطّلة'));
-        assert.ok(!memberOff.includes('read_url وgenerate_image وremember'));
+        assert.ok(!memberOff.includes('read_url وgenerate_image وcreate_file وremember'));
         const memberOn = buildSystem('Bot', 'default', false, 'member', '', {});
-        assert.ok(memberOn.includes('read_url وgenerate_image وremember'));
+        assert.ok(memberOn.includes('read_url وgenerate_image وcreate_file وremember'), 'create_file ضمن أدوات member');
         ok('3) قائمة أدوات member في الـ prompt تعكس التعطيل');
     }
 

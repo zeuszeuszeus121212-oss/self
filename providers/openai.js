@@ -174,7 +174,9 @@ const openaiProvider = {
 
     modalFields: [
         { id: 'openai_base_url', label: 'Base URL (مثل https://api.openai.com/v1)', style: 'short', required: true },
-        { id: 'openai_api_key', label: 'API Key (Bearer)', style: 'short', required: true },
+        // ⚠️ 4000 = حد ديسكورد — بعض البروكسيات تأخذ كوكيز كاملة كمفتاح (مثل Gemini cookies)
+        // والحد القديم 300 كان يقصّها بصمت = "failed to get session tokens"
+        { id: 'openai_api_key', label: 'API Key / Token / Cookies (حتى 4000 حرف)', style: 'short', required: true, maxLength: 4000 },
         { id: 'openai_model', label: 'اسم النموذج (مثل gpt-4o-mini)', style: 'short', required: true },
     ],
 
