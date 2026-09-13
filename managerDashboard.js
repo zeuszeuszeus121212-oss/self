@@ -285,6 +285,9 @@ async function renderAgent(manager, agentId) {
     ]), status === 'failed' ? COLORS.danger : running ? COLORS.success : COLORS.dark);
     const isRunning = status === 'running' || running;
     const isBusy = ['starting', 'stopping', 'restarting'].includes(status);
+    // POW خاص بمزود DeepSeek فقط (تحدي إثبات عمل لـ chat.deepseek.com)
+    // وكلاء Qwen / OpenAI لا يستخدمون POW — لا داعي لإظهار الزر لهم
+    const isDeepSeekAgent = providerObj.id === 'deepseek';
     const actions = [
         button(`${DASH_PREFIX}:agent:${id}:start`, 'تشغيل', ButtonStyle.Success, '▶️', isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:stop`, 'إيقاف', ButtonStyle.Danger, '⏹️', !isRunning || isBusy),
@@ -293,7 +296,7 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agent:${id}:aiprovider`, 'المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${id}:channels`, 'القنوات', ButtonStyle.Secondary, '📡'),
         button(`${DASH_PREFIX}:agent:${id}:conversations`, 'المحادثات', ButtonStyle.Secondary, '💬'),
-        button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡'),
+        ...(isDeepSeekAgent ? [button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡')] : []),
         button(`${DASH_PREFIX}:agent:${id}:account`, 'الحساب والفعاليات', ButtonStyle.Secondary, '👤'),
         button(`${DASH_PREFIX}:agent:${id}:notify`, 'الإشعارات', ButtonStyle.Secondary, '🔔'),
         button(`${DASH_PREFIX}:agent:${id}:logs:0`, 'Timeline', ButtonStyle.Secondary, '📜'),
@@ -1147,7 +1150,14 @@ async function handleDashboardInteraction(interaction, manager) {
         if (action === 'notify') return updateInteraction(interaction, await renderNotifications(agentId, interaction.guildId));
         if (action === 'channels') return updateInteraction(interaction, await renderAgentChannels(agentId, interaction.guildId));
         if (action === 'conversations') return updateInteraction(interaction, await renderAgentConversations(agentId, interaction.guildId));
-        if (action === 'provider') return updateInteraction(interaction, await renderAgentProvider(agentId, interaction.guildId));
+        if (action === 'provider') {
+            // حماية: POW خاص بـ DeepSeek — إن كان الوكيل على مزود آخر نعيده لصفحته
+            const agentForPow = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (agentForPow && getProviderOrFallback(agentForPow.provider).id !== 'deepseek') {
+                return updateInteraction(interaction, await renderAgent(manager, agentId));
+            }
+            return updateInteraction(interaction, await renderAgentProvider(agentId, interaction.guildId));
+        }
         if (action === 'aiprovider') return updateInteraction(interaction, await renderAgentAIProvider(agentId, interaction.guildId));
         if (action === 'account') return updateInteraction(interaction, await renderAccountSettings(agentId, interaction.guildId));
         if (action === 'account_adv') return updateInteraction(interaction, await renderAccountAdvanced(agentId, interaction.guildId));
@@ -1418,6 +1428,7 @@ module.exports = {
     isDashboardCommand,
     handleDashboardInteraction,
     renderHome,
+    renderAgent,
     COLORS,
     embed,
     linesBlock,

@@ -38,13 +38,7 @@ const fakeConfig = {
     allowed_channels_cache: new Map(),
     sessionLock: { acquire: async (fn) => fn() },
     agents_col: {
-        findOne: async () => ({
-            _id: FAKE_AGENT_ID,
-            name: 'TEST',
-            provider: 'qwen',
-            qwen_token: 'tok',
-            status: 'stopped',
-        }),
+        findOne: async () => currentFakeAgent,
     },
     logs_col: {
         find: () => ({ sort: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
@@ -54,7 +48,16 @@ const fakeConfig = {
 require.cache[cfgPath] = { id: cfgPath, filename: cfgPath, loaded: true, exports: fakeConfig };
 
 const { ObjectId } = require('mongodb');
-const { handleDashboardInteraction } = require('../managerDashboard');
+const { handleDashboardInteraction, renderAgent } = require('../managerDashboard');
+
+// الوكيل الوهمي الحالي — تتحكم به الاختبارات
+let currentFakeAgent = {
+    _id: FAKE_AGENT_ID,
+    name: 'TEST',
+    provider: 'qwen',
+    qwen_token: 'tok',
+    status: 'stopped',
+};
 
 // ---------- 2) أدوات المحاكاة ----------
 function makeInteraction({ customId, values = null, fields = null, isModal = false, isSelect = false }) {
@@ -248,8 +251,45 @@ async function run() {
         passed++; console.log('✅ 7) وكيل User Account مع Qwen → dash:create_modal:user:qwen');
     }
 
+    // ══════════════════════════════════════════════════════════
+    // اختبار 8: زر POW مخفي لوكلاء Qwen وOpenAI — ظاهر لـ DeepSeek فقط
+    // ══════════════════════════════════════════════════════════
+    {
+        const collectBtnIds = (payload) => {
+            const ids = [];
+            for (const row of payload?.components || []) {
+                for (const comp of row.components || []) ids.push(comp.data?.custom_id || comp.customId);
+            }
+            return ids;
+        };
+
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'QW', provider: 'qwen', qwen_token: 'tok', status: 'stopped' };
+        const qwenPage = await renderAgent(fakeManager, FAKE_AGENT_ID);
+        const qwenBtns = collectBtnIds(qwenPage);
+        assert.ok(!qwenBtns.includes('dash:agent:' + FAKE_AGENT_ID + ':provider'),
+            `وكيل Qwen يجب ألا يرى زر مزود POW — الأزرار: ${qwenBtns}`);
+
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'OA', provider: 'openai', openai_api_key: 'k', status: 'stopped' };
+        const oaPage = await renderAgent(fakeManager, FAKE_AGENT_ID);
+        assert.ok(!collectBtnIds(oaPage).includes('dash:agent:' + FAKE_AGENT_ID + ':provider'),
+            'وكيل OpenAI يجب ألا يرى زر مزود POW');
+
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'DS', provider: 'deepseek', deepseek_token: 'tok', status: 'stopped' };
+        const dsPage = await renderAgent(fakeManager, FAKE_AGENT_ID);
+        assert.ok(collectBtnIds(dsPage).includes('dash:agent:' + FAKE_AGENT_ID + ':provider'),
+            'وكيل DeepSeek يجب أن يرى زر مزود POW (كما كان)');
+
+        // وكيل قديم بدون حقل provider = deepseek — الزر يبقى ظاهراً (توافق قديم)
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'OLD', deepseek_token: 'tok', status: 'stopped' };
+        const oldPage = await renderAgent(fakeManager, FAKE_AGENT_ID);
+        assert.ok(collectBtnIds(oldPage).includes('dash:agent:' + FAKE_AGENT_ID + ':provider'),
+            'الوكيل القديم (بدون provider) يُعامل كـ DeepSeek — زر POW يبقى');
+
+        passed++; console.log('✅ 8) زر POW: مخفي لـ Qwen/OpenAI — ظاهر لـ DeepSeek والوكلاء القدامى');
+    }
+
     console.log(`\n════════════════════════════════`);
-    console.log(`النتيجة: ${passed}/7 اختبارات ناجحة`);
+    console.log(`النتيجة: ${passed}/8 اختبارات ناجحة`);
 }
 
 run().catch((e) => { console.error('❌ E2E FAILED:', e.message); process.exit(1); });

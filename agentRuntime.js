@@ -305,7 +305,11 @@ client.once('ready', async () => {
 
     try {
         // Bot Agent يسجل نقطة دخول Dashboard كواجهة فقط؛ التنفيذ الحقيقي يبقى في Manager Runtime.
-        const commands = uniqueCommands([...dashboardCommands(), ...agentRuntimeCommands()]);
+        // أمر مزود-باو (POW) خاص بمزود DeepSeek فقط — لا يُسجل لوكلاء Qwen / OpenAI
+        const commands = uniqueCommands([
+            ...dashboardCommands(),
+            ...agentRuntimeCommands().filter(cmd => providerId === 'deepseek' || cmd.name !== 'مزود-باو'),
+        ]);
 
         const rest = new REST({ version: '10' }).setToken(discordToken);
 
@@ -602,6 +606,11 @@ client.on('interactionCreate', async (interaction) => {
         else if (commandName === 'مزود-باو') {
             if (!member.permissions.has('Administrator')) {
                 await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+                return;
+            }
+            // POW خاص بـ DeepSeek — وكلاء Qwen / OpenAI لا يحتاجونه إطلاقاً
+            if (runtimeSettings.provider !== 'deepseek') {
+                await interaction.reply({ content: `ℹ️ مزود POW خاص بمزود DeepSeek فقط — هذا الوكيل يعمل على **${getProviderOrFallback(runtimeSettings.provider).label}** ولا يحتاج POW.` });
                 return;
             }
             const provider = interaction.options.getString('provider', true);
