@@ -145,28 +145,29 @@ function makeFields(map) {
 }
 
 // كل مكونات discord.js builders — نحوّلها إلى JSON ثم نستخرج المعرفات
+// 🎨 Components V2: الأزرار والقوائم متداخلة داخل حاويات — مسح تكراري
 function collectComponentIds(payload) {
     const ids = [];
     const data = typeof payload?.toJSON === 'function' ? payload.toJSON() : (payload || {});
     if (data.custom_id) ids.push('__modalId__:' + data.custom_id);
     if (data.title) ids.push('__title__:' + data.title);
-    for (const row of data.components || []) {
-        for (const comp of row.components || []) {
-            if (comp.custom_id) ids.push(comp.custom_id);
-        }
-    }
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        if (comp.custom_id) ids.push(comp.custom_id);
+        for (const child of comp.components || []) walk(child);
+    })(data);
     return ids;
 }
 
-// جمع كل المعرفات من صفحة (أزرار + قوائم منسدلة + قوائم قنوات)
+// جمع كل المعرفات من صفحة (أزرار + قوائم منسدلة + قوائم قنوات) — مسح تكراري (V2)
 function collectAllIds(payload) {
     const ids = [];
-    for (const row of payload?.components || []) {
-        const comps = row.components || [];
-        for (const c of comps) {
-            ids.push(c.data?.custom_id || c.customId || c.custom_id);
-        }
-    }
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        const cid = comp.data?.custom_id || comp.customId || comp.custom_id;
+        if (cid) ids.push(cid);
+        for (const child of comp.components || []) walk(child);
+    })(payload);
     return ids.filter(Boolean);
 }
 
@@ -320,10 +321,14 @@ async function run() {
     // ══════════════════════════════════════════════════════════
     {
         const collectBtnIds = (payload) => {
+            // 🎨 Components V2: الأزرار متداخلة داخل الحاوية — مسح تكراري
             const ids = [];
-            for (const row of payload?.components || []) {
-                for (const comp of row.components || []) ids.push(comp.data?.custom_id || comp.customId);
-            }
+            (function walk(comp) {
+                if (!comp || typeof comp !== 'object') return;
+                const cid = comp.data?.custom_id || comp.customId || comp.custom_id;
+                if (cid) ids.push(cid);
+                for (const child of comp.components || []) walk(child);
+            })(payload);
             return ids;
         };
 

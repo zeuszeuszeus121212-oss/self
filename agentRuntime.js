@@ -26,7 +26,6 @@ const {
     InteractionType,
     ApplicationCommandOptionType,
     ApplicationCommandType,
-    EmbedBuilder,
 } = require('discord.js');
 const axios = require('axios');
 
@@ -87,6 +86,8 @@ const {
 } = require('./discordAdapter');
 
 const { dashboardCommands, isDashboardCommand } = require('./managerDashboard');
+// 🎨 نظام التصميم الموحد — رسائل الوكيل أيضاً حاويات V2 لا إيمبدات
+const { v2Payload, V2_EPHEMERAL_FLAGS } = require('./ui');
 const { getAccountSettings, updateAccountSettings, forwardMessage, handleAccountInteraction, handleControlReply, trackGameMessage, startEvent, runEventSeries, rememberActivity, maybeAutoEvent, maybeScheduledEvent, humanizeDisplayName } = require('./accountAgent');
 const { getProviderOrFallback, isValidProvider, listProviders, extractProviderConfig, extractAllProviderConfigs } = require('./providers');
 const remindersModule = require('./reminders');
@@ -109,26 +110,28 @@ const AGENT_COLORS = Object.freeze({
 });
 
 /**
- * بناء Embed موحد للوكيل — نفس الهوية البصرية في كل الأوامر
+ * بناء رسالة موحدة للوكيل — Components V2 بنفس الهوية البصرية في كل الأوامر
+ * (حاوية بشريط لوني + ترويسة + جسم + توقيع سفلي — لا إيمبدات مسطحة)
  * @param {object} opts {title, description, color, botName, footer}
  */
 function agentEmbed({ title, description = '', color = AGENT_COLORS.primary, botName = 'Agent', footer = null }) {
-    const emb = new EmbedBuilder()
-        .setColor(color)
-        .setTitle(title)
-        .setDescription(description)
-        .setTimestamp();
-    emb.setFooter({ text: footer || `${botName} • Disor Platform` });
-    return emb;
+    const ui = require('./ui');
+    return ui.container({
+        accent: color,
+        title,
+        body: description,
+        footer: footer || `${botName} • Disor Platform`,
+    });
 }
 
-/** دليل الأوامر الكامل — مصنف ومصمم موحداً */
+/** دليل الأوامر الكامل — مصنف ومصمم موحداً (حاويتان V2 في رسالة واحدة) */
 function buildHelpEmbeds(botName, extra = {}) {
     const footerTxt = `${botName} • Disor Agent Platform`;
-    const e1 = new EmbedBuilder()
-        .setColor(AGENT_COLORS.primary)
-        .setTitle(`📖 دليل ${botName} — 1/2`)
-        .setDescription(
+    const ui = require('./ui');
+    const e1 = ui.container({
+        accent: AGENT_COLORS.primary,
+        title: `📖 دليل ${botName} — 1/2`,
+        body:
             'أنا وكيل ذكاء اصطناعي كامل داخل ديسكورد — أتحادث، أنفذ مهام إدارية، أبحث في الإنترنت، أتذكر، وأذكّرك.\n\n' +
             '**💬 التحدث معي**\n' +
             'منشنني `@` أو رد على رسالة مني — لا حاجة لأي أمر.\n' +
@@ -145,14 +148,14 @@ function buildHelpEmbeds(botName, extra = {}) {
             '• تُخزن في قاعدة البيانات (وليس في المحادثة) — تنجو من تصفير المحادثات وتعطّل البوت.\n' +
             '• **حقن تلقائي:** قبل كل رسالة تكلمني فيها، أهم 12 ذكرى عنك تُضاف لسياقي تلقائياً — فتفترض أنني أتذكر حتى لو لم تستدعِ شيئاً.\n' +
             '• **أدواتي:** `remember` (أحفظ)، `recall` (أستدعي بالبحث)، `forget_memory` (أنسى). الاستخدام: قل لي «تذكر أن…» وأنا أحفظ بنفسي.\n' +
-            '• التكرار لا يُكرر الحفظ (dedup)، والحد 200 ذكرى لكل مستخدم، والقديم الأقل تفاعلاً يُحذف تلقائياً.')
-        .setFooter({ text: footerTxt })
-        .setTimestamp();
+            '• التكرار لا يُكرر الحفظ (dedup)، والحد 200 ذكرى لكل مستخدم، والقديم الأقل تفاعلاً يُحذف تلقائياً.',
+        footer: footerTxt,
+    });
 
-    const e2 = new EmbedBuilder()
-        .setColor(AGENT_COLORS.info)
-        .setTitle(`📡 دليل ${botName} — 2/2 (أوامر الأدمن)`)
-        .setDescription(
+    const e2 = ui.container({
+        accent: AGENT_COLORS.info,
+        title: `📡 دليل ${botName} — 2/2 (أوامر الأدمن)`,
+        body:
             '**📡 قنوات المحادثة**\n' +
             '**/قناة-محادثة** — أضف قناة أتكلم فيها (الحد الأقصى 5)\n' +
             '**/قنوات-مسموحة** — القنوات النشطة حالياً\n' +
@@ -175,9 +178,9 @@ function buildHelpEmbeds(botName, extra = {}) {
             '**/فعاليات-وضع** — تلقائي أو يدوي\n' +
             '**/حساب-خاص** / **/حساب-منشن** / **/حساب-تسليمات** — قنوات تحويل الحساب الحقيقي\n' +
             '**/حساب-قناة-فعاليات** / **/حساب-رول-فعاليات** — إعدادات فعاليات الحساب\n\n' +
-            '> للوحة تحكم كاملة (إنشاء وكلاء، الإعدادات، المعرفة، الاستباقية، الإحصائيات) استخدم /panel من بوت المدير')
-        .setFooter({ text: footerTxt })
-        .setTimestamp();
+            '> للوحة تحكم كاملة (إنشاء وكلاء، الإعدادات، المعرفة، الاستباقية، الإحصائيات) استخدم /panel من بوت المدير',
+        footer: footerTxt,
+    });
     return [e1, e2];
 }
 
@@ -466,7 +469,7 @@ async function handlePersonalityUploadMessage(message) {
         color: AGENT_COLORS.success,
         botName: client.user.displayName || client.user.username,
     });
-    await message.reply({ embeds: [emb] });
+    await message.reply(v2Payload(emb));
     return true;
 }
 
@@ -476,7 +479,12 @@ const agentConfigSnapshot = { ...agentConfig };
 // التحقق من اكتمال إعدادات المزود (السلوك القديم محفوظ لـ DeepSeek)
 const validation = provider.validate(runtimeSettings.providerConfig);
 if (!validation.ok) {
-    throw new Error(`إعدادات مزود ${provider.label} ناقصة: ${validation.missing.join(', ')} مفقود لهذا الوكيل`);
+    // رسالة قابلة للتنفيذ: أين يكمل المالك بياناته بالضبط (نافذة أو ملف للقيم الطويلة)
+    throw new Error(
+        `إعدادات مزود ${provider.label} ناقصة: ${validation.missing.join(', ')}. ` +
+        'أكملها من لوحة التحكم: صفحة الوكيل ← الإعدادات ← «بيانات المزود»، ' +
+        'أو أرسل القيمة الطويلة كملف من زر «الكوكيز من ملف».'
+    );
 }
 
 if (!discordToken) throw new Error('discord_token مفقود لهذا الوكيل');
@@ -596,9 +604,9 @@ client.on('interactionCreate', async (interaction) => {
 
         if (commandName === 'اوامر' || commandName === 'مساعدة') {
             const botName = client.user.displayName || client.user.username;
-            const embeds = buildHelpEmbeds(botName);
-            await interaction.reply({ embeds, ephemeral: true }).catch(async () => {
-                await interaction.reply({ embeds });
+            const [c1, c2] = buildHelpEmbeds(botName);
+            await interaction.reply(v2Payload(c1, c2)).catch(async () => {
+                await interaction.reply(v2Payload(c1, c2));
             });
         }
 
@@ -948,16 +956,14 @@ client.on('interactionCreate', async (interaction) => {
                     return;
                 }
 
-                await interaction.reply({
-                    embeds: [agentEmbed({
+                await interaction.reply(v2Payload(agentEmbed({
                         title: newValue ? `🟢 ${label} مفعّلة الآن` : `🔴 ${label} معطّلة الآن`,
                         description: newValue
                             ? 'التغيير يعمل فوراً بدون إعادة تشغيل، ويُحفظ في اللوحة.'
                             : 'التغيير يعمل فوراً بدون إعادة تشغيل، ويُحفظ في اللوحة.',
                         color: newValue ? AGENT_COLORS.success : AGENT_COLORS.warning,
                         botName,
-                    })],
-                });
+                    })));
                 return;
             }
 
@@ -976,14 +982,12 @@ client.on('interactionCreate', async (interaction) => {
                 '> يُطبق التبديل فوراً بدون إعادة تشغيل — ويُحفظ في اللوحة.',
             ];
             const anyOn = (caps.thinking === true) || (caps.search === true) || (feats.read_url !== false);
-            await interaction.reply({
-                embeds: [agentEmbed({
+            await interaction.reply(v2Payload(agentEmbed({
                     title: '⚙️ ميزات وقدرات هذا الوكيل',
                     description: linesBlock(lines),
                     color: anyOn ? AGENT_COLORS.success : AGENT_COLORS.warning,
                     botName,
-                })],
-            });
+                })));
         }
 
         else if (commandName === 'الاحصائيات') {
@@ -1000,8 +1004,7 @@ client.on('interactionCreate', async (interaction) => {
             const toolsLine = s.top_tools.length
                 ? s.top_tools.map(([t, n], i) => `${i + 1}. \`${t}\` — **${n}**`).join('\n')
                 : '—';
-            await interaction.editReply({
-                embeds: [agentEmbed({
+            await interaction.editReply(v2Payload(agentEmbed({
                     title: '📊 إحصائيات آخر 7 أيام',
                     description: linesBlock([
                         `💬 **الرسائل المُعالجة:** ${s.messages}`,
@@ -1020,8 +1023,7 @@ client.on('interactionCreate', async (interaction) => {
                         usage.renderBars(s.per_day),
                     ]),
                     botName,
-                })],
-            }).catch(() => {});
+                }))).catch(() => {});
         }
 
     } catch (error) {

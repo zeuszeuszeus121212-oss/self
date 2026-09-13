@@ -110,6 +110,12 @@ function textOf(payload) {
     if (typeof j === 'string') return j; // ردود نصية مجردة
     const parts = [];
     if (j.content) parts.push(j.content);
+    // 🎨 Components V2: نص الرسالة داخل TextDisplay (type 10) المتداخلة في الحاويات
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        if (comp.content && typeof comp.content === 'string') parts.push(comp.content);
+        for (const child of comp.components || []) walk(child);
+    })(j);
     for (const e of j.embeds || []) {
         if (e.title) parts.push(e.title);
         for (const f of e.fields || []) parts.push(`${f.name} ${f.value}`);
@@ -127,11 +133,20 @@ const fakeManager = {
 fakeManager.runtimes.set(FAKE_AGENT_ID, { runtimeSettings: { provider: 'gemini', providerConfig: {}, fallback_configs: {} } });
 
 function findButton(page, suffix) {
-    for (const row of page.components || []) {
-        for (const b of row.components || []) {
-            const cid = b.customId || b.data?.custom_id || (b.toJSON ? b.toJSON().custom_id : '');
-            if (String(cid).endsWith(suffix)) return b;
+    // 🎨 Components V2: الأزرار متداخلة داخل الحاوية — مسح تكراري لكل الأعماق
+    function walk(comp) {
+        if (!comp) return null;
+        const cid = comp.customId || comp.data?.custom_id || '';
+        if (String(cid).endsWith(suffix)) return comp;
+        for (const child of comp.components || []) {
+            const found = walk(child);
+            if (found) return found;
         }
+        return null;
+    }
+    for (const top of page.components || []) {
+        const found = walk(top);
+        if (found) return found;
     }
     return null;
 }

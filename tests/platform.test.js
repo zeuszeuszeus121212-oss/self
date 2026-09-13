@@ -103,12 +103,14 @@ function makeFields(map) {
 }
 
 function collectAllIds(payload) {
+    // 🎨 Components V2: مسح تكراري لكل الأعماق (الأزرار داخل الحاويات)
     const ids = [];
-    for (const row of payload?.components || []) {
-        for (const c of row.components || []) {
-            ids.push(c.data?.custom_id || c.customId || c.custom_id);
-        }
-    }
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        const cid = comp.data?.custom_id || comp.customId || comp.custom_id;
+        if (cid) ids.push(cid);
+        for (const child of comp.components || []) walk(child);
+    })(payload);
     return ids.filter(Boolean);
 }
 

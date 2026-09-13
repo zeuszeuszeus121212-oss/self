@@ -17,6 +17,7 @@ const { Client, GatewayIntentBits, Partials, REST, Routes } = require('discord.j
 const { DISCORD_TOKEN, connectMongo } = require('./config');
 const { startAgentRuntime } = require('./agentRuntime');
 const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage, handlePersonalityUploadMessage, handleSecretUploadMessage } = require('./managerDashboard');
+const { v2Payload, V2_EPHEMERAL_FLAGS } = require('./ui');
 const secrets = require('./secrets');
 
 const LIFECYCLE = Object.freeze({
@@ -71,7 +72,8 @@ async function notify({ type = 'runtime', agentId = null, title = 'Runtime Event
         `النوع: **${type}**`,
         extra.reason ? `السبب: ${extra.reason}` : null,
     ]), color);
-    await channel.send({ embeds: [payload] }).catch((error) => console.error('[Notify]', error.message));
+    // 🎨 الإشعارات أيضاً على Components V2 — لا إيمبدات في المنصة كلها
+    await channel.send(v2Payload(payload)).catch((error) => console.error('[Notify]', error.message));
     return true;
 }
 
@@ -216,11 +218,14 @@ async function retireLegacyDefaultAgents() {
 /**
  * إنشاء وكيل جديد — يدعم المزودين المتعددين.
  * @param {object} opts
- *   - provider: 'deepseek' | 'qwen' | 'openai' (افتراضي deepseek للتوافق القديم)
- *   - providerConfig: { deepseek_token } | { qwen_token, qwen_model } | { openai_base_url, openai_api_key, openai_model }
+ *   - provider: 'deepseek' | 'qwen' | 'openai' | 'gemini' (افتراضي deepseek للتوافق القديم)
+ *   - providerConfig: { deepseek_token } | { qwen_token } | { openai_* } | { gemini_cookies }
+ *   - allowIncomplete: عندما true لا يفشل الإنشاء إن نقصت بيانات المزود —
+ *     يُنشأ الوكيل بعلم config_incomplete ويُكمل بياناته لاحقاً من صفحة الإعدادات
+ *     أو بإرسالها كملف (الكوكيز الطويلة مثلاً). الافتراضي false (سلوك صارم).
  *   التوافق القديم: استدعاء بـ deepseek_token مباشرة يعمل كما هو.
  */
-async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot', provider = null, providerConfig = {} }) {
+async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot', provider = null, providerConfig = {}, allowIncomplete = false }) {
     const cfg = require('./config');
     const { getProviderOrFallback } = require('./providers');
 
@@ -233,8 +238,11 @@ async function createAgent({ name, discord_token, deepseek_token, personality = 
     if (deepseek_token && !mergedProviderConfig.deepseek_token) mergedProviderConfig.deepseek_token = deepseek_token;
 
     // التحقق من اكتمال إعدادات المزود المختار
+    // 📎 النوافذ تقول «أو من ملف لاحقاً» — فلا يجوز أن يفشل الإنشاء ب«المفتاح مفقود»
+    // عندما يترك المستخدم الحقل فارغاً عن قصد ليُرسل القيمة كملف بعد الإنشاء.
     const validation = providerObj.validate(mergedProviderConfig);
-    if (!validation.ok) {
+    const incomplete = !validation.ok;
+    if (incomplete && !allowIncomplete) {
         throw new Error(`إعدادات مزود ${providerObj.label} ناقصة: ${validation.missing.join(', ')}`);
     }
 
@@ -245,6 +253,8 @@ async function createAgent({ name, discord_token, deepseek_token, personality = 
         token_type,
         provider       : providerObj.id,
         ...mergedProviderConfig, // حقول المزود تُخزن بحقولها الخاصة (deepseek_token / qwen_token / openai_base_url ...)
+        config_incomplete        : incomplete,
+        missing_provider_fields  : incomplete ? validation.missing : [],
         status         : LIFECYCLE.STOPPED,
         created_at     : new Date(),
         updated_at     : new Date(),
@@ -285,7 +295,10 @@ async function startManagerBot() {
             await handleDashboardInteraction(interaction, module.exports);
         } catch (error) {
             console.error('[Dashboard Error]', error);
-            const payload = { embeds: [embed('⚠️ خطأ في Dashboard', linesBlock([error.message || String(error)]), COLORS.danger)] };
+            // 🎨 رسائل الخطأ على Components V2 — حاوية بشريط أحمر لا إيمبد
+            const payload = v2Payload(embed('خطأ في Dashboard', linesBlock([
+                error.message || String(error),
+            ]), COLORS.danger));
             if (interaction.replied || interaction.deferred) await interaction.followUp(payload).catch(() => {});
             else await interaction.reply(payload).catch(() => {});
         }

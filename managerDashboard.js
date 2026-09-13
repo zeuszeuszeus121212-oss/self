@@ -3,7 +3,6 @@
 const { ObjectId } = require('mongodb');
 const {
     SlashCommandBuilder,
-    EmbedBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
@@ -25,6 +24,9 @@ const knowledge = require('./knowledge');
 const usage = require('./usage');
 const proactive = require('./proactive');
 const { is_text_attachment, fetchTextAttachment, clampPersonalityText, PERSONALITY_MAX_CHARS } = require('./utils');
+// 🎨 نظام التصميم الموحد على Components V2 — كل الصفحات حاويات لا إيمبدات
+const ui = require('./ui');
+const { v2Payload, withRows, V2_EPHEMERAL_FLAGS } = ui;
 
 // 📚 حالة رفع ملفات المعرفة: `${guildId}:${userId}` → { agentId, expiresAt }
 const pendingKnowledgeUploads = new Map();
@@ -161,16 +163,14 @@ function agentIcon(agent) {
 }
 
 function embed(title, description, color = COLORS.primary) {
-    return new EmbedBuilder()
-        .setColor(color)
-        .setTitle(title)
-        .setDescription(description || '—')
-        .setTimestamp()
-        .setFooter({ text: 'Disor Control Center • Dashboard-grade management' });
+    // 🎨 Components V2 — حاوية بشريط لوني كامل الارتفاع بدل الإيمبد المسطح.
+    // نفس التوقيع القديم (title, description, color) حتى تبقى كل الصفحات تعمل.
+    return ui.container({ accent: color, title, body: description, footer: `🧭 ${ui.BRAND}` });
 }
 
 function linesBlock(lines) {
-    return ['━━━━━━━━━━━━━━━━━━━━', ...lines.filter(Boolean), '━━━━━━━━━━━━━━━━━━━━'].join('\n');
+    // الفواصل الحقيقية أصبحت من ديسكورد نفسه (Separator) — لا خطوط مرسومة يدوياً
+    return lines.filter(Boolean).join('\n');
 }
 
 function button(id, label, style = ButtonStyle.Secondary, emoji, disabled = false) {
@@ -199,6 +199,28 @@ async function updateManagerSettings(guildId, patch) {
     );
 }
 
+/**
+ * 🧩 إعادة حساب اكتمال بيانات المزود بعد أي حفظ (نافذة بيانات المزود / ملف سر / تعديل عام).
+ * يُحدّث علم config_incomplete وقائمة الحقول الناقصة — يُمسح تلقائياً عند اكتمال كل شيء.
+ * @returns {boolean|null} true=اكتمل، false=ما زال ناقصاً، null=الوكيل غير موجود
+ */
+async function recomputeConfigCompleteness(agentId) {
+    const cfg = require('./config');
+    const doc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }).catch(() => null);
+    if (!doc) return null;
+    const providerObj = getProviderOrFallback(doc.provider);
+    const fresh = secrets.decryptAgentDoc(doc);
+    const v = providerObj.validate(extractProviderConfig(fresh));
+    const complete = Boolean(v.ok);
+    if (Boolean(doc.config_incomplete) !== !complete || (doc.missing_provider_fields || []).join() !== (v.missing || []).join()) {
+        await cfg.agents_col.updateOne(
+            { _id: new ObjectId(agentId) },
+            { $set: { config_incomplete: !complete, missing_provider_fields: v.missing || [], updated_at: new Date() } },
+        );
+    }
+    return complete;
+}
+
 async function hasDashboardAccess(interaction) {
     const cfg = require('./config');
     if (String(interaction.user.id) === String(cfg.BOT_OWNER_ID)) return true;
@@ -213,7 +235,7 @@ async function hasDashboardAccess(interaction) {
 
 async function requireAccess(interaction) {
     if (await hasDashboardAccess(interaction)) return true;
-    await interaction.reply({ embeds: [embed('⛔ صلاحية مرفوضة', linesBlock(['هذه لوحة إدارة مركزية ولا يمكن استخدامها إلا بواسطة المالك أو رتبة الإدارة المحددة.']), COLORS.danger)] }).catch(() => {});
+    await interaction.reply({ ...v2Payload(embed('⛔ صلاحية مرفوضة', linesBlock(['هذه لوحة إدارة مركزية ولا يمكن استخدامها إلا بواسطة المالك أو رتبة الإدارة المحددة.']), COLORS.danger)) }).catch(() => {});
     return false;
 }
 
@@ -257,7 +279,7 @@ async function renderHome(manager, interaction) {
         button(`${DASH_PREFIX}:system`, 'حالة النظام', ButtonStyle.Secondary, ICONS.system),
         button(`${DASH_PREFIX}:home`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
     ];
-    return { embeds: [emb], components: rowsFromButtons(buttons) };
+    return { ...v2Payload(withRows(emb, rowsFromButtons(buttons))) };
 }
 
 function agentOption(agent) {
@@ -300,13 +322,13 @@ async function renderAgents(manager, page = 0) {
         button(`${DASH_PREFIX}:create`, 'إنشاء وكيل', ButtonStyle.Success, ICONS.add),
         button(`${DASH_PREFIX}:agents:${safePage}`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 async function renderAgent(manager, agentId) {
     const cfg = require('./config');
     const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
-    if (!agent) return { embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحًا.']), COLORS.danger)], components: rowsFromButtons([button(`${DASH_PREFIX}:agents:0`, 'عودة للوكلاء', ButtonStyle.Secondary, ICONS.back)]) };
+    if (!agent) return { ...v2Payload(withRows(embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحًا.']), COLORS.danger), rowsFromButtons([button(`${DASH_PREFIX}:agents:0`, 'عودة للوكلاء', ButtonStyle.Secondary, ICONS.back)]))) };
     const id = String(agent._id);
     const running = manager.runtimes.has(id);
     const status = agent.status || (running ? 'running' : 'stopped');
@@ -318,6 +340,11 @@ async function renderAgent(manager, agentId) {
         `📌 **النوع:** ${tokenTypeLabel(agent)}`,
         `${providerObj.emoji} **المزود:** ${providerObj.label} — ${providerReady ? 'جاهز ✅' : 'ناقص ❌'}`,
         `↳ ${providerObj.describe(extractProviderConfig(agentPlain))}`,
+        // 🧩 وكيل أُنشئ ببيانات مزود ناقصة (سيُرسل المالك القيم لاحقاً كملف/نافذة)
+        ...(agent.config_incomplete ? [
+            `⚠️ **بيانات المزود ناقصة:** ${(agent.missing_provider_fields || []).join('، ') || '—'}`,
+            '> أكملها من «الإعدادات» ← «بيانات المزود» أو «الكوكيز من ملف» — لن يرد الوكيل قبل ذلك.',
+        ] : []),
         `${statusIcon(status)} **الحالة:** ${status}`,
         `🧩 **Runtime:** ${running ? 'متصل ونشط' : 'غير نشط'}`,
         `🎭 **الشخصية:** ${agent.personality ? trim(agent.personality, 120) : 'افتراضية'}`,
@@ -352,7 +379,7 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agents:0`, 'عودة', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:agent:${id}:view`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
     ];
-    return { embeds: [emb], components: rowsFromButtons(actions) };
+    return { ...v2Payload(withRows(emb, rowsFromButtons(actions))) };
 }
 
 function createTypeView() {
@@ -372,7 +399,7 @@ function createTypeView() {
                 { label: 'User Account', value: 'user', description: 'Runtime فقط بدون Commands', emoji: ICONS.user },
             ]),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])] };
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])])) };
 }
 
 /**
@@ -399,10 +426,10 @@ function createProviderView(type) {
                 emoji       : p.emoji,
             }))),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([
         button(`${DASH_PREFIX}:create`, 'رجوع لنوع الوكيل', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-    ])] };
+    ])])) };
 }
 
 /**
@@ -470,10 +497,10 @@ function renderCreateOpenAiSource(type, savedProviders) {
                 { label: '✍️ إدخال يدوي', value: 'manual', description: 'كتابة base_url والمفتاح والنموذج يدوياً', emoji: '✍️' },
             ]),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([
         button(`${DASH_PREFIX}:create`, 'رجوع', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-    ])] };
+    ])])) };
 }
 
 /**
@@ -495,10 +522,10 @@ function renderCreateOpenAiModel(type, doc, models) {
                 value: String(m).slice(0, 100),
             }))),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([
         button(`${DASH_PREFIX}:create`, 'رجوع', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-    ])] };
+    ])])) };
 }
 
 /**
@@ -614,7 +641,7 @@ async function renderNotifications(agentId = null, guildId = null) {
             button(`${DASH_PREFIX}:notify_test`, 'إرسال اختبار', ButtonStyle.Primary, '🧪'),
         ]),
     ];
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 async function renderSettings(guildId) {
@@ -626,13 +653,13 @@ async function renderSettings(guildId) {
         `🔁 إعادة الاتصال: مفعلة عبر Manager Lifecycle`,
         `🧾 التسجيل: مفعّل في agent_logs`,
     ]), COLORS.dark);
-    return { embeds: [emb], components: [
+    return { ...v2Payload(withRows(emb, [
         new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`${DASH_PREFIX}:settings_admin_role`).setPlaceholder('اختر رتبة الإدارة للوحة')),
         ...rowsFromButtons([
             button(`${DASH_PREFIX}:notifications`, 'قناة الإشعارات', ButtonStyle.Secondary, ICONS.notifications),
             button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
         ]),
-    ] };
+    ])) };
 }
 
 async function renderLogs(agentId = null, page = 0) {
@@ -649,11 +676,11 @@ async function renderLogs(agentId = null, page = 0) {
         ...rows,
     ]), COLORS.dark);
     const back = agentId ? `${DASH_PREFIX}:agent:${agentId}:view` : `${DASH_PREFIX}:home`;
-    return { embeds: [emb], components: rowsFromButtons([
+    return { ...v2Payload(withRows(emb, rowsFromButtons([
         button(back, 'عودة', ButtonStyle.Secondary, ICONS.back),
         button(agentId ? `${DASH_PREFIX}:agent:${agentId}:logs:${safePage - 1}` : `${DASH_PREFIX}:logs:${safePage - 1}`, 'السابق', ButtonStyle.Secondary, '⬅️', safePage <= 0),
         button(agentId ? `${DASH_PREFIX}:agent:${agentId}:logs:${safePage + 1}` : `${DASH_PREFIX}:logs:${safePage + 1}`, 'التالي', ButtonStyle.Secondary, '➡️', safePage >= pages - 1),
-    ]) };
+    ]))) };
 }
 
 async function renderStats(manager) {
@@ -686,7 +713,7 @@ async function renderStats(manager) {
         usageLine,
         'إحصائيات مفصلة لكل وكيل: صفحة الوكيل ← زر «الإحصائيات» 📊',
     ]), COLORS.info);
-    return { embeds: [emb], components: rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:stats`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]) };
+    return { ...v2Payload(withRows(emb, rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:stats`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]))) };
 }
 
 async function renderSystem(manager) {
@@ -699,7 +726,7 @@ async function renderSystem(manager) {
         `Runtimes: **${manager.runtimes.size}**`,
         `Uptime: **${Math.floor(process.uptime())}s**`,
     ]), COLORS.dark);
-    return { embeds: [emb], components: rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:system`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]) };
+    return { ...v2Payload(withRows(emb, rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:system`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]))) };
 }
 
 async function updateInteraction(interaction, payload) {
@@ -761,7 +788,7 @@ async function renderProviders(notice = null) {
         button(`${DASH_PREFIX}:prov_add`, '➕ إضافة مزود', ButtonStyle.Success, ICONS.add),
         button(`${DASH_PREFIX}:home`, 'عودة للوحة', ButtonStyle.Secondary, ICONS.back),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 /** نافذة إضافة مزود — الخطوة 1 من المعالج التفاعلي */
@@ -845,7 +872,7 @@ function renderProviderModelsStep(interaction, draft, fetchNote) {
         button(`${DASH_PREFIX}:prov_save_anyway`, 'حفظ كما هو', ButtonStyle.Success, '💾'),
         button(`${DASH_PREFIX}:providers`, 'إلغاء', ButtonStyle.Secondary, '❌'),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 // ---------- واجهة بناء الجدولة ----------
@@ -892,7 +919,7 @@ function renderScheduleBuilder(state) {
             button(`${DASH_PREFIX}:schedule_cancel`, 'إلغاء', ButtonStyle.Secondary),
         ]),
     ];
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 function hourSelect(customId, placeholder) {
@@ -942,7 +969,7 @@ async function handleScheduleInteraction(interaction, manager) {
                     Array.from({length:30}, (_,i) => ({ label: `${i+1} أيام`, value: String(i+1) }))
                 )
             );
-            await interaction.update({ embeds: [embed('🗓️ عدد الأيام', 'اختر عدد الأيام التي تبدأ من اليوم.')], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+            await interaction.update({ ...v2Payload(withRows(embed('🗓️ عدد الأيام', 'اختر عدد الأيام التي تبدأ من اليوم.'), [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         }
         return true;
     }
@@ -963,7 +990,7 @@ async function handleScheduleInteraction(interaction, manager) {
 
     if (id === `${DASH_PREFIX}:schedule_add_range`) {
         state.step = 'range_start_hour';
-        await interaction.update({ embeds: [embed('⏰ نطاق زمني - ساعة البداية', 'اختر ساعة البداية (نظام 12 ساعة).')], components: [hourSelect(`${DASH_PREFIX}:schedule_range_start_hour`, 'ساعة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('⏰ نطاق زمني - ساعة البداية', 'اختر ساعة البداية (نظام 12 ساعة).'), [hourSelect(`${DASH_PREFIX}:schedule_range_start_hour`, 'ساعة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -971,14 +998,14 @@ async function handleScheduleInteraction(interaction, manager) {
         const hour = parseInt(interaction.values[0], 10);
         state.tempSlot = { type: 'range', start: { hour } };
         state.step = 'range_start_minute';
-        await interaction.update({ embeds: [embed('⏰ نطاق زمني - دقيقة البداية', 'اختر دقيقة البداية.')], components: [minuteSelect(`${DASH_PREFIX}:schedule_range_start_min`, 'دقيقة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('⏰ نطاق زمني - دقيقة البداية', 'اختر دقيقة البداية.'), [minuteSelect(`${DASH_PREFIX}:schedule_range_start_min`, 'دقيقة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
     if (id === `${DASH_PREFIX}:schedule_range_start_min`) {
         state.tempSlot.start.minute = parseInt(interaction.values[0], 10);
         state.step = 'range_end_hour';
-        await interaction.update({ embeds: [embed('⏰ نطاق زمني - ساعة النهاية', 'اختر ساعة النهاية.')], components: [hourSelect(`${DASH_PREFIX}:schedule_range_end_hour`, 'ساعة النهاية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('⏰ نطاق زمني - ساعة النهاية', 'اختر ساعة النهاية.'), [hourSelect(`${DASH_PREFIX}:schedule_range_end_hour`, 'ساعة النهاية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -986,7 +1013,7 @@ async function handleScheduleInteraction(interaction, manager) {
         const hour = parseInt(interaction.values[0], 10);
         state.tempSlot.end = { hour };
         state.step = 'range_end_minute';
-        await interaction.update({ embeds: [embed('⏰ نطاق زمني - دقيقة النهاية', 'اختر دقيقة النهاية.')], components: [minuteSelect(`${DASH_PREFIX}:schedule_range_end_min`, 'دقيقة النهاية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('⏰ نطاق زمني - دقيقة النهاية', 'اختر دقيقة النهاية.'), [minuteSelect(`${DASH_PREFIX}:schedule_range_end_min`, 'دقيقة النهاية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -1001,7 +1028,7 @@ async function handleScheduleInteraction(interaction, manager) {
 
     if (id === `${DASH_PREFIX}:schedule_add_count`) {
         state.step = 'count_start_hour';
-        await interaction.update({ embeds: [embed('🔢 عدد فعاليات - ساعة البداية', 'اختر ساعة بدء الفعاليات.')], components: [hourSelect(`${DASH_PREFIX}:schedule_count_start_hour`, 'ساعة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('🔢 عدد فعاليات - ساعة البداية', 'اختر ساعة بدء الفعاليات.'), [hourSelect(`${DASH_PREFIX}:schedule_count_start_hour`, 'ساعة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -1009,7 +1036,7 @@ async function handleScheduleInteraction(interaction, manager) {
         const hour = parseInt(interaction.values[0], 10);
         state.tempSlot = { type: 'count', start: { hour } };
         state.step = 'count_start_minute';
-        await interaction.update({ embeds: [embed('🔢 عدد فعاليات - دقيقة البداية', 'اختر دقيقة البداية.')], components: [minuteSelect(`${DASH_PREFIX}:schedule_count_start_min`, 'دقيقة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('🔢 عدد فعاليات - دقيقة البداية', 'اختر دقيقة البداية.'), [minuteSelect(`${DASH_PREFIX}:schedule_count_start_min`, 'دقيقة البداية'), ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -1021,7 +1048,7 @@ async function handleScheduleInteraction(interaction, manager) {
                 Array.from({length:25}, (_,i) => ({ label: `${i+1}`, value: String(i+1) }))
             )
         );
-        await interaction.update({ embeds: [embed('🔢 عدد فعاليات - العدد', 'اختر عدد الفعاليات.')], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('🔢 عدد فعاليات - العدد', 'اختر عدد الفعاليات.'), [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -1040,7 +1067,7 @@ async function handleScheduleInteraction(interaction, manager) {
         const row = new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder().setCustomId(`${DASH_PREFIX}:schedule_remove_select`).setPlaceholder('اختر فترة للحذف').addOptions(options)
         );
-        await interaction.update({ embeds: [embed('🗑️ حذف فترة', 'اختر الفترة التي تريد حذفها.')], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])] });
+        await interaction.update({ ...v2Payload(withRows(embed('🗑️ حذف فترة', 'اختر الفترة التي تريد حذفها.'), [row, ...rowsFromButtons([button(`${DASH_PREFIX}:schedule_back`, 'رجوع', ButtonStyle.Secondary)])])) });
         return true;
     }
 
@@ -1102,7 +1129,7 @@ async function handleDashboardInteraction(interaction, manager) {
             const mode = interaction.options.getString('mode', true); // 'credits' أو 'no_credits'
             const agents = await cfg.agents_col.find({}).sort({ name: 1 }).limit(25).toArray();
             if (!agents.length) {
-                await interaction.reply({ embeds: [embed('❌ لا يوجد وكلاء', linesBlock(['لا يوجد وكلاء في قاعدة البيانات.']), COLORS.danger)], ephemeral: true });
+                await interaction.reply({ ...v2Payload(embed('❌ لا يوجد وكلاء', linesBlock(['لا يوجد وكلاء في قاعدة البيانات.']), COLORS.danger)), flags: V2_EPHEMERAL_FLAGS });
                 return true;
             }
             const emb = embed('🔧 تشغيل يدوي', linesBlock([
@@ -1116,7 +1143,7 @@ async function handleDashboardInteraction(interaction, manager) {
                     .setPlaceholder('اختر الوكيل')
                     .addOptions(agents.map(agentOption)),
             );
-            await interaction.reply({ embeds: [emb], components: [row] });
+            await interaction.reply({ ...v2Payload(withRows(emb, [row])) });
             return true;
         }
 
@@ -1145,12 +1172,12 @@ async function handleDashboardInteraction(interaction, manager) {
         const { startEvent, WIN_RE, manualRunNoCredits } = require('./accountAgent');
         const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
         if (!agent) {
-            await interaction.update({ embeds: [embed('❌ وكيل غير صالح', linesBlock(['الوكيل المختار لم يعد موجوداً.']), COLORS.danger)], components: [] });
+            await interaction.update({ ...v2Payload(withRows(embed('❌ وكيل غير صالح', linesBlock(['الوكيل المختار لم يعد موجوداً.']), COLORS.danger), [])) });
             return true;
         }
         const runtime = manager.runtimes.get(String(agentId));
         if (!runtime || !runtime.client) {
-            await interaction.update({ embeds: [embed('❌ الوكيل غير نشط', linesBlock(['يجب أن يكون الوكيل في حالة تشغيل (Runtime نشط) لتنفيذ الفعاليات.']), COLORS.danger)], components: [] });
+            await interaction.update({ ...v2Payload(withRows(embed('❌ الوكيل غير نشط', linesBlock(['يجب أن يكون الوكيل في حالة تشغيل (Runtime نشط) لتنفيذ الفعاليات.']), COLORS.danger), [])) });
             return true;
         }
 
@@ -1164,7 +1191,7 @@ async function handleDashboardInteraction(interaction, manager) {
                         || await runtime.client.channels.fetch(channelId).catch(() => null);
 
         if (!agentChannel || !agentChannel.send) {
-            await interaction.update({ embeds: [embed('❌ قناة غير صالحة', linesBlock(['قناة الفعاليات غير موجودة أو لا يمكن للوكيل رؤيتها/الكتابة فيها.']), COLORS.danger)], components: [] });
+            await interaction.update({ ...v2Payload(withRows(embed('❌ قناة غير صالحة', linesBlock(['قناة الفعاليات غير موجودة أو لا يمكن للوكيل رؤيتها/الكتابة فيها.']), COLORS.danger), [])) });
             return true;
         }
 
@@ -1174,7 +1201,7 @@ async function handleDashboardInteraction(interaction, manager) {
             manualRunNoCredits.set(noCreditsKey, true);
         }
 
-        await interaction.update({ embeds: [embed('⏳ جاري تشغيل الفعاليات', linesBlock([`الوكيل: **${agent.name || agentId}**`, `عدد الفعاليات: **${count}**`, `الوضع: **${noCredits ? 'بدون كردت' : 'مع كردت'}**`, 'سيتم إرسال الفعالية التالية بعد ظهور نتيجة الفعالية السابقة.']), COLORS.info)], components: [] });
+        await interaction.update({ ...v2Payload(withRows(embed('⏳ جاري تشغيل الفعاليات', linesBlock([`الوكيل: **${agent.name || agentId}**`, `عدد الفعاليات: **${count}**`, `الوضع: **${noCredits ? 'بدون كردت' : 'مع كردت'}**`, 'سيتم إرسال الفعالية التالية بعد ظهور نتيجة الفعالية السابقة.']), COLORS.info), [])) });
 
         try {
             let completed = 0;
@@ -1190,9 +1217,9 @@ async function handleDashboardInteraction(interaction, manager) {
                 } catch (e) {}
                 completed++;
             }
-            await interaction.followUp({ embeds: [embed('✅ اكتملت الفعاليات', linesBlock([`تم تشغيل **${completed}** فعالية بنجاح عبر الوكيل **${agent.name || agentId}**`]), COLORS.success)], ephemeral: true });
+            await interaction.followUp({ ...v2Payload(embed('✅ اكتملت الفعاليات', linesBlock([`تم تشغيل **${completed}** فعالية بنجاح عبر الوكيل **${agent.name || agentId}**`]), COLORS.success)), flags: V2_EPHEMERAL_FLAGS });
         } catch (err) {
-            await interaction.followUp({ embeds: [embed('❌ خطأ', linesBlock([`حدث خطأ أثناء تشغيل الفعاليات: ${err.message}`]), COLORS.danger)], ephemeral: true });
+            await interaction.followUp({ ...v2Payload(embed('❌ خطأ', linesBlock([`حدث خطأ أثناء تشغيل الفعاليات: ${err.message}`]), COLORS.danger)), flags: V2_EPHEMERAL_FLAGS });
         } finally {
             if (noCredits) {
                 manualRunNoCredits.delete(noCreditsKey);
@@ -1347,10 +1374,10 @@ async function handleDashboardInteraction(interaction, manager) {
             '',
             'لن يُحذف أي وكيل — لكن الوكلاء الذين يستخدمون بياناته لن يتأثرون إطلاقاً (بياناتهم منسوخة عندهم).',
         ]), COLORS.warning);
-        return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+        return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
             button(`${DASH_PREFIX}:prov_delete_confirm:${docId}`, 'تأكيد الحذف', ButtonStyle.Danger, '🗑️'),
             button(`${DASH_PREFIX}:providers`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-        ]) });
+        ]))) });
     }
     if (id.startsWith(`${DASH_PREFIX}:prov_delete_confirm:`)) {
         const docId = parts[2];
@@ -1415,9 +1442,34 @@ async function handleDashboardInteraction(interaction, manager) {
             token_type: type,
             provider: providerObj.id,
             providerConfig,
+            // 📎 الحقول الطويلة (كوكيز Gemini / مفاتيح) يمكن تركها فارغة وإرسالها
+            // كملف بعد الإنشاء — فشل الإنشاء ب«المفتاح مفقود» يتناقض مع تعليمات
+            // النافذة نفسها التي تقول «أو من ملف لاحقاً».
+            allowIncomplete: true,
         });
-        await manager.logAgent(String(agent._id), 'create', `تم إنشاء وكيل من Dashboard بمزود ${providerObj.label}${providerDocId ? ' (من مزود محفوظ في قاعدة البيانات)' : ''}`, { token_type: type, provider: providerObj.id, from_saved_provider: Boolean(providerDocId) });
-        await interaction.reply(await renderAgent(manager, String(agent._id)));
+        await manager.logAgent(String(agent._id), 'create', `تم إنشاء وكيل من Dashboard بمزود ${providerObj.label}${providerDocId ? ' (من مزود محفوظ في قاعدة البيانات)' : ''}`, { token_type: type, provider: providerObj.id, from_saved_provider: Boolean(providerDocId), incomplete: Boolean(agent.config_incomplete) });
+        const agentPage = await renderAgent(manager, String(agent._id));
+        if (agent.config_incomplete) {
+            // 🧩 أُنشئ ناقص الإعدادات — تنبيه واضح فوق صفحة الوكيل مع خطوات الإكمال
+            const FIELD_LABELS = Object.fromEntries(providerObj.modalFields.map(f => [f.id, f.label]));
+            const missing = (agent.missing_provider_fields || []).map(id => FIELD_LABELS[id] || id);
+            const notice = ui.container({
+                accent: COLORS.warning,
+                title: `أُنشئ «${agent.name || 'الوكيل'}» — أكمل بيانات ${providerObj.label}`,
+                body: linesBlock([
+                    `الوكيل أُنشئ بنجاح، لكن بيانات المزود ناقصة: **${missing.join('، ') || providerObj.label}**.`,
+                    '',
+                    '**طرق الإكمال:**',
+                    '• صفحة الوكيل ← «الإعدادات» ← «بيانات المزود» — أدخل القيم في النافذة.',
+                    '• «الكوكيز من ملف» في صفحة الإعدادات — أرسل القيمة الطويلة كملف نصي أو لصقاً مباشراً (بلا حد 4000).',
+                    '',
+                    '> الوكيل لن يرد على المحادثات قبل إكمال بياناته — زر «تشغيل» سيخبرك بما هو ناقص بالتفصيل.',
+                ]),
+            });
+            await interaction.reply(v2Payload(notice, agentPage.components[0]));
+            return true;
+        }
+        await interaction.reply(agentPage);
         return true;
     }
 
@@ -1523,6 +1575,8 @@ async function handleDashboardInteraction(interaction, manager) {
         // 🔐 الأسرار تُشفّر قبل الحفظ
         secrets.encryptSecretsInPatch($set);
         await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set });
+        // 🧩 تحديث علم الاكتمال (قد يُمسح تنبيه «بيانات ناقصة» إن اكتملت كل الحقول)
+        await recomputeConfigCompleteness(agentId).catch(() => {});
 
         // تحديث حي لإعدادات المزود الحالية
         const liveRuntime = manager?.runtimes?.get?.(String(agentId));
@@ -1683,9 +1737,9 @@ async function handleDashboardInteraction(interaction, manager) {
                     'احفظ إعدادات المزود أولاً من زر **تعديل** في صفحة الوكيل،',
                     'أو أنشئ الوكيل من جديد باختيار هذا المزود في المعالج.',
                 ]), COLORS.danger);
-                return interaction.update({ embeds: [emb], components: rowsFromButtons([
+                return interaction.update({ ...v2Payload(withRows(emb, rowsFromButtons([
                     button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'عودة', ButtonStyle.Secondary, ICONS.back),
-                ]) });
+                ]))) });
             }
             await cfg.agents_col.updateOne(
                 { _id: new ObjectId(agentId) },
@@ -1710,7 +1764,7 @@ async function handleDashboardInteraction(interaction, manager) {
             const chain = Array.isArray(agent.fallback_chain) ? [...agent.fallback_chain] : [];
             if (op === 'add') {
                 if (targetP.id === agent.provider) {
-                    return interaction.update({ embeds: [embed('ℹ️ لا يمكن', linesBlock([`**${targetP.label}** هو المزود الأساسي نفسه — اختر مزوداً آخر كبديل.`]), COLORS.warning)], components: [] });
+                    return interaction.update({ ...v2Payload(withRows(embed('ℹ️ لا يمكن', linesBlock([`**${targetP.label}** هو المزود الأساسي نفسه — اختر مزوداً آخر كبديل.`]), COLORS.warning), [])) });
                 }
                 if (!chain.includes(targetP.id)) chain.push(targetP.id);
             } else if (op === 'remove') {
@@ -1909,9 +1963,9 @@ async function handleDashboardInteraction(interaction, manager) {
                 '• تُنظّف وتُتحقق ثم تُشفَّر وتُحفظ فوراً وتُطبَّق حياً بدون إعادة تشغيل',
                 '• رسالة بلا ملف ولا نص تُتجاهل والنافذة تبقى مفتوحة',
             ]), COLORS.success);
-            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
                 button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
-            ]) });
+            ]))) });
         }
         if (action === 'personality_file') {
             // 📎 فتح نافذة انتظار ملف الشخصية — أرسل الملف الآن وسيصبح هو الشخصية
@@ -1934,9 +1988,9 @@ async function handleDashboardInteraction(interaction, manager) {
                 `عند وصول الملف سيصبح محتواه شخصية الوكيل **${agentId}** فوراً (بدون إعادة تشغيل).`,
                 'إرسال رسالة بلا ملف لا يلغي النافذة — أرسل الملف في رسالة مستقلة.',
             ]), COLORS.success);
-            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
                 button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
-            ]) });
+            ]))) });
         }
         if (action === 'knowledge_upload_start') {
             // فتح نافذة رفع ملفات المعرفة — 3 دقائق
@@ -1959,9 +2013,9 @@ async function handleDashboardInteraction(interaction, manager) {
                 '',
                 'سيُستبدل محتوى أي ملف بنفس الاسم، وسيُقطّع ويُفهرس تلقائياً.',
             ]), COLORS.success);
-            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
                 button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
-            ]) });
+            ]))) });
         }
         if (interaction.isStringSelectMenu() && action === 'knowledge_delete') {
             const source = interaction.values[0];
@@ -1971,10 +2025,10 @@ async function handleDashboardInteraction(interaction, manager) {
         }
         if (action === 'knowledge_clear') {
             const emb = embed('⚠️ مسح قاعدة المعرفة', linesBlock(['سيُحذف كل مستندات المعرفة لهذا الوكيل نهائياً.', 'لا يمكن التراجع.']), COLORS.warning);
-            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
                 button(`${DASH_PREFIX}:agent:${agentId}:knowledge_clear_confirm`, 'تأكيد المسح', ButtonStyle.Danger, '🧹'),
                 button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-            ]) });
+            ]))) });
         }
         if (action === 'knowledge_clear_confirm') {
             const r = await knowledge.clearKnowledge(agentId);
@@ -2032,10 +2086,10 @@ async function handleDashboardInteraction(interaction, manager) {
         }
         if (action === 'delete_confirm') {
             const emb = embed('⚠️ تأكيد حذف الوكيل', linesBlock(['هذا الإجراء سيوقف Runtime ثم يحذف الوكيل من قاعدة البيانات.', 'لا يمكن التراجع عنه.']), COLORS.warning);
-            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+            return updateInteraction(interaction, { ...v2Payload(withRows(emb, rowsFromButtons([
                 button(`${DASH_PREFIX}:agent:${agentId}:delete`, 'تأكيد الحذف', ButtonStyle.Danger, '🗑️'),
                 button(`${DASH_PREFIX}:agent:${agentId}:view`, 'إلغاء', ButtonStyle.Secondary, '❌'),
-            ]) });
+            ]))) });
         }
         if (action === 'delete') {
             await manager.deleteAgent(agentId);
@@ -2073,7 +2127,7 @@ async function renderAccountSettings(agentId, guildId) {
         '**آخر ذاكرة:**',
         ...memLines,
     ]), COLORS.live);
-    return { embeds: [emb], components: [
+    return { ...v2Payload(withRows(emb, [
         new ActionRowBuilder().addComponents(
             new ChannelSelectMenuBuilder().setCustomId(`${DASH_PREFIX}:agent:${agentId}:acct_dm`).setPlaceholder('حدد قناة تحويل الخاص').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
         ),
@@ -2091,7 +2145,7 @@ async function renderAccountSettings(agentId, guildId) {
             button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
             button(`${DASH_PREFIX}:agent:${agentId}:account`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         ]),
-    ] };
+    ])) };
 }
 
 async function renderAccountAdvanced(agentId, guildId) {
@@ -2111,7 +2165,7 @@ async function renderAccountAdvanced(agentId, guildId) {
         '',
         'تم فصل هذه الصفحة حتى لا تتجاوز واجهة Discord حد 5 صفوف Components.',
     ]), COLORS.live);
-    return { embeds: [emb], components: [
+    return { ...v2Payload(withRows(emb, [
         new ActionRowBuilder().addComponents(
             new RoleSelectMenuBuilder().setCustomId(`${DASH_PREFIX}:agent:${agentId}:acct_role`).setPlaceholder('حدد رول منشن الفعاليات'),
         ),
@@ -2127,7 +2181,7 @@ async function renderAccountAdvanced(agentId, guildId) {
             button(`${DASH_PREFIX}:schedule_start:${agentId}`, '🗓️ تكوين الجدولة', ButtonStyle.Primary),
             button(`${DASH_PREFIX}:agent:${agentId}:account_adv`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         ]),
-    ] };
+    ])) };
 }
 
 async function renderAgentProvider(agentId, guildId) {
@@ -2151,7 +2205,7 @@ async function renderAgentProvider(agentId, guildId) {
                 { label: 'telegram', value: 'telegram', description: 'استخدام مزود Telegram proxy' },
             ]),
     );
-    return { embeds: [emb], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:agent:${agentId}:provider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)])] };
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:agent:${agentId}:provider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)])])) };
 }
 
 /**
@@ -2161,7 +2215,7 @@ async function renderAgentProvider(agentId, guildId) {
 async function renderAgentAIProvider(agentId, guildId) {
     const cfg = require('./config');
     const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
-    if (!agent) return { embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف.']), COLORS.danger)], components: [] };
+    if (!agent) return { ...v2Payload(withRows(embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف.']), COLORS.danger), [])) };
     const current = getProviderOrFallback(agent.provider);
     const fbEnabled = Boolean(agent.fallback_enabled);
     const fbChain = Array.isArray(agent.fallback_chain) ? agent.fallback_chain : [];
@@ -2211,12 +2265,12 @@ async function renderAgentAIProvider(agentId, guildId) {
                     emoji      : p.emoji,
                 }))),
     );
-    return { embeds: [emb], components: [row, fbRow, ...rowsFromButtons([
+    return { ...v2Payload(withRows(emb, [row, fbRow, ...rowsFromButtons([
         button(`${DASH_PREFIX}:agent:${agentId}:aiprovider_fb_toggle`, fbEnabled ? 'تعطيل Fallback' : 'تفعيل Fallback', fbEnabled ? ButtonStyle.Danger : ButtonStyle.Success, '🔄'),
         button(`${DASH_PREFIX}:agent:${agentId}:aiprovider_test`, 'اختبار الاتصال', ButtonStyle.Primary, '🧪'),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
-    ])] };
+    ])])) };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2224,10 +2278,7 @@ async function renderAgentAIProvider(agentId, guildId) {
 // ═══════════════════════════════════════════════════════════
 
 function notFoundAgentPage(agentId) {
-    return {
-        embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحًا.']), COLORS.danger)],
-        components: rowsFromButtons([button(`${DASH_PREFIX}:agents:0`, 'عودة للوكلاء', ButtonStyle.Secondary, ICONS.back)]),
-    };
+    return { ...v2Payload(withRows(embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحًا.']), COLORS.danger), rowsFromButtons([button(`${DASH_PREFIX}:agents:0`, 'عودة للوكلاء', ButtonStyle.Secondary, ICONS.back)]))) };
 }
 
 async function renderAgentSettings(agentId, guildId) {
@@ -2300,7 +2351,7 @@ async function renderAgentSettings(agentId, guildId) {
         button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 // ── نوافذ التعديل المجزأة ──
@@ -2392,7 +2443,7 @@ async function renderAgentKnowledge(agentId, guildId, notice = null) {
         button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 /**
@@ -2446,7 +2497,7 @@ async function handleKnowledgeUploadMessage(message, manager) {
         ]),
         okCount === results.length ? COLORS.success : COLORS.warning,
     );
-    await message.reply({ embeds: [emb] }).catch(() => {});
+    await message.reply({ ...v2Payload(emb) }).catch(() => {});
     await manager?.logAgent?.(pending.agentId, 'knowledge_upload', `رفع معرفة: ${results.map(r => `${r.name}${r.ok ? ' ✓' : ' ✗'}`).join('، ')}`, { results }).catch(() => {});
     return true;
 }
@@ -2471,23 +2522,19 @@ async function handlePersonalityUploadMessage(message, manager) {
 
     const textAtts = attachments.filter(a => is_text_attachment(a));
     if (!textAtts.length) {
-        await message.reply({
-            embeds: [embed('❌ الملف غير نصي', linesBlock([
+        await message.reply({ ...v2Payload(embed('❌ الملف غير نصي', linesBlock([
                 'الملفات المقبولة للشخصية: `.txt` أو `.md` فقط (≤ 1MB).',
                 'أعد إرسال ملف نصي صحيح — النافذة ما زالت مفتوحة.',
-            ]), COLORS.danger)],
-        }).catch(() => {});
+            ]), COLORS.danger)) }).catch(() => {});
         return true; // الرسالة جزء من رفع معلّق — لا تكمل لمسار آخر
     }
 
     const att = textAtts[0];
     if ((att.size || 0) > PERSONALITY_MAX_FILE_BYTES) {
-        await message.reply({
-            embeds: [embed('❌ الملف كبير', linesBlock([
+        await message.reply({ ...v2Payload(embed('❌ الملف كبير', linesBlock([
                 `حجم الملف ${Math.round((att.size || 0) / 1024)}KB — الحد الأقصى 1MB.`,
                 'أعد الإرسال بملف أصغر، أو قسّم المحتوى.',
-            ]), COLORS.danger)],
-        }).catch(() => {});
+            ]), COLORS.danger)) }).catch(() => {});
         return true;
     }
 
@@ -2533,7 +2580,7 @@ async function handlePersonalityUploadMessage(message, manager) {
         '',
         'الشخصية الجديدة تعمل الآن فوراً بدون إعادة تشغيل.',
     ]), COLORS.success);
-    await message.reply({ embeds: [emb] }).catch(() => {});
+    await message.reply({ ...v2Payload(emb) }).catch(() => {});
     await manager?.logAgent?.(pending.agentId, 'personality_upload', `تحديث الشخصية من ملف: ${att.name} (${personality.length} حرف)`, { source: att.name, chars: personality.length, by: message.author.id }).catch(() => {});
     return true;
 }
@@ -2568,12 +2615,10 @@ async function handleSecretUploadMessage(message, manager) {
     if (attachments.length) {
         const textAtts = attachments.filter(a => is_text_attachment(a));
         if (!textAtts.length) {
-            await message.reply({
-                embeds: [embed('❌ الملف غير نصي', linesBlock([
+            await message.reply({ ...v2Payload(embed('❌ الملف غير نصي', linesBlock([
                     'الملفات المقبولة: `.txt` / `.md` / `.json` أو أي ملف نصي (≤ 1MB).',
                     'أعد الإرسال — النافذة ما زالت مفتوحة.',
-                ]), COLORS.danger)],
-            }).catch(() => {});
+                ]), COLORS.danger)) }).catch(() => {});
             return true;
         }
         const att = textAtts[0];
@@ -2618,13 +2663,11 @@ async function handleSecretUploadMessage(message, manager) {
     if (providerObj.id === 'gemini' && pending.fieldId === 'gemini_cookies') {
         const v = providerObj.validate({ gemini_cookies: value });
         if (!v.ok) {
-            await message.reply({
-                embeds: [embed('❌ كوكيز غير مكتملة — لم تُحفظ', linesBlock([
+            await message.reply({ ...v2Payload(embed('❌ كوكيز غير مكتملة — لم تُحفظ', linesBlock([
                     ...v.missing.map(m => `• ${m}`),
                     '',
                     'النافذة ما زالت مفتوحة — أعد إرسال سطر Cookie كاملاً.',
-                ]), COLORS.danger)],
-            }).catch(() => {});
+                ]), COLORS.danger)) }).catch(() => {});
             return true;
         }
     }
@@ -2638,6 +2681,8 @@ async function handleSecretUploadMessage(message, manager) {
         await message.reply(`❌ فشل الحفظ في قاعدة البيانات: ${e.message}`).catch(() => {});
         return true;
     }
+    // 🧩 حفظ سر قد يُكمل بيانات مزود ناقص — امسح تنبيه الاكتمال تلقائياً
+    const nowComplete = await recomputeConfigCompleteness(pending.agentId).catch(() => null);
     try {
         const liveRuntime = manager?.runtimes?.get?.(String(pending.agentId));
         if (liveRuntime?.runtimeSettings) {
@@ -2661,8 +2706,10 @@ async function handleSecretUploadMessage(message, manager) {
         `🔒 **القيمة المخزنة:** ${secrets.maskSecret(value)} (مشفرة AES في قاعدة البيانات)`,
         '',
         'طُبِّقت حياً على الوكيل بدون إعادة تشغيل.',
+        // 🧩 إن كان هذا الحقل آخر ما ينقص بيانات المزود — أخبر المالك صراحة
+        ...(nowComplete === true ? ['🎉 **بيانات المزود اكتملت الآن** — زر «تشغيل» في صفحة الوكيل صار جاهزاً.'] : []),
     ]), COLORS.success);
-    await message.reply({ embeds: [emb] }).catch(() => {});
+    await message.reply({ ...v2Payload(emb) }).catch(() => {});
     return true;
 }
 
@@ -2702,15 +2749,12 @@ async function renderAgentUsage(agentId, days = 7) {
         usage.renderBars(s.per_day),
     ]), COLORS.info);
 
-    return {
-        embeds: [emb],
-        components: rowsFromButtons([
+    return { ...v2Payload(withRows(emb, rowsFromButtons([
             button(`${DASH_PREFIX}:agent:${agentId}:usage:1`, 'اليوم', ButtonStyle.Secondary, '📅', d === 1),
             button(`${DASH_PREFIX}:agent:${agentId}:usage:7`, '7 أيام', ButtonStyle.Secondary, '🗓️', d === 7),
             button(`${DASH_PREFIX}:agent:${agentId}:usage:30`, '30 يوم', ButtonStyle.Secondary, '📆', d === 30),
             button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
-        ]),
-    };
+        ]))) };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2761,7 +2805,7 @@ async function renderAgentProactive(agentId, guildId, notice = null) {
         button(`${DASH_PREFIX}:agent:${agentId}:proactive`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
         button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
     ]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 function proactiveEntryModal(agentId, channelId) {
@@ -2803,7 +2847,7 @@ async function renderAgentConversations(agentId, guildId) {
         ));
     }
     components.push(...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:conversation_create`, 'إنشاء محادثة', ButtonStyle.Success, '➕'), button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:agent:${agentId}:conversations`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 function syncRuntimeAllowedChannels(manager, agentId, guildId, ids) {
@@ -2844,7 +2888,7 @@ async function renderAgentChannels(agentId, guildId, notice = null) {
         ));
     }
     components.push(...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:agent:${agentId}:channels`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]));
-    return { embeds: [emb], components };
+    return { ...v2Payload(withRows(emb, components)) };
 }
 
 module.exports = {
@@ -2856,7 +2900,9 @@ module.exports = {
     handlePersonalityUploadMessage,
     handleSecretUploadMessage,
     renderHome,
+    renderAgents,
     renderAgent,
+    renderAgentAIProvider,
     renderAgentSettings,
     renderAgentKnowledge,
     renderAgentUsage,

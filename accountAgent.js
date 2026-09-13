@@ -1,6 +1,6 @@
 'use strict';
 
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { isTextChannel, isUserRuntime } = require('./discordAdapter');
 const { runAgent } = require('./tools');
 const { buildBotContext, db_load_channel_session, db_save_channel_session, getAccessLevel } = require('./utils');
@@ -296,17 +296,23 @@ async function updateAccountSettings(agentId, guildId, patch) {
 async function forwardMessage(client, message, targetChannelId, kind) {
     const target = await client.channels.fetch(String(targetChannelId)).catch(() => null);
     if (!target || !isTextChannel(target)) return false;
-    const emb = new EmbedBuilder()
-        .setTitle(kind === 'dm' ? '📩 رسالة خاصة للحساب' : '🔔 منشن/رد على الحساب')
-        .setDescription((message.content || '—').slice(0, 3900))
-        .addFields(
-            { name: 'المرسل', value: `${message.author.tag || message.author.username} (${message.author.id})`, inline: false },
-            { name: 'الأصل', value: message.url || `${message.channel?.id || 'DM'} / ${message.id}`, inline: false },
-            { name: 'المرفقات', value: message.attachments?.size ? message.attachments.map(a => `[${a.name}](${a.url})`).join('\n').slice(0, 900) : 'لا يوجد', inline: false },
-            { name: 'طريقة التحكم', value: 'رد على هذه الرسالة لإرسال رد مباشر. ابدأ بـ `!noreply` للإرسال بدون Reply، أو `!ai` للرد بالذكاء، أو `!ai !noreply` للذكاء بدون Reply.', inline: false },
-        )
-        .setTimestamp();
-    const sent = await target.send({ embeds: [emb], components: safeRows(kind) }).catch(() => null);
+    // 🎨 Components V2 — بطاقة توجيه الحساب داخل حاوية موحدة مع أزرار التحكم
+    const ui = require('./ui');
+    const emb = ui.container({
+        accent: kind === 'dm' ? ui.ACCENTS.live : ui.ACCENTS.info,
+        title: kind === 'dm' ? '📩 رسالة خاصة للحساب' : '🔔 منشن/رد على الحساب',
+        body: [
+            (message.content || '—').slice(0, 1800),
+            '',
+            `**المرسل:** ${message.author.tag || message.author.username} (${message.author.id})`,
+            `**الأصل:** ${message.url || `${message.channel?.id || 'DM'} / ${message.id}`}`,
+            `**المرفقات:** ${message.attachments?.size ? message.attachments.map(a => `[${a.name}](${a.url})`).join('\n').slice(0, 900) : 'لا يوجد'}`,
+            '',
+            '> **طريقة التحكم:** رد على هذه الرسالة لإرسال رد مباشر. ابدأ بـ `!noreply` للإرسال بدون Reply، أو `!ai` للرد بالذكاء، أو `!ai !noreply` للذكاء بدون Reply.',
+        ].join('\n'),
+        rows: safeRows(kind),
+    });
+    const sent = await target.send(ui.v2Payload(emb)).catch(() => null);
     if (!sent) return false;
     bridge.set(sent.id, { kind, source_channel_id: message.channel.id, source_message_id: message.id, guild_id: message.guild?.id || null, author_id: message.author.id, created_at: Date.now() });
     return true;

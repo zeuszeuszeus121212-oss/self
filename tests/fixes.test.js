@@ -172,7 +172,13 @@ async function run() {
         const step2 = i.__captured.update || i.__captured.reply;
         assert.ok(step2, 'خطوة اختيار النماذج ظهرت دون انهيار');
         const step2Json = JSON.parse(JSON.stringify(step2, (k, v) => (v && typeof v.toJSON === 'function' ? v.toJSON() : v)));
-        const selectRow = (step2Json.components || []).find(r => r.components && r.components[0] && r.components[0].custom_id === 'dash:prov_models');
+        // 🎨 Components V2: القوائم متداخلة داخل الحاوية — مسح تكراري
+        let selectRow = null;
+        (function walk(comp) {
+            if (!comp || typeof comp !== 'object' || selectRow) return;
+            if (comp.components && comp.components[0] && comp.components[0].custom_id === 'dash:prov_models') { selectRow = comp; return; }
+            for (const child of comp.components || []) walk(child);
+        })(step2Json);
         assert.ok(selectRow, 'قائمة النماذج موجودة');
         const optVal = selectRow.components[0].options[0].value;
         assert.ok(optVal.length <= 100, `قيمة الخيار ${optVal.length} حرف — يجب ≤ 100 (هذا كان مصدر Invalid string length)`);

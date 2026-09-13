@@ -53,13 +53,24 @@ function isValidProvider(id) {
     return Boolean(getProvider(id));
 }
 
-/** كل المزودين — للقوائم المنسدلة (الإيموجي مُصفّى بقائمة آمنة لحماية ديسكورد) */
+/**
+ * كل المزودين — للقوائم المنسدلة وللصفحات التي تحتاج العقد الكامل.
+ * ⚠️ درس v7.4.3: نسخة سابقة كانت ترجع كائنات مبتورة {id,label,emoji,description}
+ * فانهارت صفحة «المزود» وأمر /المزود بخطأ p.validate is not a function.
+ * العقد هنا: كائن المزود الكامل (validate/describe/modalFields/chat...) لكن
+ * الإيموجي فقط يُستبدل بقيمة آمنة لقوائم ديسكورد (حماية من COMPONENT_INVALID_EMOJI).
+ */
 function listProviders() {
     const { safeMenuEmoji } = require('../utils');
-    return Object.values(PROVIDERS).map(p => ({
+    return Object.values(PROVIDERS).map(p => ({ ...p, emoji: safeMenuEmoji(p.emoji, '🧠') }));
+}
+
+/** نسخة مبتورة آمنة للقوائم المنسدلة فقط (label/value/description/emoji) */
+function listProviderOptions() {
+    return listProviders().map(p => ({
         id          : p.id,
         label       : p.label,
-        emoji       : safeMenuEmoji(p.emoji, '🧠'),
+        emoji       : p.emoji,
         description : p.description,
     }));
 }
@@ -124,6 +135,7 @@ module.exports = {
     getProviderOrFallback,
     isValidProvider,
     listProviders,
+    listProviderOptions,
     extractProviderConfig,
     extractAllProviderConfigs,
     buildFallbackChain,
