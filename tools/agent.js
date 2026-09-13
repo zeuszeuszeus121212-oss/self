@@ -205,7 +205,10 @@ async function runAgent(
     const effThinking = Boolean(thinking) || Boolean(runtime.capabilities?.thinking);
     const nativeSearch = Boolean(runtime.capabilities?.search);
 
-    const system    = buildSystem(botName, mode, effThinking, accessLevel, runtime.personality || '', runtime.features || {}, runtime.capabilities || {});
+    // 💬🤖 نوع الوكيل: 'chat' = حوار خالص بلا أدوات (لا يعلم بها أصلاً)، 'agent' = الوكيل الكامل
+    const agentKind = runtime.kind === 'chat' ? 'chat' : 'agent';
+
+    const system    = buildSystem(botName, mode, effThinking, accessLevel, runtime.personality || '', runtime.features || {}, runtime.capabilities || {}, agentKind);
 
     // ── ⚙️ ميزات الوكيل القابلة للتعطيل (توافق قديم: بلا إعداد = مفعّلة) ──
     // web_search حُذفت نهائياً في v7.4 — البحث مسؤولية النموذج نفسه (بحثه المدمج)
@@ -233,6 +236,54 @@ async function runAgent(
 
     // 📁 ملفات الإرسال المتراكمة عبر كل خطوات الحلقة (صور مولدة، ملفات نصية...)
     const filesToSend = [];
+
+    // ════════════════════════════════════════════════════════════
+    //  💬 النوع «محادثة» — حوار خالص: استدعاء واحد للنموذج بلا أدوات
+    //  لا حلقة، لا تنفيذ أدوات، لا ملفات — رد النموذج هو الرد النهائي.
+    //  سلسلة Fallback تعمل كما هي عند فشل المزود.
+    // ════════════════════════════════════════════════════════════
+    if (agentKind === 'chat') {
+        const chatPrompt = `${system}\n\n${botContext}\n\n${userInfo}\n\nUser: ${userMsg}`;
+        for (let attempt = 0; attempt < chain.length; attempt++) {
+            const active = chain[attempt];
+            console.log(`[Chat] provider=${active.id}${attempt > 0 ? ' (fallback)' : ''} kind=chat thinking=${effThinking}`);
+            try {
+                const aiResult = await active.obj.chat({
+                    prompt          : chatPrompt,
+                    guildId,
+                    sessionId       : curSid,
+                    parentMessageId : curPmid,
+                    mode,
+                    thinking        : effThinking,
+                    search          : nativeSearch,
+                    images          : Array.isArray(requester.images) ? requester.images : [],
+                    config          : active.config,
+                    agentId         : runtime.agentId || 'default',
+                });
+                track('provider', { provider: active.id });
+                return {
+                    reply      : String(aiResult.fullText || '').trim() || '…',
+                    newSid     : aiResult.sessionId,
+                    newPmid    : aiResult.newParentMessageId,
+                    filesToSend: [],
+                };
+            } catch (e) {
+                if (attempt < chain.length - 1) {
+                    console.warn(`⚠️ [Chat Fallback] فشل ${active.obj.label} (${String(e.message).slice(0, 120)}) — التحويل إلى ${chain[attempt + 1].obj.label}`);
+                    track('fallback', { from: active.id, to: chain[attempt + 1].id });
+                    curSid = null; curPmid = null; // جلسة كل مزود مستقلة
+                    continue;
+                }
+                track('error', { provider: active.id });
+                return {
+                    reply      : `⚠️ خطأ في الاتصال بالنموذج (${active.obj.label}): ${e.message}`,
+                    newSid     : curSid,
+                    newPmid    : curPmid,
+                    filesToSend: [],
+                };
+            }
+        }
+    }
 
     for (let step = 0; step < MAX_STEPS; step++) {
         const activeProvider = chain[chainIdx];

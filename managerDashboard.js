@@ -18,7 +18,7 @@ const {
 const DASH_PREFIX = 'dash';
 const PAGE_SIZE = 25;
 
-const { getProviderOrFallback, listProviders, extractProviderConfig } = require('./providers');
+const { getProviderOrFallback, listProviders, extractProviderConfig, extractAllProviderConfigs } = require('./providers');
 const secrets = require('./secrets');
 const knowledge = require('./knowledge');
 const usage = require('./usage');
@@ -338,6 +338,7 @@ async function renderAgent(manager, agentId) {
     const providerReady = providerObj.validate(extractProviderConfig(agentPlain)).ok;
     const emb = embed(`${agentIcon(agent)} ${agent.name || 'Agent'}`, linesBlock([
         `📌 **النوع:** ${tokenTypeLabel(agent)}`,
+        `🧠 **الوضع:** ${agentKindLabel(agent)}${agentKindOf(agent) === 'chat' ? ' — حوار خالص بلا أي أدوات' : ''}`,
         `${providerObj.emoji} **المزود:** ${providerObj.label} — ${providerReady ? 'جاهز ✅' : 'ناقص ❌'}`,
         `↳ ${providerObj.describe(extractProviderConfig(agentPlain))}`,
         // 🧩 وكيل أُنشئ ببيانات مزود ناقصة (سيُرسل المالك القيم لاحقاً كملف/نافذة)
@@ -359,6 +360,8 @@ async function renderAgent(manager, agentId) {
     // POW خاص بمزود DeepSeek فقط (تحدي إثبات عمل لـ chat.deepseek.com)
     // وكلاء Qwen / OpenAI لا يستخدمون POW — لا داعي لإظهار الزر لهم
     const isDeepSeekAgent = providerObj.id === 'deepseek';
+    // 💬 وكيل «محادثة»: لا أدوات إطلاقاً — أدوات المعرفة RAG لا معنى لها له، فلا زر لها
+    const isChatKind = agentKindOf(agent) === 'chat';
     const actions = [
         button(`${DASH_PREFIX}:agent:${id}:start`, 'تشغيل', ButtonStyle.Success, '▶️', isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:stop`, 'إيقاف', ButtonStyle.Danger, '⏹️', !isRunning || isBusy),
@@ -368,7 +371,7 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agent:${id}:aiprovider`, 'المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${id}:channels`, 'القنوات', ButtonStyle.Secondary, '📡'),
         button(`${DASH_PREFIX}:agent:${id}:conversations`, 'المحادثات', ButtonStyle.Secondary, '💬'),
-        button(`${DASH_PREFIX}:agent:${id}:knowledge`, 'المعرفة', ButtonStyle.Secondary, '📚'),
+        ...(isChatKind ? [] : [button(`${DASH_PREFIX}:agent:${id}:knowledge`, 'المعرفة', ButtonStyle.Secondary, '📚')]),
         button(`${DASH_PREFIX}:agent:${id}:usage:7`, 'الإحصائيات', ButtonStyle.Secondary, '📊'),
         button(`${DASH_PREFIX}:agent:${id}:proactive`, 'الاستباقية', ButtonStyle.Secondary, '🎯'),
         ...(isDeepSeekAgent ? [button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡')] : []),
@@ -382,42 +385,76 @@ async function renderAgent(manager, agentId) {
     return { ...v2Payload(withRows(emb, rowsFromButtons(actions))) };
 }
 
-function createTypeView() {
+// ── 💬🤖 تسميات نوع الوكيل التشغيلي (محادثة خالصة / وكيل بأدوات) ──
+function agentKindLabel(agent) {
+    return agentKindOf(agent) === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
+}
+function agentKindOf(agent) {
+    return String(agent?.kind || 'agent').toLowerCase() === 'chat' ? 'chat' : 'agent';
+}
+
+function createKindView() {
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
-        '**الخطوة 1 من 3: اختر نوع الوكيل.**',
-        `${ICONS.bot} Bot Token: يمكنه عرض واجهة Dashboard كواجهة فقط، والتنفيذ يبقى في Manager.`,
-        `${ICONS.user} User Account: Runtime فقط بدون Slash/Application Commands.`,
+        '**الخطوة 1 من 4: اختر طبيعة الوكيل.**',
+        `${ICONS.bot} **وكيل** — العقل المنفّذ الكامل: أدوات قراءة وتنفيذ، إنشاء ملفات، توليد صور، ذاكرة، تذكيرات، قاعدة معرفة. يدير ويعمل.`,
+        `${ICONS.user} **محادثة** — رفيق حوار خالص: يتكلم ويجيب من عقله فقط، لا يملك أي أدوات ولا يعلم بوجودها أصلاً. أبسط وأخف وأسرع.`,
         '',
-        '**الخطوة التالية:** اختيار مزود الذكاء الاصطناعي (DeepSeek / Qwen / OpenAI) 🧠',
+        '**الخطوة التالية:** نوع الحساب (Bot Token / User Account) ثم مزود الذكاء الاصطناعي.',
     ]), COLORS.success);
     const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`${DASH_PREFIX}:create_type`)
-            .setPlaceholder('اختر نوع الوكيل')
+            .setCustomId(`${DASH_PREFIX}:create_kind`)
+            .setPlaceholder('اختر طبيعة الوكيل')
             .addOptions([
-                { label: 'Bot Token', value: 'bot', description: 'واجهة UI اختيارية + Runtime AI', emoji: ICONS.bot },
-                { label: 'User Account', value: 'user', description: 'Runtime فقط بدون Commands', emoji: ICONS.user },
+                { label: 'وكيل — أدوات كاملة', value: 'agent', description: 'ينفذ ويدير: أدوات، ملفات، صور، ذاكرة، تذكيرات', emoji: '🤖' },
+                { label: 'محادثة — حوار خالص', value: 'chat', description: 'يتكلم فقط — لا أدوات ولا يعلم بها إطلاقاً', emoji: '💬' },
             ]),
     );
     return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])])) };
 }
 
+function createTypeView(kind = 'agent') {
+    const kindText = kind === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
+    const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
+        '**الخطوة 2 من 4: اختر نوع الحساب.**',
+        `${ICONS.bot} Bot Token: يمكنه عرض واجهة Dashboard كواجهة فقط، والتنفيذ يبقى في Manager.`,
+        `${ICONS.user} User Account: Runtime فقط بدون Slash/Application Commands.`,
+        '',
+        `**طبيعة الوكيل المختارة:** ${kindText}`,
+        '**الخطوة التالية:** اختيار مزود الذكاء الاصطناعي (DeepSeek / Qwen / OpenAI / Gemini) 🧠',
+    ]), COLORS.success);
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:create_type:${kind}`)
+            .setPlaceholder('اختر نوع الحساب')
+            .addOptions([
+                { label: 'Bot Token', value: 'bot', description: 'واجهة UI اختيارية + Runtime AI', emoji: ICONS.bot },
+                { label: 'User Account', value: 'user', description: 'Runtime فقط بدون Commands', emoji: ICONS.user },
+            ]),
+    );
+    return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:create`, 'رجوع لطبيعة الوكيل', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+    ])])) };
+}
+
 /**
- * الخطوة 2 من 3: اختيار مزود الذكاء الاصطناعي.
+ * الخطوة 3 من 4: اختيار مزود الذكاء الاصطناعي.
  * كل مزود له واجهة وإعدادات مختلفة تماماً في الخطوة التالية.
  */
-function createProviderView(type) {
+function createProviderView(type, kind = 'agent') {
+    const kindText = kind === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
-        '**الخطوة 2 من 3: اختر مزود الذكاء الاصطناعي.**',
+        '**الخطوة 3 من 4: اختر مزود الذكاء الاصطناعي.**',
         '',
         ...listProviders().map(p => `${p.emoji} **${p.label}** — ${p.description}`),
         '',
         'حسب اختيارك ستظهر نافذة بإعدادات مختلفة تماماً لكل مزود.',
-        'نوع الوكيل المختار: **' + (type === 'user' ? 'User Account' : 'Bot Token') + '**',
+        `نوع الحساب: **${type === 'user' ? 'User Account' : 'Bot Token'}** • طبيعة الوكيل: **${kindText}**`,
     ]), COLORS.success);
     const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`${DASH_PREFIX}:create_provider:${type}`)
+            .setCustomId(`${DASH_PREFIX}:create_provider:${type}:${kind}`)
             .setPlaceholder('اختر مزود الذكاء الاصطناعي')
             .addOptions(listProviders().map(p => ({
                 label       : p.label,
@@ -427,7 +464,7 @@ function createProviderView(type) {
             }))),
     );
     return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([
-        button(`${DASH_PREFIX}:create`, 'رجوع لنوع الوكيل', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:create`, 'رجوع لطبيعة الوكيل', ButtonStyle.Secondary, ICONS.back),
         button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
     ])])) };
 }
@@ -436,12 +473,12 @@ function createProviderView(type) {
  * نافذة إنشاء الوكيل — تتغير بالكامل حسب المزود المختار.
  * كل مزود يعرّف حقوله في providers/<id>.js (modalFields).
  */
-function createAgentModal(type, providerId = 'deepseek') {
+function createAgentModal(type, providerId = 'deepseek', kind = 'agent') {
     const providerObj = getProviderOrFallback(providerId);
-    const typeLabel = type === 'user' ? 'User Account Runtime' : 'Bot Agent';
+    const kindLabel = kind === 'chat' ? 'محادثة' : 'وكيل';
     const modal = new ModalBuilder()
-        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:${providerObj.id}`)
-        .setTitle(trim(`إنشاء ${typeLabel} — ${providerObj.label}`, 45));
+        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:${kind}:${providerObj.id}`)
+        .setTitle(trim(`إنشاء ${kindLabel} — ${providerObj.label}`, 45));
 
     // الحقول الثابتة المشتركة
     modal.addComponents(
@@ -473,7 +510,7 @@ function createAgentModal(type, providerId = 'deepseek') {
 /**
  * 🗄️ الخطوة 3: مصدر بيانات OpenAI-Compatible — مزود محفوظ من قاعدة البيانات أو إدخال يدوي
  */
-function renderCreateOpenAiSource(type, savedProviders) {
+function renderCreateOpenAiSource(type, kind, savedProviders) {
     const emb = embed('➕ إنشاء وكيل — OpenAI-Compatible', linesBlock([
         '**اختر مزوداً محفوظاً من قاعدة البيانات** — تُنسخ بياناته (base_url + المفتاح) للوكيل تلقائياً.',
         'أو اختر **إدخال يدوي** لكتابة البيانات مباشرة كما كان.',
@@ -481,11 +518,11 @@ function renderCreateOpenAiSource(type, savedProviders) {
         `المزودون المحفوظون: **${savedProviders.length}**`,
         ...savedProviders.slice(0, 10).map(p => `• ${p.name} — \`${p.base_url}\``),
         '',
-        `نوع الوكيل: **${type === 'user' ? 'User Account' : 'Bot Token'}**`,
+        `نوع الحساب: **${type === 'user' ? 'User Account' : 'Bot Token'}** • طبيعة الوكيل: **${kind === 'chat' ? '💬 محادثة' : '🤖 وكيل'}**`,
     ]), COLORS.success);
     const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`${DASH_PREFIX}:create_openai_source:${type}`)
+            .setCustomId(`${DASH_PREFIX}:create_openai_source:${type}:${kind}`)
             .setPlaceholder('اختر مزوداً محفوظاً أو إدخالاً يدوياً')
             .addOptions([
                 ...savedProviders.slice(0, 24).map(p => ({
@@ -506,14 +543,14 @@ function renderCreateOpenAiSource(type, savedProviders) {
 /**
  * 🗄️ الخطوة 4: اختيار النموذج من نماذج المزود المحفوظ
  */
-function renderCreateOpenAiModel(type, doc, models) {
+function renderCreateOpenAiModel(type, kind, doc, models) {
     const emb = embed(`➕ إنشاء وكيل — «${doc.name}»`, linesBlock([
         `**Base URL:** \`${doc.base_url}\` (سيُنسخ تلقائياً)`,
         '**اختر نموذج الوكيل من نماذج هذا المزود:**',
     ]), COLORS.success);
     const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-            .setCustomId(`${DASH_PREFIX}:create_openai_model:${type}:${doc._id}`)
+            .setCustomId(`${DASH_PREFIX}:create_openai_model:${type}:${kind}:${doc._id}`)
             .setPlaceholder('اختر النموذج')
             .addOptions(models.slice(0, 25).map(m => ({
                 label: String(m).slice(0, 100),
@@ -532,9 +569,9 @@ function renderCreateOpenAiModel(type, doc, models) {
  * 🗄️ نافذة إنشاء وكيل من مزود محفوظ — base_url جاهز والنموذج مُحدد مسبقاً،
  * المفتاح لا يُطلب (يُنسخ من قاعدة البيانات عند الحفظ) إلا إن أُدخل بديل.
  */
-function createAgentModalFromDb(type, providerDocId, model = '') {
+function createAgentModalFromDb(type, kind, providerDocId, model = '') {
     const modal = new ModalBuilder()
-        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:openai:${providerDocId}`)
+        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:${kind}:openai:${providerDocId}`)
         .setTitle(trim('إنشاء وكيل — مزود محفوظ', 45));
     modal.addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)),
@@ -1228,15 +1265,25 @@ async function handleDashboardInteraction(interaction, manager) {
         return true;
     }
 
-    if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:create_type`) {
-        // الخطوة 2: اختيار مزود الذكاء الاصطناعي (واجهة كل مزود تختلف في النافذة التالية)
-        await interaction.update(createProviderView(interaction.values[0]));
+    if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:create_kind`) {
+        // الخطوة 2: نوع الحساب (طبيعة الوكيل: وكيل أدوات / محادثة خالصة)
+        const kind = String(interaction.values[0]) === 'chat' ? 'chat' : 'agent';
+        await interaction.update(createTypeView(kind));
+        return true;
+    }
+    if (interaction.isStringSelectMenu() && (id === `${DASH_PREFIX}:create_type` || id.startsWith(`${DASH_PREFIX}:create_type:`))) {
+        // الصيغة الجديدة: dash:create_type:<kind> — القديمة بلا لاحقة = agent
+        const kind = parts[2] === 'chat' ? 'chat' : 'agent';
+        const type = interaction.values[0] === 'user' ? 'user' : 'bot';
+        await interaction.update(createProviderView(type, kind));
         return true;
     }
     if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_provider:`)) {
+        // الصيغة الجديدة: dash:create_provider:<type>:<kind> — القديمة dash:create_provider:<type> = agent
         const type = parts[2] === 'user' ? 'user' : 'bot';
+        const kind = parts[3] === 'chat' ? 'chat' : 'agent';
         // ⚠️ المزود المختار يأتي من قيم القائمة المنسدلة (interaction.values[0])
-        // وليس من customId — customId يحمل نوع الوكيل فقط (dash:create_provider:<type>)
+        // وليس من customId — customId يحمل نوع الحساب والطبيعة فقط
         const selectedProviderId = (Array.isArray(interaction.values) && interaction.values[0]) || 'deepseek';
 
         // 🗄️ OpenAI-Compatible: إن وُجد مزودون محفوظون في قاعدة البيانات نعرض
@@ -1244,23 +1291,25 @@ async function handleDashboardInteraction(interaction, manager) {
         if (selectedProviderId === 'openai') {
             const saved = await listSavedProviders();
             if (saved.length) {
-                return updateInteraction(interaction, renderCreateOpenAiSource(type, saved));
+                return updateInteraction(interaction, renderCreateOpenAiSource(type, kind, saved));
             }
             // لا يوجد محفوظون → الإدخال اليدوي كما كان
-            await interaction.showModal(createAgentModal(type, 'openai'));
+            await interaction.showModal(createAgentModal(type, 'openai', kind));
             return true;
         }
 
-        await interaction.showModal(createAgentModal(type, selectedProviderId));
+        await interaction.showModal(createAgentModal(type, selectedProviderId, kind));
         return true;
     }
 
     // ── 🗄️ الخطوة 3: اختيار مزود محفوظ أو إدخال يدوي (OpenAI-Compatible) ──
     if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_openai_source:`)) {
+        // الجديد: dash:create_openai_source:<type>:<kind> — القديم: dash:create_openai_source:<type> = agent
         const type = parts[2] === 'user' ? 'user' : 'bot';
+        const kind = parts[3] === 'chat' ? 'chat' : 'agent';
         const chosen = String(interaction.values[0] || '');
         if (chosen === 'manual') {
-            await interaction.showModal(createAgentModal(type, 'openai'));
+            await interaction.showModal(createAgentModal(type, 'openai', kind));
             return true;
         }
         const cfg = require('./config');
@@ -1271,18 +1320,22 @@ async function handleDashboardInteraction(interaction, manager) {
         const models = Array.isArray(doc.models) ? doc.models.filter(Boolean) : [];
         if (!models.length) {
             // بلا نماذج محفوظة → نافذة الإنشاء مع base_url جاهز والنموذج يُكتب يدوياً
-            await interaction.showModal(createAgentModalFromDb(type, String(doc._id), ''));
+            await interaction.showModal(createAgentModalFromDb(type, kind, String(doc._id), ''));
             return true;
         }
-        return updateInteraction(interaction, renderCreateOpenAiModel(type, doc, models));
+        return updateInteraction(interaction, renderCreateOpenAiModel(type, kind, doc, models));
     }
 
     // ── 🗄️ الخطوة 4: اختيار النموذج من نماذج المزود المحفوظ ──
     if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_openai_model:`)) {
+        // الجديد: dash:create_openai_model:<type>:<kind>:<docId> — القديم: <type>:<docId> = agent
         const type = parts[2] === 'user' ? 'user' : 'bot';
-        const docId = parts[3];
+        let kind = 'agent';
+        let docId;
+        if (parts.length >= 5) { kind = parts[3] === 'chat' ? 'chat' : 'agent'; docId = parts[4]; }
+        else docId = parts[3];
         const model = String(interaction.values[0] || '');
-        await interaction.showModal(createAgentModalFromDb(type, docId, model));
+        await interaction.showModal(createAgentModalFromDb(type, kind, docId, model));
         return true;
     }
 
@@ -1402,10 +1455,24 @@ async function handleDashboardInteraction(interaction, manager) {
     }
 
     if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:create_modal:`)) {
-        // الصيغة: dash:create_modal:<type>:<provider> — أو مع مزود محفوظ: dash:create_modal:<type>:openai:<providerDocId>
+        // الصيغة الجديدة: dash:create_modal:<type>:<kind>:<provider> — أو مع مزود محفوظ: dash:create_modal:<type>:<kind>:openai:<providerDocId>
+        // الصيغة القديمة (توافق): dash:create_modal:<type>:<provider> و dash:create_modal:<type>:openai:<docId> — kind = agent
         const type = parts[2] === 'user' ? 'user' : 'bot';
-        const providerObj = getProviderOrFallback(parts[3] || 'deepseek');
-        const providerDocId = providerObj.id === 'openai' && parts[4] ? String(parts[4]) : null;
+        let kind = 'agent', providerId = 'deepseek', providerDocId = null;
+        if (parts[3] === 'agent' || parts[3] === 'chat') {
+            // صيغة جديدة — kind صريح في الموضع 3
+            kind = parts[3] === 'chat' ? 'chat' : 'agent';
+            providerId = parts[4] || 'deepseek';
+            if (providerId === 'openai' && parts[5]) providerDocId = String(parts[5]);
+        } else if (parts[3] === 'openai' && parts[4]) {
+            // صيغة قديمة لمزود محفوظ: <type>:openai:<docId>
+            providerId = 'openai';
+            providerDocId = String(parts[4]);
+        } else if (parts[3]) {
+            // صيغة قديمة عادية: <type>:<provider>
+            providerId = parts[3];
+        }
+        const providerObj = getProviderOrFallback(providerId);
 
         // جمع إعدادات المزود من الحقول الخاصة به فقط
         const providerConfig = {};
@@ -1440,6 +1507,7 @@ async function handleDashboardInteraction(interaction, manager) {
             discord_token: interaction.fields.getTextInputValue('discord_token'),
             personality,
             token_type: type,
+            kind, // 💬 محادثة خالصة / 🤖 وكيل بأدوات
             provider: providerObj.id,
             providerConfig,
             // 📎 الحقول الطويلة (كوكيز Gemini / مفاتيح) يمكن تركها فارغة وإرسالها
@@ -1661,7 +1729,7 @@ async function handleDashboardInteraction(interaction, manager) {
 
     if (parts[1] === 'home') return updateInteraction(interaction, await renderHome(manager, interaction));
     if (parts[1] === 'agents') return updateInteraction(interaction, await renderAgents(manager, parts[2]));
-    if (parts[1] === 'create') return updateInteraction(interaction, createTypeView());
+    if (parts[1] === 'create') return updateInteraction(interaction, createKindView());
     if (parts[1] === 'settings') return updateInteraction(interaction, await renderSettings(interaction.guildId));
     if (parts[1] === 'notifications') return updateInteraction(interaction, await renderNotifications(null, interaction.guildId));
     if (parts[1] === 'logs') return updateInteraction(interaction, await renderLogs(null, parts[2]));
@@ -1723,37 +1791,88 @@ async function handleDashboardInteraction(interaction, manager) {
             return interaction.update(await renderAgentProvider(agentId, interaction.guildId));
         }
         if (interaction.isStringSelectMenu() && action === 'aiprovider_set') {
-            // تبديل مزود الذكاء الاصطناعي — لا يمس إعدادات المزودين الآخرين
+            // 🔓 تبديل مزود الذكاء الاصطناعي — حر دائماً:
+            // النواقص لا تحجب التبديل أبداً (كان الحجب هنا يجعل التبديل مستحيلاً تماماً
+            // عندما لا يملك الوكيل توكن المزود الجديد) — يُبدَّل فوراً وتظهر أزرار الإكمال.
             const agent = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             const newProviderId = interaction.values[0];
             const targetP = getProviderOrFallback(newProviderId);
+            if (targetP.id === getProviderOrFallback(agent.provider).id) {
+                return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
+            }
             const targetCfg = extractProviderConfig({ ...agent, provider: newProviderId });
             const v = targetP.validate(targetCfg);
-            if (!v.ok) {
-                const emb = embed('❌ لا يمكن التبديل إلى ' + targetP.label, linesBlock([
-                    `إعدادات المزود ناقصة لهذا الوكيل: **${v.missing.join(', ')}**`,
-                    '',
-                    'احفظ إعدادات المزود أولاً من زر **تعديل** في صفحة الوكيل،',
-                    'أو أنشئ الوكيل من جديد باختيار هذا المزود في المعالج.',
-                ]), COLORS.danger);
-                return interaction.update({ ...v2Payload(withRows(emb, rowsFromButtons([
-                    button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'عودة', ButtonStyle.Secondary, ICONS.back),
-                ]))) });
-            }
+
+            // التبديل الفوري في قاعدة البيانات + تعليم علم الاكتمال (نفس آلية الإنشاء بالناقص)
             await cfg.agents_col.updateOne(
                 { _id: new ObjectId(agentId) },
-                { $set: { provider: targetP.id, updated_at: new Date() } },
+                {
+                    $set: {
+                        provider: targetP.id,
+                        config_incomplete: !v.ok,
+                        missing_provider_fields: v.ok ? [] : v.missing,
+                        updated_at: new Date(),
+                    },
+                },
             );
             // تحديث حي للـ Runtime بدون إعادة تشغيل
             const liveRuntime = manager?.runtimes?.get?.(String(agentId));
             if (liveRuntime?.runtimeSettings) {
                 liveRuntime.runtimeSettings.provider = targetP.id;
                 liveRuntime.runtimeSettings.providerConfig = targetCfg;
+                liveRuntime.runtimeSettings.fallback_configs = extractAllProviderConfigs({ ...agent, provider: targetP.id });
             }
             liveRuntime?.channel_sessions?.clear?.(); // جلسات المزود القديم لا تصلح للجديد
-            await manager.logAgent(agentId, 'ai_provider_update', `تم تبديل مزود الذكاء الاصطناعي إلى ${targetP.label}`, { provider: targetP.id });
-            return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
+            await manager.logAgent(agentId, 'ai_provider_update', `تم تبديل مزود الذكاء الاصطناعي إلى ${targetP.label}${v.ok ? '' : ' (بيانات ناقصة — بانتظار الإكمال)'}`, { provider: targetP.id, incomplete: !v.ok, missing: v.ok ? [] : v.missing });
+
+            const page = await renderAgentAIProvider(agentId, interaction.guildId);
+            if (!v.ok) {
+                // 🧩 نُبدّل بنواقص — تنبيه أصفر فوق الصفحة بأزرار الإكمال الفوري
+                const FIELD_LABELS = Object.fromEntries(targetP.modalFields.map(f => [f.id, f.label]));
+                const missing = (v.missing || []).map(fid => FIELD_LABELS[fid] || fid);
+                const notice = ui.container({
+                    accent: COLORS.warning,
+                    title: `تم التبديل إلى ${targetP.label} — أكمل بياناته ليشتغل`,
+                    body: linesBlock([
+                        `التبديل تم بنجاح، لكن بيانات هذا المزود ناقصة لهذا الوكيل: **${missing.join('، ') || targetP.label}**.`,
+                        '',
+                        '**أكملها الآن من الأزرار:**',
+                        `• «إدخال بيانات ${targetP.label}» — نافذة إدخال مباشرة.`,
+                        '• «قيمة السر من ملف» — للقيم الطويلة (كوكيز/مفاتيح) فوق حد 4000: أرسلها ملفاً أو لصقاً.',
+                        '',
+                        '> حتى تكتمل البيانات لن يرد الوكيل على المحادثات — زر «اختبار الاتصال» سيخبرك بحالة الجاهزية.',
+                    ]),
+                });
+                const actionRow = new ActionRowBuilder().addComponents(
+                    button(`${DASH_PREFIX}:agent:${agentId}:edit_creds`, `إدخال بيانات ${trim(targetP.label, 40)}`, ButtonStyle.Primary, '🧠'),
+                    ...(targetP.modalFields.some(f => secrets.SECRET_FIELDS.includes(f.id)) ? [
+                        button(`${DASH_PREFIX}:agent:${agentId}:secret_file`, 'قيمة السر من ملف', ButtonStyle.Success, '📎'),
+                    ] : []),
+                    button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'عودة لصفحة المزود', ButtonStyle.Secondary, ICONS.back),
+                );
+                return interaction.update(v2Payload(notice, actionRow));
+            }
+            return interaction.update(page);
+        }
+        if (interaction.isStringSelectMenu() && action === 'kind_set') {
+            // 🧠💬 تبديل وضع الوكيل: وكيل (أدوات كاملة) ⇄ محادثة (حوار خالص بلا أدوات)
+            // يُطبق فوراً على الـ runtime الحي — النظام يبني البرومبت المناسب لكل رسالة
+            const newKind = String(interaction.values[0]) === 'chat' ? 'chat' : 'agent';
+            const agentNow = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agentNow) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            if (agentKindOf(agentNow) !== newKind) {
+                await cfg.agents_col.updateOne(
+                    { _id: new ObjectId(agentId) },
+                    { $set: { kind: newKind, updated_at: new Date() } },
+                );
+                const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+                if (liveRuntime?.runtimeSettings) liveRuntime.runtimeSettings.kind = newKind;
+                await manager.logAgent(agentId, 'kind_update', newKind === 'chat'
+                    ? 'تم تحويل الوكيل إلى وضع «محادثة» — حوار خالص بلا أدوات'
+                    : 'تم تحويل الوكيل إلى وضع «وكيل» — أدوات كاملة', { kind: newKind });
+            }
+            return interaction.update(await renderAgentSettings(agentId, interaction.guildId));
         }
         if (interaction.isStringSelectMenu() && action === 'aiprovider_fb_set') {
             // إضافة/إزالة مزود من سلسلة Fallback — لا يمس إعدادات المزودين
@@ -2307,6 +2426,7 @@ async function renderAgentSettings(agentId, guildId) {
     const emb = embed('⚙️ إعدادات الوكيل — ' + (agent.name || 'Agent'), linesBlock([
         `📌 **الاسم:** ${agent.name || '—'}`,
         `🧩 **النوع:** ${tokenTypeLabel(agent)}`,
+        `🧠 **الوضع:** ${agentKindLabel(agent)}${agentKindOf(agent) === 'chat' ? ' — يتكلم فقط ولا يملك أي أدوات ولا يعلم بها' : ' — أدوات كاملة: تنفيذ، ملفات، صور، ذاكرة، تذكيرات'}`,
         `${providerObj.emoji} **المزود:** ${providerObj.label} (\`${providerObj.id}\`) — ${pValidation.ok ? 'جاهز ✅' : `ناقص: ${pValidation.missing.join(', ')}`}`,
         ...providerLines,
         `🎫 **توكن ديسكورد:** ${agent.discord_token ? secrets.maskSecret(agentPlain.discord_token || agent.discord_token) : 'غير محدد ❌'}`,
@@ -2330,6 +2450,26 @@ async function renderAgentSettings(agentId, guildId) {
         .slice(0, 5);
 
     const components = [];
+    // 🧠 مبدّل وضع الوكيل: وكيل (أدوات) ⇄ محادثة (حوار خالص) — يُطبق حياً بدون إعادة تشغيل
+    components.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:agent:${agentId}:kind_set`)
+            .setPlaceholder('تبديل وضع الوكيل (وكيل ⇄ محادثة)')
+            .addOptions([
+                {
+                    label: agentKindOf(agent) === 'agent' ? 'وكيل — الحالي' : 'وكيل — أدوات كاملة',
+                    value: 'agent',
+                    description: 'ينفذ ويدير: أدوات، ملفات، صور، ذاكرة، تذكيرات',
+                    emoji: '🤖',
+                },
+                {
+                    label: agentKindOf(agent) === 'chat' ? 'محادثة — الحالي' : 'محادثة — حوار خالص',
+                    value: 'chat',
+                    description: 'يتكلم فقط — لا أدوات ولا يعلم بها إطلاقاً',
+                    emoji: '💬',
+                },
+            ]),
+    ));
     if (revealButtons.length) components.push(...rowsFromButtons(revealButtons));
     // 🍪 زر تجاوز حد 4000 — إرسال قيمة السر (كوكيز Gemini الطويلة مثلاً) كملف أو لصق مباشر
     const secretField = providerObj.modalFields.find(f => secrets.SECRET_FIELDS.includes(f.id));
@@ -2904,6 +3044,9 @@ module.exports = {
     renderAgent,
     renderAgentAIProvider,
     renderAgentSettings,
+    createKindView,
+    createTypeView,
+    createProviderView,
     renderAgentKnowledge,
     renderAgentUsage,
     renderAgentProactive,

@@ -216,8 +216,9 @@ async function retireLegacyDefaultAgents() {
 }
 
 /**
- * إنشاء وكيل جديد — يدعم المزودين المتعددين.
+ * إنشاء وكيل جديد — يدعم المزودين المتعددين ونوعي التشغيل.
  * @param {object} opts
+ *   - kind: 'agent' (وكيل بأدوات كاملة — الافتراضي) | 'chat' (محادثة خالصة بلا أي أدوات)
  *   - provider: 'deepseek' | 'qwen' | 'openai' | 'gemini' (افتراضي deepseek للتوافق القديم)
  *   - providerConfig: { deepseek_token } | { qwen_token } | { openai_* } | { gemini_cookies }
  *   - allowIncomplete: عندما true لا يفشل الإنشاء إن نقصت بيانات المزود —
@@ -225,7 +226,7 @@ async function retireLegacyDefaultAgents() {
  *     أو بإرسالها كملف (الكوكيز الطويلة مثلاً). الافتراضي false (سلوك صارم).
  *   التوافق القديم: استدعاء بـ deepseek_token مباشرة يعمل كما هو.
  */
-async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot', provider = null, providerConfig = {}, allowIncomplete = false }) {
+async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot', kind = 'agent', provider = null, providerConfig = {}, allowIncomplete = false }) {
     const cfg = require('./config');
     const { getProviderOrFallback } = require('./providers');
 
@@ -251,6 +252,7 @@ async function createAgent({ name, discord_token, deepseek_token, personality = 
         discord_token,
         personality,
         token_type,
+        kind           : String(kind).toLowerCase() === 'chat' ? 'chat' : 'agent', // 💬 محادثة خالصة / 🤖 وكيل
         provider       : providerObj.id,
         ...mergedProviderConfig, // حقول المزود تُخزن بحقولها الخاصة (deepseek_token / qwen_token / openai_base_url ...)
         config_incomplete        : incomplete,

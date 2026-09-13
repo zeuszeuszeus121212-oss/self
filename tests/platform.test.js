@@ -230,22 +230,22 @@ async function run() {
         const doc = savedList[0];
 
         // الخطوة أ: اختيار openai في المعالج → صفحة اختيار المصدر (DB متاح)
-        const iA = makeInteraction({ customId: 'dash:create_provider:bot', isSelect: true, values: ['openai'] });
+        const iA = makeInteraction({ customId: 'dash:create_provider:bot:agent', isSelect: true, values: ['openai'] });
         assert.strictEqual(await handleDashboardInteraction(iA, fakeManager), true);
         const idsA = collectAllIds(iA.__captured.update);
         assert.ok(idsA.some(x => x && x.startsWith('dash:create_openai_source:')), 'صفحة اختيار المصدر ظهرت');
 
         // الخطوة ب: اختيار المزود المحفوظ → صفحة اختيار النموذج
-        const iB = makeInteraction({ customId: `dash:create_openai_source:bot`, isSelect: true, values: [String(doc._id)] });
+        const iB = makeInteraction({ customId: `dash:create_openai_source:bot:agent`, isSelect: true, values: [String(doc._id)] });
         assert.strictEqual(await handleDashboardInteraction(iB, fakeManager), true);
         const idsB = collectAllIds(iB.__captured.update);
-        assert.ok(idsB.some(x => x && x.startsWith(`dash:create_openai_model:bot:${doc._id}`)), 'صفحة اختيار النموذج ظهرت بمعرف المزود');
+        assert.ok(idsB.some(x => x && x.startsWith(`dash:create_openai_model:bot:agent:${doc._id}`)), 'صفحة اختيار النموذج ظهرت بمعرف المزود');
 
-        // الخطوة ج: اختيار النموذج → نافذة الإنشاء (customId يحمل docId + قيمة النموذج جاهزة)
-        const iC = makeInteraction({ customId: `dash:create_openai_model:bot:${doc._id}`, isSelect: true, values: ['gpt-x'] });
+        // الخطوة ج: اختيار النموذج → نافذة الإنشاء (customId يحمل kind + docId + قيمة النموذج جاهزة)
+        const iC = makeInteraction({ customId: `dash:create_openai_model:bot:agent:${doc._id}`, isSelect: true, values: ['gpt-x'] });
         assert.strictEqual(await handleDashboardInteraction(iC, fakeManager), true);
         const modal = modalJson(iC.__captured.showModal);
-        assert.strictEqual(modal.custom_id, `dash:create_modal:bot:openai:${doc._id}`);
+        assert.strictEqual(modal.custom_id, `dash:create_modal:bot:agent:openai:${doc._id}`);
         const modelRow = modal.components.find(r => r.components[0].custom_id === 'openai_model');
         assert.strictEqual(modelRow.components[0].value, 'gpt-x', 'النموذج مُعبأ مسبقاً');
         const keyRow = modal.components.find(r => r.components[0].custom_id === 'openai_api_key');
@@ -253,7 +253,7 @@ async function run() {
 
         // الخطوة د: إرسال النافذة بلا كتابة أي بيانات → createAgent يستقبل نسخة كاملة من المزود
         const iD = makeInteraction({
-            customId: `dash:create_modal:bot:openai:${doc._id}`, isModal: true,
+            customId: `dash:create_modal:bot:agent:openai:${doc._id}`, isModal: true,
             fields: makeFields({ name: 'وكيل من قاعدة البيانات', discord_token: 'DT-NEW', openai_model: 'gpt-x' }),
         });
         assert.strictEqual(await handleDashboardInteraction(iD, fakeManager), true);
@@ -268,10 +268,10 @@ async function run() {
     // ══════════════════════════════════════════════════════════
     {
         providerDocs.clear(); // بلا مزودين محفوظين
-        const i = makeInteraction({ customId: 'dash:create_provider:bot', isSelect: true, values: ['openai'] });
+        const i = makeInteraction({ customId: 'dash:create_provider:bot:agent', isSelect: true, values: ['openai'] });
         assert.strictEqual(await handleDashboardInteraction(i, fakeManager), true);
         const modal = modalJson(i.__captured.showModal);
-        assert.strictEqual(modal.custom_id, 'dash:create_modal:bot:openai', 'توافق قديم: نافذة الإدخال اليدوي مباشرة');
+        assert.strictEqual(modal.custom_id, 'dash:create_modal:bot:agent:openai', 'بلا مزودين محفوظين: نافذة الإدخال اليدوي مباشرة');
         ok('6) بلا مزودين محفوظين → الإدخال اليدوي كما كان (توافق قديم)');
         // نعيد المزود الأول للاختبارات التالية
         await saveProviderToDb({ name: 'بروكسي رئيسي', base_url: `${BASE}/v1`, api_key: 'sk-PROXY-SECRET-xyz', models: ['gemini-2.5-pro', 'gpt-x'], userId: 'u1' });

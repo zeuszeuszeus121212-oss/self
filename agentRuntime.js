@@ -379,6 +379,7 @@ if (!isValidProvider(agentConfig.provider) && agentConfig.provider) {
 // إعدادات runtime قابلة للتحديث الحي عبر /المزود (كائن واحد يُمرر بالمرجع)
 const runtimeSettings = {
     agentId,
+    kind        : agentConfig.kind === 'chat' ? 'chat' : 'agent', // 💬 محادثة خالصة / 🤖 وكيل بأدوات
     personality : agentConfig.personality || '',
     provider    : providerId,
     providerConfig : extractProviderConfig(agentConfig),
@@ -865,22 +866,27 @@ client.on('interactionCreate', async (interaction) => {
             }
 
             // التحقق من توفر إعدادات المزود الجديد في قاعدة البيانات
+            // 🔓 التبديل حر دائماً — النواقص لا تحجب، فقط تُنبّه ويُعلَّم الوكيل ناقص الإعدادات
+            // حتى يكمل المالك بياناته من اللوحة (كان الحجب هنا يجعل التبديل مستحيلاً تماماً)
             const cfg = require('./config');
             const agentDoc = await cfg.agents_col.findOne({ _id: new (require('mongodb').ObjectId)(agentId) }).catch(() => null);
             const targetCfg = extractProviderConfig({ ...(agentDoc || agentConfigSnapshot || {}), provider: targetId });
             const targetValidation = target.validate(targetCfg);
-            if (!targetValidation.ok) {
-                await interaction.reply({
-                    content: `❌ لا يمكن التبديل إلى ${target.emoji} **${target.label}** — إعداداته ناقصة لهذا الوكيل: \`${targetValidation.missing.join(', ')}` +
-                        `\n> احفظ إعدادات المزود أولاً من لوحة التحكم (تعديل الوكيل) أو أعد إنشاء الوكيل باختيار هذا المزود.`,
-                });
-                return;
-            }
+            const incompleteNote = targetValidation.ok
+                ? ''
+                : `\n⚠️ **بيانات ${target.label} ناقصة** (\`${targetValidation.missing.join(', ')}\`) — لن يرد الوكيل حتى تكملها من لوحة التحكم: صفحة الوكيل ← «الإعدادات» ← «بيانات المزود»، أو زر «قيمة السر من ملف» للقيم الطويلة.`;
 
-            // تحديث قاعدة البيانات + الذاكرة الحية
+            // تحديث قاعدة البيانات + الذاكرة الحية (+ تعليم الوكيل ناقص الإعدادات إن لزم)
             await cfg.agents_col.updateOne(
                 { _id: new (require('mongodb').ObjectId)(agentId) },
-                { $set: { provider: targetId, updated_at: new Date() } },
+                {
+                    $set: {
+                        provider: targetId,
+                        config_incomplete: !targetValidation.ok,
+                        missing_provider_fields: targetValidation.ok ? [] : targetValidation.missing,
+                        updated_at: new Date(),
+                    },
+                },
             );
             runtimeSettings.provider = targetId;
             runtimeSettings.providerConfig = targetCfg;
@@ -891,7 +897,8 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.reply({
                 content: `✅ تم تبديل مزود الذكاء الاصطناعي إلى ${target.emoji} **${target.label}**\n` +
                     `${target.describe(targetCfg)}\n` +
-                    `🔄 تم تصفير جلسات القنوات المحفوظة في الذاكرة (المحادثات القديمة تخص المزود السابق).`,
+                    `🔄 تم تصفير جلسات القنوات المحفوظة في الذاكرة (المحادثات القديمة تخص المزود السابق).` +
+                    incompleteNote,
             });
         }
 

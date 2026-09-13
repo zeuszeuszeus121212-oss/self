@@ -1,0 +1,392 @@
+/**
+ * tests/agent_kinds.test.js — اختبارات نوعي الوكيل + التبديل الحر للمزود
+ * ═══════════════════════════════════════════════════════════════════════
+ * يغطي:
+ *   1) نوع «محادثة»: برومبت بلا أي ذكر للأدوات + استدعاء واحد للنموذج
+ *      بلا حلقة ولا تنفيذ أدوات (لو هلوس النموذج بـ JSON أدوات يبقى نصاً).
+ *   2) نوع «وكيل»: يبقى كما هو تماماً — حلقة الأدوات تعمل (regression).
+ *   3) Fallback يعمل في مسار المحادثة.
+ *   4) createAgent يخزن kind (توافق قديم: بلا kind = agent).
+ *   5) معالج الإنشاء 4 خطوات: الطبيعة ← الحساب ← المزود ← النافذة،
+ *      والنافذة تحمل kind، والصيغ القديمة تعمل (agent).
+ *   6) 🔓 تبديل المزود حر دائماً: ناقص توكن لا يحجب — يُبدّل + يعلم ناقصاً
+ *      + يعرض أزرار الإكمال (نافذة بيانات المزود / ملف السر).
+ *   7) مبدّل الوضع kind_set من صفحة الإعدادات: قاعدة بيانات + runtime حي.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+
+'use strict';
+
+const assert = require('assert');
+const path = require('path');
+
+// ── حقن config وهمي قبل تحميل أي وحدة ──
+const cfgPath = require.resolve(path.join(__dirname, '..', 'config.js'));
+const FAKE_AGENT_ID = '507f1f77bcf86cd799439011';
+
+let currentFakeAgent = {
+    _id: FAKE_AGENT_ID,
+    name: 'TEST',
+    provider: 'qwen',
+    kind: 'agent',
+    qwen_token: 'tok',
+    status: 'stopped',
+};
+const capturedAgentUpdates = [];
+const capturedCreates = [];
+
+const fakeConfig = {
+    BOT_OWNER_ID: 656783724662226963n,
+    MONGODB_URI: null, DISCORD_TOKEN: null, USER_TOKEN: null, DEEPSEEK_TOKEN: null,
+    CONTROL_ROLE_NAME: '', RAILWAY_URL: '', POW_PROXY_TELEGRAM: '', DEFAULT_POW_PROVIDER: 'railway',
+    MAX_CHANNELS_PER_GUILD: 5, MAX_ATTACHMENT_BYTES: 1000000,
+    TEXT_EXTENSIONS: new Set(['.txt', '.md', '.json']), TEXT_CONTENT_TYPES: new Set(['text/', 'application/json']),
+    mongoClient: null, connectMongo: async () => {},
+    memories_col: null, reminders_col: null, knowledge_col: null, providers_col: null,
+    agents_col: {
+        findOne: async () => currentFakeAgent,
+        updateOne: async (q, u) => {
+            capturedAgentUpdates.push(u);
+            if (u.$set && currentFakeAgent) Object.assign(currentFakeAgent, u.$set);
+            return { modifiedCount: 1 };
+        },
+        insertOne: async (doc) => ({ insertedId: doc._id || 'new' }),
+        find: () => ({ limit: () => ({ toArray: async () => [] }) }),
+        countDocuments: async () => 1,
+    },
+    logs_col: {
+        find: () => ({ sort: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
+        insertOne: async () => {},
+    },
+    settings_col: { findOne: async () => null },
+    usage_col: { find() { return { sort: () => ({ limit: () => ({ toArray: async () => [] }) }) }; }, async updateOne() { return { modifiedCount: 1 }; } },
+    channel_sessions: new Map(), allowed_channels_cache: new Map(),
+    sessionLock: { acquire: async (fn) => fn() },
+};
+require.cache[cfgPath] = { id: cfgPath, filename: cfgPath, loaded: true, exports: fakeConfig };
+
+const { ObjectId } = require('mongodb');
+const providers = require('../providers');
+const { runAgent } = require('../tools');
+const { buildSystem } = require('../tools/systemPrompt');
+const { createAgent } = require('../bot');
+const {
+    handleDashboardInteraction,
+    renderAgentSettings,
+} = require('../managerDashboard');
+
+// ── أدوات المحاكاة (نفس نمط e2e_create_flow) ──
+function makeInteraction({ customId, values = null, fields = null, isModal = false, isSelect = false, isButton = false }) {
+    const captured = { showModal: null, reply: null, update: null, followUps: [] };
+    return {
+        customId,
+        values,
+        user: { id: '656783724662226963' },
+        guildId: '111111111111111111',
+        member: null,
+        channel: null,
+        channelId: '222222222222222222',
+        isChatInputCommand: () => false,
+        isStringSelectMenu: () => isSelect,
+        isModalSubmit: () => isModal,
+        isButton: () => isButton,
+        isChannelSelectMenu: () => false,
+        isRoleSelectMenu: () => false,
+        async showModal(modal) { captured.showModal = modal; },
+        async reply(payload) { captured.reply = payload; },
+        async update(payload) { captured.update = payload; },
+        async followUp(payload) { captured.followUps.push(payload); },
+        fields,
+        __captured: captured,
+    };
+}
+
+function makeFields(map) {
+    return {
+        getTextInputValue(id) {
+            if (!(id in map)) throw new Error(`حقل غير موجود: ${id}`);
+            return map[id];
+        },
+    };
+}
+
+function collectAllIds(payload) {
+    const ids = [];
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        const cid = comp.data?.custom_id || comp.customId || comp.custom_id;
+        if (cid) ids.push(cid);
+        for (const child of comp.components || []) walk(child);
+    })(payload);
+    return ids.filter(Boolean);
+}
+
+function payloadText(payload) {
+    let out = '';
+    (function walk(comp) {
+        if (!comp || typeof comp !== 'object') return;
+        const c = (typeof comp.content === 'string') ? comp.content
+            : (comp.data && typeof comp.data.content === 'string') ? comp.data.content : null;
+        if (c) out += c + '\n';
+        for (const child of comp.components || []) walk(child);
+    })(payload);
+    return out;
+}
+
+// ── مزود وهمي يحسب استدعاءاته ──
+let providerCalls = [];
+const fakeChatProvider = {
+    id: 'fake_kind', label: 'وهمي الأنواع', emoji: '🧪', description: 'w',
+    modalFields: [{ id: 'fake_kind_token', label: 'توكن', required: true, maxLength: 300 }],
+    validate: () => ({ ok: true, missing: [] }),
+    describe: () => 'w',
+    async testConnection() { return 'ok'; },
+    async chat({ prompt }) {
+        providerCalls.push(prompt);
+        const scripted = fakeChatProvider.script;
+        const fullText = typeof scripted === 'function' ? scripted(prompt) : scripted;
+        return { fullText, sessionId: `fake_sid_${providerCalls.length}`, newParentMessageId: null };
+    },
+};
+
+const fakeBackupProvider = {
+    id: 'fake_kind_backup', label: 'وهمي احتياطي', emoji: '🧪', description: 'w',
+    modalFields: [],
+    validate: () => ({ ok: true, missing: [] }),
+    describe: () => 'w',
+    async testConnection() { return 'ok'; },
+    async chat() { return { fullText: 'رد الاحتياطي', sessionId: 'bak_sid', newParentMessageId: 'bak_pm' }; },
+};
+
+// Manager وهمي مع runtime حي واحد
+const fakeRuntimeSettings = { kind: 'agent', provider: 'qwen', providerConfig: {} };
+const fakeRuntime = { runtimeSettings: fakeRuntimeSettings, channel_sessions: new Map() };
+const fakeManager = {
+    runtimes: new Map([[FAKE_AGENT_ID, fakeRuntime]]),
+    async createAgent(opts) { capturedCreates.push(opts); return { ...opts, _id: new ObjectId(FAKE_AGENT_ID) }; },
+    async logAgent() {},
+    async notify() {},
+};
+
+let passed = 0;
+const ok = (n) => { passed++; console.log(`✅ ${n}`); };
+
+async function run() {
+    // حقن المزودات الوهمية في السجل
+    providers.PROVIDERS[fakeChatProvider.id] = fakeChatProvider;
+    providers.PROVIDERS[fakeBackupProvider.id] = fakeBackupProvider;
+
+    // ══════════════════════════════════════════════════════════
+    // 1) برومبت النوع «محادثة» بلا أي ذكر للأدوات
+    // ══════════════════════════════════════════════════════════
+    {
+        const chat = buildSystem('TestBot', 'default', false, 'member', '', {}, {}, 'chat');
+        const agent = buildSystem('TestBot', 'default', false, 'owner', '', {}, {}, 'agent');
+        const toolNames = ['read_url', 'generate_image', 'create_file', 'remember', 'recall', 'forget_memory',
+            'set_reminder', 'list_reminders', 'cancel_reminder', 'search_knowledge', 'list_knowledge',
+            'execute', 'TOOL_RESULT', 'get_channels', 'أدواتك', 'أداة'];
+        const leaked = toolNames.filter(n => chat.includes(n));
+        assert.deepStrictEqual(leaked, [], `برومبت المحادثة يجب ألا يذكر أي أداة — تسرب: ${leaked}`);
+        assert.ok(chat.includes('TestBot'), 'برومبت المحادثة يحمل اسم الوكيل');
+        assert.ok(chat.includes('رفيق محادثة'), 'برومبت المحادثة يعرّف نفسه رفيق حوار');
+        assert.ok(agent.includes('read_url') && agent.includes('execute'), 'برومبت الوكيل يحتفظ بأدواته');
+        ok('1) برومبت «محادثة» صفر ذكر للأدوات — برومبت «وكيل» كما هو');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 2) مسار المحادثة: استدعاء واحد، JSON أدوات هلوسة يبقى نصاً
+    // ══════════════════════════════════════════════════════════
+    {
+        providerCalls = [];
+        fakeChatProvider.script = '{"tool":"get_channels","params":{}}'; // هلوسة أدوات
+        const result = await runAgent(
+            {}, null, 'مرحبا', 'user info', 'bot context', 'TestBot',
+            'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
+            {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
+            { userId: 'u1', username: 'u' },
+        );
+        assert.strictEqual(providerCalls.length, 1, `المحادثة = استدعاء واحد للنموذج — وجدنا ${providerCalls.length}`);
+        assert.ok(result.reply.includes('get_channels'), 'هلوسة JSON تُعاد نصاً كما هي (لا تنفيذ)');
+        assert.ok(!result.reply.includes('[TOOL_RESULT]'), 'لا تنفيذ أدوات في مسار المحادثة');
+        assert.strictEqual(result.newSid, 'fake_sid_1', 'الجلسة تُحدّث من مزود المحادثة');
+        assert.deepStrictEqual(result.filesToSend, [], 'لا ملفات في مسار المحادثة');
+        ok('2) مسار المحادثة: استدعاء واحد + هلوسة الأدوات تبقى نصاً بلا تنفيذ');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 3) مسار المحادثة: Fallback يعمل عند فشل الأساسي
+    // ══════════════════════════════════════════════════════════
+    {
+        const failProvider = { ...fakeChatProvider, id: 'fake_kind_fail', label: 'فاشل', async chat() { throw new Error('انفجار'); } };
+        providers.PROVIDERS[failProvider.id] = failProvider;
+        const result = await runAgent(
+            {}, null, 'مرحبا', 'user info', 'bot context', 'TestBot',
+            null, null, '111111111111111111', 'default', false, 'member',
+            {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind_fail', providerConfig: {}, fallback_enabled: true, fallback_chain: ['fake_kind_backup'], fallback_configs: {} },
+            { userId: 'u1', username: 'u' },
+        );
+        assert.ok(result.reply.includes('رد الاحتياطي'), `الفallback يعمل في المحادثة — وجدنا: ${result.reply}`);
+        ok('3) مسار المحادثة: Fallback تلقائي للمزود البديل');
+        delete providers.PROVIDERS[failProvider.id];
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 4) مسار الوكيل (regression): حلقة الأدوات تعمل كما هي
+    // ══════════════════════════════════════════════════════════
+    {
+        providerCalls = [];
+        let call = 0;
+        fakeChatProvider.script = () => {
+            call++;
+            return call === 1
+                ? '{"tool":"recall","params":{}}'
+                : '{"reply":"تم بنجاح"}';
+        };
+        const result = await runAgent(
+            {}, null, 'اذكر ذكرياتي', 'user info', 'bot context', 'TestBot',
+            'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
+            {}, { kind: 'agent', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
+            { userId: 'u1', username: 'u', channelId: 'c1' },
+        );
+        assert.strictEqual(providerCalls.length, 2, 'الوكيل: استدعاء الأداة ثم الرد النهائي = استدعاءان');
+        assert.strictEqual(result.reply, 'تم بنجاح', 'الوكيل يكمل حتى الرد النهائي بعد الأداة');
+        ok('4) مسار الوكيل (regression): حلقة الأدوات تعمل كما هي');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 5) createAgent يخزن kind — والافتراضي agent
+    // ══════════════════════════════════════════════════════════
+    {
+        const chatDoc = await createAgent({ name: 'دردشة', discord_token: 'D', kind: 'chat', provider: 'qwen', providerConfig: { qwen_token: 't' }, allowIncomplete: false });
+        assert.strictEqual(chatDoc.kind, 'chat', 'createAgent(kind=chat) يخزن chat');
+        const defDoc = await createAgent({ name: 'افتراضي', discord_token: 'D', provider: 'qwen', providerConfig: { qwen_token: 't' } });
+        assert.strictEqual(defDoc.kind, 'agent', 'createAgent بلا kind = agent (توافق قديم)');
+        ok('5) createAgent يخزن kind — بلا kind = agent');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 6) معالج الإنشاء 4 خطوات كامل لوكيل «محادثة»
+    // ══════════════════════════════════════════════════════════
+    {
+        // الخطوة 1: اختيار الطبيعة → عرض نوع الحساب مع kind في المعرف
+        const s1 = makeInteraction({ customId: 'dash:create_kind', values: ['chat'], isSelect: true });
+        await handleDashboardInteraction(s1, fakeManager);
+        const ids1 = collectAllIds(s1.__captured.update);
+        assert.ok(ids1.includes('dash:create_type:chat'), `خطوة الحساب يجب أن تحمل kind=chat — وجدنا: ${ids1}`);
+
+        // الخطوة 2: اختيار الحساب → عرض المزود مع kind
+        const s2 = makeInteraction({ customId: 'dash:create_type:chat', values: ['bot'], isSelect: true });
+        await handleDashboardInteraction(s2, fakeManager);
+        const ids2 = collectAllIds(s2.__captured.update);
+        assert.ok(ids2.includes('dash:create_provider:bot:chat'), `خطوة المزود يجب أن تحمل kind — وجدنا: ${ids2}`);
+
+        // الخطوة 3: اختيار المزود → نافذة الإنشاء تحمل kind
+        const s3 = makeInteraction({ customId: 'dash:create_provider:bot:chat', values: ['qwen'], isSelect: true });
+        await handleDashboardInteraction(s3, fakeManager);
+        const modal = s3.__captured.showModal;
+        assert.ok(modal, 'يجب أن تفتح نافذة الإنشاء');
+        const modalJson = modal.toJSON();
+        assert.strictEqual(modalJson.custom_id, 'dash:create_modal:bot:chat:qwen', `معرف النافذة يجب أن يحمل kind — وجدنا: ${modalJson.custom_id}`);
+
+        // الخطوة 4: إرسال النافذة → createAgent(kind='chat')
+        const s4 = makeInteraction({
+            customId: 'dash:create_modal:bot:chat:qwen',
+            isModal: true,
+            fields: makeFields({ name: 'رفيق', discord_token: 'D', qwen_token: 'T', personality: 'لطيف' }),
+        });
+        await handleDashboardInteraction(s4, fakeManager);
+        const opts = capturedCreates[capturedCreates.length - 1];
+        assert.strictEqual(opts.kind, 'chat', 'createAgent يجب أن يستلم kind=chat');
+        assert.strictEqual(opts.provider, 'qwen');
+        ok('6) معالج الإنشاء 4 خطوات: الطبيعة ← الحساب ← المزود ← نافذة تحمل kind → createAgent(kind=chat)');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 7) توافق قديم: نافذة الصيغة القديمة dash:create_modal:bot:qwen = agent
+    // ══════════════════════════════════════════════════════════
+    {
+        const s = makeInteraction({
+            customId: 'dash:create_modal:bot:qwen',
+            isModal: true,
+            fields: makeFields({ name: 'قديم', discord_token: 'D', qwen_token: 'T' }),
+        });
+        await handleDashboardInteraction(s, fakeManager);
+        const opts = capturedCreates[capturedCreates.length - 1];
+        assert.strictEqual(opts.kind, 'agent', 'الصيغة القديمة = وكيل بأدوات');
+        ok('7) توافق قديم: نافذة بلا kind = agent');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 8) 🔓 تبديل المزود بنواقص: لا حجب — تبديل + تعليم ناقص + أزرار إكمال
+    // ══════════════════════════════════════════════════════════
+    {
+        capturedAgentUpdates.length = 0;
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'TEST', provider: 'qwen', kind: 'agent', qwen_token: 'tok', status: 'stopped' };
+        const s = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:aiprovider_set`, values: ['gemini'], isSelect: true });
+        await handleDashboardInteraction(s, fakeManager);
+        const switchUpdate = capturedAgentUpdates.find(u => u.$set && u.$set.provider === 'gemini');
+        assert.ok(switchUpdate, 'يجب أن يتم التبديل فعلياً في قاعدة البيانات');
+        assert.strictEqual(switchUpdate.$set.config_incomplete, true, 'الوكيل يُعلَّم ناقص الإعدادات');
+        assert.deepStrictEqual(switchUpdate.$set.missing_provider_fields, ['gemini_cookies']);
+        assert.strictEqual(fakeRuntimeSettings.provider, 'gemini', 'التبديل حي على الـ runtime');
+        const payloadTextAll = payloadText(s.__captured.update);
+        assert.ok(payloadTextAll.includes('تم التبديل إلى') || payloadTextAll.includes('أكمل بياناته'), 'تنبيه النواقص ظاهر');
+        const btnIds = collectAllIds(s.__captured.update);
+        assert.ok(btnIds.includes(`dash:agent:${FAKE_AGENT_ID}:edit_creds`), 'زر إدخال بيانات المزود ظاهر');
+        assert.ok(!payloadTextAll.includes('لا يمكن التبديل'), 'لا رسالة حجب أبداً');
+        ok('8) تبديل المزود بنواقص: نجح التبديل + علم ناقص + أزرار إكمال (لا حجب)');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 9) 🔓 تبديل المزود ببيانات جاهزة: صفحة المزود مباشرة بلا تنبيه
+    // ══════════════════════════════════════════════════════════
+    {
+        capturedAgentUpdates.length = 0;
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'TEST', provider: 'qwen', kind: 'agent', qwen_token: 'tok', deepseek_token: 'ds', status: 'stopped' };
+        const s = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:aiprovider_set`, values: ['deepseek'], isSelect: true });
+        await handleDashboardInteraction(s, fakeManager);
+        const switchUpdate = capturedAgentUpdates.find(u => u.$set && u.$set.provider === 'deepseek');
+        assert.ok(switchUpdate, 'التبديل تم');
+        assert.strictEqual(switchUpdate.$set.config_incomplete, false, 'بيانات DeepSeek جاهزة — لا ناقص');
+        const text = payloadText(s.__captured.update);
+        assert.ok(!text.includes('أكمل بياناته'), 'لا تنبيه نواقص عند الاكتمال');
+        ok('9) تبديل المزود ببيانات جاهزة: نظيف وبلا تنبيه');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 10) مبدّل الوضع kind_set: قاعدة بيانات + runtime حي معاً
+    // ══════════════════════════════════════════════════════════
+    {
+        capturedAgentUpdates.length = 0;
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'TEST', provider: 'qwen', kind: 'agent', qwen_token: 'tok', status: 'stopped' };
+        fakeRuntimeSettings.kind = 'agent';
+        const s = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:kind_set`, values: ['chat'], isSelect: true });
+        await handleDashboardInteraction(s, fakeManager);
+        const kindUpdate = capturedAgentUpdates.find(u => u.$set && u.$set.kind);
+        assert.ok(kindUpdate, 'يجب أن يُحفظ kind في قاعدة البيانات');
+        assert.strictEqual(kindUpdate.$set.kind, 'chat');
+        assert.strictEqual(fakeRuntimeSettings.kind, 'chat', 'التبديل حي على الـ runtime');
+        const pageIds = collectAllIds(s.__captured.update);
+        assert.ok(pageIds.includes(`dash:agent:${FAKE_AGENT_ID}:kind_set`), 'صفحة الإعدادات تعاد بعد التبديل');
+        ok('10) مبدّل الوضع: DB + runtime حي + إعادة عرض الإعدادات');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // 11) صفحة الإعدادات تعرض الوضع الحالي (محادثة)
+    // ══════════════════════════════════════════════════════════
+    {
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'TEST', provider: 'qwen', kind: 'chat', qwen_token: 'tok', status: 'stopped' };
+        const page = await renderAgentSettings(FAKE_AGENT_ID, '111111111111111111');
+        const text = payloadText(page);
+        assert.ok(text.includes('محادثة'), 'الوضع «محادثة» ظاهر في صفحة الإعدادات');
+        assert.ok(text.includes('بلا أدوات') || text.includes('لا أدوات') || text.includes('حوار خالص'), 'وصف الوضوح للوضع');
+        ok('11) صفحة الإعدادات تعرض وضع الوكيل بوضوح');
+    }
+
+    console.log(`\n🎉 agent_kinds: ${passed}/${passed} اختباراً ناجحاً`);
+}
+
+run().catch((e) => {
+    console.error('❌ فشل اختبار أنواع الوكلاء:', e);
+    process.exit(1);
+});

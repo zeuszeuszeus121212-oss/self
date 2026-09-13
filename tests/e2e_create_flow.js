@@ -1,10 +1,11 @@
 /**
  * tests/e2e_create_flow.js — اختبار E2E حقيقي لتدفق إنشاء الوكيل متعدد المزودين
  * ═══════════════════════════════════════════════════════════════════════════════
- * يحاكي حرفياً ما يفعله المستخدم في ديسكورد:
- *   الخطوة 1: dash:create_type        → اختيار نوع الوكيل
- *   الخطوة 2: dash:create_provider:bot → اختيار المزود (qwen / openai / deepseek)
- *   الخطوة 3: dash:create_modal:<type>:<provider> → إرسال النموذج
+ * يحاكي حرفياً ما يفعله المستخدم في ديسكورد (المعالج 4 خطوات):
+ *   الخطوة 1: dash:create_kind                → طبيعة الوكيل (وكيل/محادثة)
+ *   الخطوة 2: dash:create_type:<kind>         → نوع الحساب
+ *   الخطوة 3: dash:create_provider:<type>:<kind> → اختيار المزود
+ *   الخطوة 4: dash:create_modal:<type>:<kind>:<provider> → إرسال النموذج
  *
  * الهدف: إثبات أن اختيار Qwen يفتح نموذج Qwen ويُنشئ وكيل Qwen (وليس DeepSeek).
  * ═══════════════════════════════════════════════════════════════════════════════
@@ -189,14 +190,14 @@ async function run() {
     // اختبار 1: اختيار Qwen يجب أن يفتح نموذج Qwen (الخطأ الأصلي)
     // ══════════════════════════════════════════════════════════
     {
-        const i = makeInteraction({ customId: 'dash:create_provider:bot', values: ['qwen'], isSelect: true });
+        const i = makeInteraction({ customId: 'dash:create_provider:bot:agent', values: ['qwen'], isSelect: true });
         const handled = await handleDashboardInteraction(i, fakeManager);
         const modal = i.__captured.showModal;
         assert.strictEqual(handled, true, 'التفاعل يجب أن يُعالج');
         assert.ok(modal, 'يجب أن تُفتح نافذة (showModal) بعد اختيار المزود');
         const ids = collectComponentIds(modal);
-        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:qwen'),
-            `معرف النافذة يجب أن يكون dash:create_modal:bot:qwen — وجدنا: ${ids}`);
+        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:agent:qwen'),
+            `معرف النافذة يجب أن يكون dash:create_modal:bot:agent:qwen — وجدنا: ${ids}`);
         assert.ok(ids.includes('qwen_token'), 'نموذج Qwen يجب أن يحتوي حقل qwen_token');
         assert.ok(!ids.includes('deepseek_token'), 'نموذج Qwen يجب ألا يحتوي حقل deepseek_token');
         assert.ok(ids.some(s => s.startsWith('__title__') && s.includes('Qwen')), `العنوان يجب أن يذكر Qwen: ${ids}`);
@@ -207,12 +208,12 @@ async function run() {
     // اختبار 2: اختيار OpenAI يجب أن يفتح نموذج OpenAI
     // ══════════════════════════════════════════════════════════
     {
-        const i = makeInteraction({ customId: 'dash:create_provider:bot', values: ['openai'], isSelect: true });
+        const i = makeInteraction({ customId: 'dash:create_provider:bot:agent', values: ['openai'], isSelect: true });
         await handleDashboardInteraction(i, fakeManager);
         const modal = i.__captured.showModal;
         assert.ok(modal, 'يجب أن تُفتح نافذة OpenAI');
         const ids = collectComponentIds(modal);
-        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:openai'), `معرف نافذة OpenAI خاطئ: ${ids}`);
+        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:agent:openai'), `معرف نافذة OpenAI خاطئ: ${ids}`);
         assert.ok(ids.includes('openai_base_url'), 'نموذج OpenAI يجب أن يحتوي openai_base_url');
         assert.ok(ids.includes('openai_api_key'), 'نموذج OpenAI يجب أن يحتوي openai_api_key');
         assert.ok(!ids.includes('deepseek_token'), 'نموذج OpenAI يجب ألا يحتوي deepseek_token');
@@ -223,12 +224,12 @@ async function run() {
     // اختبار 3: DeepSeek يبقى كما هو (regression)
     // ══════════════════════════════════════════════════════════
     {
-        const i = makeInteraction({ customId: 'dash:create_provider:bot', values: ['deepseek'], isSelect: true });
+        const i = makeInteraction({ customId: 'dash:create_provider:bot:agent', values: ['deepseek'], isSelect: true });
         await handleDashboardInteraction(i, fakeManager);
         const modal = i.__captured.showModal;
         assert.ok(modal, 'يجب أن تُفتح نافذة DeepSeek');
         const ids = collectComponentIds(modal);
-        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:deepseek'), `معرف نافذة DeepSeek خاطئ: ${ids}`);
+        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:bot:agent:deepseek'), `معرف نافذة DeepSeek خاطئ: ${ids}`);
         assert.ok(ids.includes('deepseek_token'), 'نموذج DeepSeek يجب أن يحتوي deepseek_token');
         assert.ok(!ids.includes('qwen_token'), 'نموذج DeepSeek يجب ألا يحتوي qwen_token');
         passed++; console.log('✅ 3) اختيار DeepSeek → نموذج DeepSeek كما هو (بدون تغيير)');
@@ -239,7 +240,7 @@ async function run() {
     // ══════════════════════════════════════════════════════════
     {
         const i = makeInteraction({
-            customId: 'dash:create_modal:bot:qwen',
+            customId: 'dash:create_modal:bot:agent:qwen',
             isModal: true,
             fields: makeFields({
                 name: 'وكيل قwen',
@@ -255,6 +256,7 @@ async function run() {
         assert.strictEqual(capturedCreates.length, 1, 'createAgent يجب أن يُستدعى مرة واحدة');
         const opts = capturedCreates[0];
         assert.strictEqual(opts.provider, 'qwen', `المزود يجب أن يكون qwen — وجدنا: ${opts.provider}`);
+        assert.strictEqual(opts.kind, 'agent', 'معالج الإنشاء من نوع الحساب: bot → kind agent');
         assert.strictEqual(opts.providerConfig.qwen_token, 'QWEN_BEARER_TOKEN', 'qwen_token يجب أن يُحفظ');
         assert.strictEqual(opts.providerConfig.qwen_model, 'qwen3.8-max', 'qwen_model يجب أن يُحفظ');
         assert.ok(!opts.providerConfig.deepseek_token, 'يجب ألا يُحفظ deepseek_token لوكيل Qwen');
@@ -268,7 +270,7 @@ async function run() {
     // ══════════════════════════════════════════════════════════
     {
         const i = makeInteraction({
-            customId: 'dash:create_modal:bot:openai',
+            customId: 'dash:create_modal:bot:agent:openai',
             isModal: true,
             fields: makeFields({
                 name: 'OA',
@@ -304,16 +306,16 @@ async function run() {
     }
 
     // ══════════════════════════════════════════════════════════
-    // اختبار 7: للوكيل user أيضاً — dash:create_provider:user مع qwen
+    // اختبار 7: للوكيل user أيضاً — dash:create_provider:user:agent مع qwen
     // ══════════════════════════════════════════════════════════
     {
-        const i = makeInteraction({ customId: 'dash:create_provider:user', values: ['qwen'], isSelect: true });
+        const i = makeInteraction({ customId: 'dash:create_provider:user:agent', values: ['qwen'], isSelect: true });
         await handleDashboardInteraction(i, fakeManager);
         const modal = i.__captured.showModal;
         const ids = collectComponentIds(modal);
-        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:user:qwen'), `نافذة user/qwen خاطئة: ${ids}`);
+        assert.ok(ids.some(s => s === '__modalId__:dash:create_modal:user:agent:qwen'), `نافذة user/qwen خاطئة: ${ids}`);
         assert.ok(ids.includes('qwen_token'));
-        passed++; console.log('✅ 7) وكيل User Account مع Qwen → dash:create_modal:user:qwen');
+        passed++; console.log('✅ 7) وكيل User Account مع Qwen → dash:create_modal:user:agent:qwen');
     }
 
     // ══════════════════════════════════════════════════════════
