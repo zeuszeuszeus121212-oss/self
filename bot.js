@@ -12,7 +12,8 @@ const { ObjectId } = require('mongodb');
 const { Client, GatewayIntentBits, Partials, REST, Routes } = require('discord.js');
 const { DISCORD_TOKEN, connectMongo } = require('./config');
 const { startAgentRuntime } = require('./agentRuntime');
-const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS } = require('./managerDashboard');
+const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage } = require('./managerDashboard');
+const secrets = require('./secrets');
 
 const LIFECYCLE = Object.freeze({
     STARTING   : 'starting',
@@ -244,7 +245,10 @@ async function createAgent({ name, discord_token, deepseek_token, personality = 
         created_at     : new Date(),
         updated_at     : new Date(),
     };
+    // 🔐 تشفير الأسرار قبل الحفظ (passthrough كامل إن لم يُضبط ENCRYPTION_KEY)
+    secrets.encryptSecretsInPatch(doc);
     const res = await cfg.agents_col.insertOne(doc);
+    // نُعيد نسخة مفكوكة الأسرار حتى يستلم المستدعي وثيقة صالحة للاستخدام الفوري
     return { ...doc, _id: res.insertedId };
 }
 
@@ -283,6 +287,14 @@ async function startManagerBot() {
         }
     });
     managerClient.on('error', (error) => logAgent('manager', 'error', error.message || String(error)));
+    // 📚 التقاط ملفات قاعدة المعرفة المرسلة من صاحب رفع معلّق (من صفحة المعرفة باللوحة)
+    managerClient.on('messageCreate', async (message) => {
+        try {
+            await handleKnowledgeUploadMessage(message, module.exports);
+        } catch (e) {
+            console.error('[Knowledge Upload]', e.message);
+        }
+    });
     await managerClient.login(DISCORD_TOKEN);
     return managerClient;
 }
@@ -290,6 +302,9 @@ async function startManagerBot() {
 async function bootAgents() {
     await connectMongo();
     await retireLegacyDefaultAgents();
+    // 🔐 ترحيل شفاف: تشفير كل التوكنات النصية القديمة (idempotent — بلا مفتاح يتخطى)
+    const cfg0 = require('./config');
+    await secrets.migrateAgentTokensEncryption(cfg0.agents_col).catch(() => {});
     await startManagerBot();
     const cfg = require('./config');
     const agents = await cfg.agents_col.find({ status: LIFECYCLE.RUNNING, legacy: { $ne: true } }).toArray();

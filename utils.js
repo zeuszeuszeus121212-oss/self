@@ -66,6 +66,60 @@ function is_text_attachment(attachment) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Personality Upload — رفع شخصية الوكيل من ملف (المستوى 2)
+// ══════════════════════════════════════════════════════════════
+
+/** الحد الأقصى لعدد أحرف الشخصية القادمة من ملف */
+const PERSONALITY_MAX_CHARS = 20000;
+
+/**
+ * هل الرسالة أمر رفع شخصية؟ — أول كلمة بعد المنشن يجب أن تكون «شخصية» أو personality.
+ * يقبل اختيارياً «#شخصية» لسهولة الكتابة.
+ * @param {string} text نص الرسالة بعد إزالة منشن الوكيل
+ * @returns {boolean}
+ */
+function parsePersonalityCommand(text) {
+    const t = String(text || '').trim().replace(/^#+/, '').trim();
+    if (!t) return false;
+    const first = t.split(/\s+/)[0].toLowerCase();
+    // تطبيع عربي خفيف: ة→ه / أإآ→ا
+    const norm = first.replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه');
+    return norm === 'شخصيه' || norm === 'personality';
+}
+
+/**
+ * التحقق من صلاحية رفع شخصية — صلاحية أدمن+ + مرفق نصي واحد على الأقل + الحجم.
+ * @param {{content: string, attachments: Array<{name?, size?, contentType?}>, accessLevel: string}} p
+ * @returns {{ok: boolean, error?: string, attachment?: object}}
+ */
+function validatePersonalityUpload({ content, attachments, accessLevel } = {}) {
+    if (accessLevel === 'member') {
+        return { ok: false, error: '⛔ تغيير شخصية الوكيل للأدمن/المالك فقط.' };
+    }
+    if (!parsePersonalityCommand(content)) {
+        return { ok: false, error: 'الأمر غير معروف — اكتب «شخصية» مع إرفاق ملف .txt أو .md' };
+    }
+    const list = Array.isArray(attachments) ? attachments : [];
+    if (!list.length) {
+        return { ok: false, error: '📎 أرفق ملف الشخصية (.txt أو .md) مع كلمة «شخصية» في نفس الرسالة.' };
+    }
+    const textAtt = list.find(a => is_text_attachment(a));
+    if (!textAtt) {
+        return { ok: false, error: '❌ المرفق ليس ملفاً نصياً مدعوماً — استخدم .txt أو .md' };
+    }
+    const size = Number(textAtt.size || 0);
+    if (size > MAX_ATTACHMENT_BYTES) {
+        return { ok: false, error: `❌ الملف كبير جداً (${Math.round(size / 1024)}KB) — الحد ${Math.round(MAX_ATTACHMENT_BYTES / 1024)}KB.` };
+    }
+    return { ok: true, attachment: textAtt };
+}
+
+/** تنظيف نص الشخصية القادم من ملف — حدود وتريمينغ */
+function clampPersonalityText(text) {
+    return String(text || '').replace(/\r\n?/g, '\n').trim().slice(0, PERSONALITY_MAX_CHARS);
+}
+
+// ══════════════════════════════════════════════════════════════
 //  MongoDB Session Helpers — دوال الجلسات
 // ══════════════════════════════════════════════════════════════
 
@@ -992,6 +1046,12 @@ module.exports = {
     // Attachment
     is_text_attachment,
     fetchTextAttachment,
+
+    // Personality Upload (المستوى 2)
+    parsePersonalityCommand,
+    validatePersonalityUpload,
+    clampPersonalityText,
+    PERSONALITY_MAX_CHARS,
 
     // DB Sessions
     db_save_channel_session,

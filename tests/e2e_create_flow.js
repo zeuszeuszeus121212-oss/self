@@ -30,8 +30,8 @@ const fakeConfig = {
     DEFAULT_POW_PROVIDER: 'railway',
     MAX_CHANNELS_PER_GUILD: 5,
     MAX_ATTACHMENT_BYTES: 1000000,
-    TEXT_EXTENSIONS: new Set(),
-    TEXT_CONTENT_TYPES: new Set(),
+    TEXT_EXTENSIONS: new Set(['.txt', '.md', '.json']),
+    TEXT_CONTENT_TYPES: new Set(['text/', 'application/json']),
     mongoClient: null,
     connectMongo: async () => {},
     channel_sessions: new Map(),
@@ -39,16 +39,63 @@ const fakeConfig = {
     sessionLock: { acquire: async (fn) => fn() },
     agents_col: {
         findOne: async () => currentFakeAgent,
+        updateOne: async (q, u) => {
+            capturedAgentUpdates.push(u);
+            if (u.$set && currentFakeAgent) Object.assign(currentFakeAgent, u.$set);
+            return { modifiedCount: 1 };
+        },
+        find: () => ({ limit: () => ({ toArray: async () => [] }) }),
     },
     logs_col: {
         find: () => ({ sort: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
+        insertOne: async () => {},
     },
     settings_col: { findOne: async () => null },
+    // 📚 معرفة وهمية
+    knowledge_col: {
+        docs: [],
+        async deleteMany(q) { const before = this.docs.length; this.docs = this.docs.filter(d => d.agent_id !== q.agent_id || d.source !== q.source); return { deletedCount: before - this.docs.length }; },
+        async insertMany(arr) { for (const d of arr) this.docs.push({ ...d }); return { insertedCount: arr.length }; },
+        find(q) {
+            const arr = this.docs.filter(d => d.agent_id === q.agent_id && (!q.source || d.source === q.source));
+            return { limit: () => ({ toArray: async () => arr }), toArray: async () => arr };
+        },
+        async countDocuments(q) { return this.docs.filter(d => d.agent_id === q.agent_id).length; },
+        async distinct(field, q) { return [...new Set(this.docs.filter(d => d.agent_id === q.agent_id).map(d => d[field]))]; },
+        aggregate(pipeline) {
+            const $match = pipeline.find(s => s.$match)?.$match || {};
+            const $limit = pipeline.find(s => s.$limit)?.$limit;
+            let arr = this.docs.filter(d => d.agent_id === $match.agent_id);
+            const groups = new Map();
+            for (const d of arr) {
+                if (!groups.has(d.source)) groups.set(d.source, { source: d.source, chunks: 0, chars: 0, added_at: d.created_at });
+                groups.get(d.source).chunks++;
+                groups.get(d.source).chars += d.size || 0;
+            }
+            arr = [...groups.values()].map(g => ({ ...g, _id: g.source }));
+            if ($limit) arr = arr.slice(0, $limit);
+            return { toArray: async () => arr };
+        },
+    },
+    // 📊 استخدام وهمي
+    usage_col: {
+        find() { return { sort: () => ({ limit: () => ({ toArray: async () => [] }) }) }; },
+        async updateOne() { return { modifiedCount: 1 }; },
+    },
 };
 require.cache[cfgPath] = { id: cfgPath, filename: cfgPath, loaded: true, exports: fakeConfig };
 
 const { ObjectId } = require('mongodb');
-const { handleDashboardInteraction, renderAgent } = require('../managerDashboard');
+const {
+    handleDashboardInteraction,
+    renderAgent,
+    renderAgentSettings,
+    renderAgentKnowledge,
+    renderAgentUsage,
+    renderAgentProactive,
+    handleKnowledgeUploadMessage,
+} = require('../managerDashboard');
+const secrets = require('../secrets');
 
 // الوكيل الوهمي الحالي — تتحكم به الاختبارات
 let currentFakeAgent = {
@@ -59,25 +106,30 @@ let currentFakeAgent = {
     status: 'stopped',
 };
 
+// سجل التحديثات على الوكيل الوهمي
+const capturedAgentUpdates = [];
+
 // ---------- 2) أدوات المحاكاة ----------
-function makeInteraction({ customId, values = null, fields = null, isModal = false, isSelect = false }) {
-    const captured = { showModal: null, reply: null, update: null };
+function makeInteraction({ customId, values = null, fields = null, isModal = false, isSelect = false, isChannelSelect = false, guildId = null }) {
+    const captured = { showModal: null, reply: null, update: null, followUps: [] };
     return {
         customId,
         values,
         user: { id: '656783724662226963' },
-        guildId: null,
+        guildId,
         member: null,
         channel: null,
+        channelId: '222222222222222222',
         isChatInputCommand: () => false,
         isStringSelectMenu: () => isSelect,
         isModalSubmit: () => isModal,
         isButton: () => false,
-        isChannelSelectMenu: () => false,
+        isChannelSelectMenu: () => isChannelSelect,
         isRoleSelectMenu: () => false,
         async showModal(modal) { captured.showModal = modal; },
         async reply(payload) { captured.reply = payload; },
         async update(payload) { captured.update = payload; },
+        async followUp(payload) { captured.followUps.push(payload); },
         fields,
         __captured: captured,
     };
@@ -104,6 +156,18 @@ function collectComponentIds(payload) {
         }
     }
     return ids;
+}
+
+// جمع كل المعرفات من صفحة (أزرار + قوائم منسدلة + قوائم قنوات)
+function collectAllIds(payload) {
+    const ids = [];
+    for (const row of payload?.components || []) {
+        const comps = row.components || [];
+        for (const c of comps) {
+            ids.push(c.data?.custom_id || c.customId || c.custom_id);
+        }
+    }
+    return ids.filter(Boolean);
 }
 
 // Manager وهمي — يسجل createAgent ولا يلمس قاعدة بيانات
@@ -288,8 +352,253 @@ async function run() {
         passed++; console.log('✅ 8) زر POW: مخفي لـ Qwen/OpenAI — ظاهر لـ DeepSeek والوكلاء القدامى');
     }
 
+    // ══════════════════════════════════════════════════════════
+    // اختبار 9: صفحة الإعدادات — لا أسرار خام، أقنعة، أزرار كشف وتعديل وميزات
+    // ══════════════════════════════════════════════════════════
+    {
+        const DS_SECRET = 'sk-DEEPSEEK-CORE-SECRET-a1b2';
+        const DISCORD_SECRET = 'MTA cracked-token-VALUE-z9y8';
+        currentFakeAgent = {
+            _id: FAKE_AGENT_ID, name: 'SECRET-AG', provider: 'deepseek',
+            deepseek_token: DS_SECRET, discord_token: DISCORD_SECRET,
+            personality: 'شخصية قصيرة', status: 'stopped',
+        };
+        const page = await renderAgentSettings(FAKE_AGENT_ID, '111111111111111111');
+        const text = JSON.stringify(page);
+        assert.ok(!text.includes('sk-DEEPSEEK-CORE-SECRET'), 'التوكن الخام يجب ألا يظهر في الصفحة');
+        assert.ok(!text.includes('cracked-token-VALUE'), 'توكن ديسكورد الخام يجب ألا يظهر');
+        assert.ok(text.includes('••••••••'), 'يجب أن تظهر الأقنعة');
+        const ids = collectAllIds(page);
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:reveal:deepseek_token`), 'زر كشف توكن DeepSeek');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:reveal:discord_token`), 'زر كشف توكن ديسكورد');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:edit_identity`), 'زر تعديل الاسم/الشخصية');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:edit_creds`), 'زر تعديل بيانات المزود');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search`), 'زر تبديل web_search');
+        assert.ok(text.includes('🟢 مفعّل'), 'web_search الافتراضي مفعّل (توافق قديم)');
+        passed++; console.log('✅ 9) صفحة الإعدادات: أسرار مقنّعة + أزرار كشف/تعديل/ميزات');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 10: زر الكشف — يعرض القيمة الحقيقية في رسالة ephemeral
+    // ══════════════════════════════════════════════════════════
+    {
+        const i = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:reveal:deepseek_token` });
+        const handled = await handleDashboardInteraction(i, fakeManager);
+        assert.strictEqual(handled, true);
+        const reply = i.__captured.reply || i.__captured.followUps[0];
+        assert.ok(reply, 'الكشف يجب أن يرد برسالة');
+        assert.ok(reply.content.includes('sk-DEEPSEEK-CORE-SECRET-a1b2'), 'الرسالة يجب أن تحوي القيمة الحقيقية');
+        assert.strictEqual(reply.ephemeral, true, 'الرسالة يجب أن تكون ephemeral');
+        passed++; console.log('✅ 10) كشف السر: قيمة حقيقية في رسالة ephemeral فقط');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 11: تبديل web_search — DB + runtime حي معاً
+    // ══════════════════════════════════════════════════════════
+    {
+        capturedAgentUpdates.length = 0;
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'FT', provider: 'qwen', qwen_token: 't', status: 'stopped' };
+        const liveRuntime = { runtimeSettings: { features: { web_search: true } } };
+        fakeManager.runtimes.set(FAKE_AGENT_ID, liveRuntime);
+
+        // تعطيل
+        const i1 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search` });
+        await handleDashboardInteraction(i1, fakeManager);
+        const u1 = capturedAgentUpdates.find(u => u.$set && u.$set.features);
+        assert.ok(u1, 'يجب أن يُحفظ features في قاعدة البيانات');
+        assert.strictEqual(u1.$set.features.web_search, false, 'بعد التبديل الأول: معطّل');
+        assert.strictEqual(liveRuntime.runtimeSettings.features.web_search, false, 'تحديث حي: معطّل');
+
+        // تفعيل مجدداً
+        const i2 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:features_toggle:web_search` });
+        await handleDashboardInteraction(i2, fakeManager);
+        const u2 = capturedAgentUpdates.filter(u => u.$set && u.$set.features).pop();
+        assert.strictEqual(u2.$set.features.web_search, true, 'التبديل الثاني يعيده مفعّلاً');
+        fakeManager.runtimes.delete(FAKE_AGENT_ID);
+        passed++; console.log('✅ 11) تبديل web_search: يُخزن ويُحدّث الـ runtime الحي');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 12: صفحة المعرفة + بدء رفع + التقاط ملف حقيقي عبر HTTP محلي
+    // ══════════════════════════════════════════════════════════
+    {
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'KN', provider: 'qwen', qwen_token: 't', status: 'stopped' };
+        fakeConfig.knowledge_col.docs = [];
+
+        const page = await renderAgentKnowledge(FAKE_AGENT_ID, '111111111111111111');
+        assert.ok(JSON.stringify(page).includes('قاعدة المعرفة'), 'عنوان صفحة المعرفة');
+        const ids = collectAllIds(page);
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:knowledge_upload_start`), 'زر إضافة ملفات');
+
+        // بدء الرفع — يفتح نافذة زمنية للمستخدم
+        const i = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:knowledge_upload_start`, guildId: '111111111111111111' });
+        await handleDashboardInteraction(i, fakeManager);
+        const startPayload = i.__captured.update || i.__captured.reply;
+        assert.ok(startPayload, 'بدء الرفع يرسل تعليمات الرفع');
+        assert.ok(JSON.stringify(startPayload).includes('رفع ملفات المعرفة'), 'التعليمات تظهر للمستخدم');
+
+        // خادم HTTP محلي يحاكي CDN ديسكورد
+        const http = require('http');
+        const server = http.createServer((req, res) => {
+            res.setHeader('content-type', 'text/plain; charset=utf-8');
+            res.end('سياسة الاسترجاع: 14 يوماً كاملة لكل العملاء بدون أسئلة.');
+        });
+        await new Promise(r => server.listen(0, '127.0.0.1', r));
+        const port = server.address().port;
+
+        const replies = [];
+        const message = {
+            guild: { id: '111111111111111111' },
+            author: { id: '656783724662226963', bot: false },
+            attachments: new Map([[
+                'policies.txt',
+                { name: 'policies.txt', size: 200, contentType: 'text/plain', url: `http://127.0.0.1:${port}/policies.txt` },
+            ]]),
+            reply: async (p) => { replies.push(p); },
+        };
+        const processed = await handleKnowledgeUploadMessage(message, fakeManager);
+        assert.strictEqual(processed, true, 'الرسالة يجب أن تُعالج كرفع معرفة');
+        await new Promise(r => server.close(r));
+
+        assert.strictEqual(replies.length, 1, 'رد تأكيد واحد');
+        assert.ok(JSON.stringify(replies[0]).includes('policies.txt'), 'التأكيد يذكر اسم الملف');
+        assert.ok(fakeConfig.knowledge_col.docs.length >= 1, 'قطع أُدخلت فعلاً للمعرفة');
+        assert.ok(fakeConfig.knowledge_col.docs.every(d => d.agent_id === FAKE_AGENT_ID && d.source === 'policies.txt'));
+
+        // رسالة عادية بلا مرفقات → لا معالجة
+        const processed2 = await handleKnowledgeUploadMessage(
+            { guild: { id: '111111111111111111' }, author: { id: '656783724662226963', bot: false }, attachments: new Map(), reply: async () => {} },
+            fakeManager,
+        );
+        assert.strictEqual(processed2, false);
+        passed++; console.log('✅ 12) المعرفة: صفحة + بدء رفع + التقاط ملف حقيقي وإدخال قطع');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 13: صفحة الإحصائيات — تُعرض بنطاقات الأيام
+    // ══════════════════════════════════════════════════════════
+    {
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'US', provider: 'qwen', qwen_token: 't', status: 'stopped' };
+        for (const days of [1, 7, 30]) {
+            const page = await renderAgentUsage(FAKE_AGENT_ID, days);
+            assert.ok(JSON.stringify(page).includes(`آخر ${days} يوم`), `عنوان بنطاق ${days}`);
+        }
+        const page7 = await renderAgentUsage(FAKE_AGENT_ID, 7);
+        const ids = collectAllIds(page7);
+        for (const d of [1, 7, 30]) {
+            assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:usage:${d}`), `زر نطاق ${d} يوم`);
+        }
+        passed++; console.log('✅ 13) صفحة الإحصائيات: نطاقات 1/7/30 يوم وأزرارها');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 14: صفحة الاستباقية — تعطيل/تفعيل + إضافة قناة بنافذة كلمات
+    // ══════════════════════════════════════════════════════════
+    {
+        capturedAgentUpdates.length = 0;
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'PR', provider: 'qwen', qwen_token: 't', status: 'stopped', proactive_enabled: false };
+
+        const page = await renderAgentProactive(FAKE_AGENT_ID, '111111111111111111');
+        const ids = collectAllIds(page);
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:proactive_toggle`), 'زر تفعيل/تعطيل');
+        assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:proactive_channel_add`), 'قائمة إضافة قناة');
+
+        // اختيار قناة → نافذة كلمات مفتاحية
+        const iSel = makeInteraction({
+            customId: `dash:agent:${FAKE_AGENT_ID}:proactive_channel_add`,
+            values: ['333333333333333333'],
+            isChannelSelect: true,
+        });
+        await handleDashboardInteraction(iSel, fakeManager);
+        const modal = iSel.__captured.showModal;
+        assert.ok(modal, 'اختيار القناة يفتح نافذة الكلمات');
+        const modalIds = collectComponentIds(modal);
+        assert.ok(modalIds.some(s => s.includes(`dash:proactive_modal:${FAKE_AGENT_ID}:333333333333333333`)), `معرف نافذة الاستباقية: ${modalIds}`);
+        assert.ok(modalIds.includes('keywords') && modalIds.includes('cooldown'));
+
+        // إرسال النافذة → حفظ الإدخال
+        const iModal = makeInteraction({
+            customId: `dash:proactive_modal:${FAKE_AGENT_ID}:333333333333333333`,
+            isModal: true,
+            fields: makeFields({ keywords: 'سعر، الخصم', cooldown: '15' }),
+        });
+        await handleDashboardInteraction(iModal, fakeManager);
+        const u = capturedAgentUpdates.find(x => x.$set && x.$set.proactive_channels);
+        assert.ok(u, 'يجب حفظ proactive_channels');
+        assert.strictEqual(u.$set.proactive_channels[0].channel_id, '333333333333333333');
+        assert.deepStrictEqual(u.$set.proactive_channels[0].keywords, ['سعر', 'الخصم']);
+        assert.strictEqual(u.$set.proactive_channels[0].cooldown_minutes, 15);
+        passed++; console.log('✅ 14) الاستباقية: صفحة + نافذة كلمات + حفظ الإدخال المطبّع');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 15: نوافذ التعديل المجزأة — هوية وتوكن وبيانات مزود
+    // ══════════════════════════════════════════════════════════
+    {
+        currentFakeAgent = {
+            _id: FAKE_AGENT_ID, name: 'EDIT', provider: 'openai',
+            openai_base_url: 'https://api.old.com/v1', openai_api_key: 'sk-OLD',
+            openai_model: 'gpt-x', personality: 'قديمة', status: 'stopped',
+        };
+        // نافذة الهوية
+        const i1 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:edit_identity` });
+        await handleDashboardInteraction(i1, fakeManager);
+        const m1 = i1.__captured.showModal;
+        assert.ok(m1 && collectComponentIds(m1).some(s => s.includes('dash:edit_identity_modal:')), 'نافذة الهوية');
+        assert.ok(JSON.stringify(m1).includes('قديمة'), 'الشخصية الحالية معبأة في النافذة');
+
+        // إرسال الهوية
+        capturedAgentUpdates.length = 0;
+        const i2 = makeInteraction({
+            customId: `dash:edit_identity_modal:${FAKE_AGENT_ID}`,
+            isModal: true,
+            fields: makeFields({ name: 'اسم-جديد', personality: 'شخصية جديدة' }),
+        });
+        await handleDashboardInteraction(i2, fakeManager);
+        const u2 = capturedAgentUpdates.find(x => x.$set && x.$set.name);
+        assert.ok(u2 && u2.$set.name === 'اسم-جديد' && u2.$set.personality === 'شخصية جديدة', 'الهوية تُحفظ');
+
+        // نافذة بيانات المزود — حقول openai فقط
+        const i3 = makeInteraction({ customId: `dash:agent:${FAKE_AGENT_ID}:edit_creds` });
+        await handleDashboardInteraction(i3, fakeManager);
+        const m3 = i3.__captured.showModal;
+        const m3Ids = collectComponentIds(m3);
+        assert.ok(m3Ids.includes('openai_api_key') && m3Ids.includes('openai_base_url'), 'حقول openai في النافذة');
+        assert.ok(!m3Ids.includes('qwen_token'), 'لا حقول مزودين آخرين');
+        assert.ok(JSON.stringify(m3).includes('api.old.com'), 'base_url الحالي معبأ');
+        assert.ok(!JSON.stringify(m3).includes('sk-OLD'), 'المفتاح السري القديم لا يُعرض في النافذة');
+
+        // إرسال بيانات جديدة — السر يُشفّر أو يبقى نصاً بلا مفتاح (passthrough) والقيم تُحفظ
+        capturedAgentUpdates.length = 0;
+        const i4 = makeInteraction({
+            customId: `dash:edit_creds_modal:${FAKE_AGENT_ID}`,
+            isModal: true,
+            fields: makeFields({ openai_api_key: 'sk-NEW-KEY', openai_model: 'gpt-4o' }),
+        });
+        await handleDashboardInteraction(i4, fakeManager);
+        const u4 = capturedAgentUpdates.find(x => x.$set && x.$set.openai_api_key);
+        assert.ok(u4, 'بيانات المزود تُحفظ');
+        assert.strictEqual(u4.$set.openai_api_key, 'sk-NEW-KEY');
+        assert.strictEqual(u4.$set.openai_model, 'gpt-4o');
+        passed++; console.log('✅ 15) نوافذ التعديل المجزأة: هوية/توكن/بيانات مزود — عرض آمن وحفظ صحيح');
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // اختبار 16: صفحة الوكيل تحتوي الأزرار الجديدة الأربعة
+    // ══════════════════════════════════════════════════════════
+    {
+        currentFakeAgent = { _id: FAKE_AGENT_ID, name: 'NAV', provider: 'qwen', qwen_token: 't', status: 'stopped' };
+        const page = await renderAgent(fakeManager, FAKE_AGENT_ID);
+        const ids = collectAllIds(page);
+        for (const suffix of ['settings', 'knowledge', 'usage:7', 'proactive']) {
+            assert.ok(ids.includes(`dash:agent:${FAKE_AGENT_ID}:${suffix}`), `زر ${suffix} مفقود`);
+        }
+        assert.ok(ids.length <= 25, 'لا نتجاوز حد ديسكورد للمكونات (5 صفوف × 5)');
+        passed++; console.log('✅ 16) صفحة الوكيل: أزرار الإعدادات/المعرفة/الإحصائيات/الاستباقية موجودة');
+    }
+
     console.log(`\n════════════════════════════════`);
-    console.log(`النتيجة: ${passed}/8 اختبارات ناجحة`);
+    console.log(`النتيجة: ${passed}/16 اختبارات ناجحة`);
 }
 
 run().catch((e) => { console.error('❌ E2E FAILED:', e.message); process.exit(1); });

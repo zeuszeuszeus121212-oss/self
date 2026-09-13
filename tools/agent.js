@@ -24,6 +24,8 @@ const { getProviderOrFallback, extractProviderConfig, buildFallbackChain } = req
 const webTools = require('./webTools');
 const memory   = require('../memory');
 const reminders = require('../reminders');
+const knowledge = require('../knowledge');
+const usage = require('../usage');
 
 const { buildSystem } = require('./systemPrompt');
 
@@ -175,7 +177,13 @@ async function runAgent(
     runtime = {},
     requester = {}, // {userId, username, channelId} — هوية طالب الطلب (للذاكرة والتذكيرات)
 ) {
-    const system    = buildSystem(botName, mode, thinking, accessLevel, runtime.personality || '');
+    const system    = buildSystem(botName, mode, thinking, accessLevel, runtime.personality || '', runtime.features || {});
+
+    // ── ⚙️ ميزات الوكيل القابلة للتعطيل (توافق قديم: بلا إعداد = مفعّلة) ──
+    const webSearchEnabled = runtime.features ? runtime.features.web_search !== false : true;
+
+    // ── 📊 تتبع الاستخدام — لا يعطل شيئاً أبداً ──
+    const track = (kind, meta) => { try { usage.track(runtime.agentId || 'default', guildId, kind, meta).catch(() => {}); } catch (_) {} };
 
     // ── نظام المزودين + سلسلة Fallback ──
     // [0] الأساسي دائماً — البدائل فقط عند تفعيل fallback وتوفر إعداداتها كاملة
@@ -220,12 +228,14 @@ async function runAgent(
                 chainIdx++;
                 const next = chain[chainIdx];
                 console.warn(`⚠️ [Fallback] فشل ${failed.obj.label} (${String(e.message).slice(0, 120)}) — التحويل إلى ${next.obj.label}`);
+                track('fallback', { from: failed.obj.id, to: next.obj.id });
                 // جلسات كل مزود مستقلة — نبدأ جلسة جديدة لدى البديل
                 curSid  = null;
                 curPmid = null;
                 step--; // إعادة نفس الخطوة على البديل (لا تستهلك محاولة)
                 continue;
             }
+            track('error', { provider: activeProvider.id });
             return {
                 reply      : `⚠️ خطأ في الاتصال بالنموذج (${activeProvider.label}): ${e.message}`,
                 newSid     : curSid,
@@ -233,6 +243,9 @@ async function runAgent(
                 filesToSend: [],
             };
         }
+
+        // 📊 نجاح استدعاء مزود
+        track('provider', { provider: activeProvider.id });
 
         console.log(`  raw: ${raw.slice(0, 300)}`);
 
@@ -283,6 +296,7 @@ async function runAgent(
 
             if (tool === 'execute') {
                 const actionName = obj.action || '';
+                track('tool', { tool: actionName });
                 const { allowed, reason } = executeAllowedForAccess(actionName, accessLevel, params);
                 let result;
                 if (!allowed) {
@@ -315,6 +329,8 @@ async function runAgent(
                 'remember', 'recall', 'forget_memory',
                 // ⏰ التذكيرات (مخصصة لمستخدم الطلب فقط)
                 'set_reminder', 'list_reminders', 'cancel_reminder',
+                // 📚 قاعدة المعرفة RAG (أدمن/مالك فقط)
+                'search_knowledge', 'list_knowledge',
             ];
 
             if (readTools.includes(tool)) {
@@ -419,8 +435,13 @@ async function runAgent(
 
                         // ═══════════════════════════════════════════
                         //  🌐 أدوات الويب — حقيقية عبر webTools
+                        //  قابلة للتعطيل من إعدادات الوكيل (features.web_search)
                         // ═══════════════════════════════════════════
                         case 'web_search': {
+                            if (!webSearchEnabled) {
+                                result = _err('🌐 أداة البحث في الإنترنت معطّلة من إعدادات هذا الوكيل — أخبر المستخدم أن يمكّنها من إعدادات الوكيل (الميزات) أو اعتمد على معرفتك.');
+                                break;
+                            }
                             const q = String(params.query || params.q || params.search || '').trim();
                             if (!q) {
                                 result = _err('حدد استعلام البحث: {"query": "..."}');
@@ -429,10 +450,15 @@ async function runAgent(
                                 result = r.ok
                                     ? { ok: true, provider: r.provider, count: r.results.length, results: r.results, note: r.note || (r.results.length ? 'استخدم read_url لقراءة أي نتيجة بالتفصيل' : '') }
                                     : _err(r.error || 'فشل البحث');
+                                track('web');
                             }
                             break;
                         }
                         case 'read_url': {
+                            if (!webSearchEnabled) {
+                                result = _err('🌐 أداة قراءة صفحات الويب معطّلة من إعدادات هذا الوكيل — أخبر المستخدم أن يمكّنها من إعدادات الوكيل (الميزات).');
+                                break;
+                            }
                             const u = String(params.url || params.link || '').trim();
                             if (!u) {
                                 result = _err('حدد الرابط: {"url": "https://..."}');
@@ -441,7 +467,36 @@ async function runAgent(
                                 result = r.ok
                                     ? { ok: true, url: r.url, title: r.title || undefined, type: r.type, content: r.content, truncated: r.truncated || false }
                                     : _err(r.error || 'فشل جلب الصفحة');
+                                track('web');
                             }
+                            break;
+                        }
+
+                        // ═══════════════════════════════════════════
+                        //  📚 قاعدة المعرفة RAG — مستندات الوكيل الخاصة
+                        //  للأدمن/المالك فقط (ليست في MEMBER_SAFE_TOOLS)
+                        // ═══════════════════════════════════════════
+                        case 'search_knowledge': {
+                            const q = String(params.query || params.q || '').trim();
+                            if (!q) {
+                                result = _err('حدد الاستعلام: {"query": "..."} — واختيارياً {"source": "اسم الملف"}');
+                            } else {
+                                const r = await knowledge.searchKnowledge({
+                                    agentId : runtime.agentId || 'default',
+                                    query   : q,
+                                    limit   : Number(params.limit || 6),
+                                    source  : params.source ? String(params.source) : null,
+                                });
+                                result = r.ok
+                                    ? { ok: true, count: r.results.length, results: r.results.map(x => ({ source: x.source, chunk: x.chunk_index, content: x.content })) }
+                                    : _err(r.error || 'فشل البحث في المعرفة');
+                                if (r.ok) track('knowledge');
+                            }
+                            break;
+                        }
+                        case 'list_knowledge': {
+                            const srcs = await knowledge.listSources(runtime.agentId || 'default');
+                            result = { ok: true, count: srcs.length, sources: srcs };
                             break;
                         }
 
@@ -557,6 +612,9 @@ async function runAgent(
                     console.error(`[Tool error] ${tool}:`, e);
                     result = _err(`❌ خطأ في تنفيذ الأداة ${tool}: ${String(e.message).slice(0, 200)}`);
                 }
+
+                // 📊 تتبع استدعاء الأداة
+                track('tool', { tool });
 
                 allResults.push(`[TOOL_RESULT: ${tool}]\n${JSON.stringify(result, null, 2)}`);
                 continue;

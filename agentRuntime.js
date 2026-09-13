@@ -8,6 +8,8 @@
 
 'use strict';
 
+const { ObjectId } = require('mongodb');
+
 // ══════════════════════════════════════════════════════════════
 //  استيراد المكتبات والوحدات
 // ══════════════════════════════════════════════════════════════
@@ -68,6 +70,10 @@ const {
     isBotOwner,
     looks_like_internal_prompt_request,
     buildBotContext,
+    parsePersonalityCommand,
+    validatePersonalityUpload,
+    clampPersonalityText,
+    PERSONALITY_MAX_CHARS,
 } = require('./utils');
 
 const {
@@ -87,6 +93,9 @@ const remindersModule = require('./reminders');
 const { startReminderEngine } = remindersModule;
 const reminder_SCAN_MS = remindersModule.SCAN_INTERVAL_MS;
 const memory = require('./memory');
+const secrets = require('./secrets');
+const proactive = require('./proactive');
+const usage = require('./usage');
 
 // ══════════════════════════════════════════════════════════════
 //  🎨 نظام التصميم الموحد — لكل ردومات الوكيل (embeds أنيقة ومتسقة)
@@ -130,7 +139,13 @@ function buildHelpEmbeds(botName, extra = {}) {
             '• «ابحث لي عن أحسن لابتوب لعام 2025 واقرأ أول نتيجة» ← بحث ويب + قراءة صفحات\n' +
             '• «تذكر أنني أعمل مبرمجاً» / «ماذا تذكر عني؟» / «انسي ذلك» ← ذاكرة شخصية دائمة\n' +
             '• «ذكرني بعد 30 دقيقة» / «ذكّرني كل يوم 8 مساءً» ← تذكيرات حقيقية تصلك في وقتها\n' +
-            '• «من الأكثر نشاطاً هذا الأسبوع؟» ثم «امسح رسائله» ← قراءة السيرفر ثم تنفيذ (للأدمن)')
+            '• «من الأكثر نشاطاً هذا الأسبوع؟» ثم «امسح رسائله» ← قراءة السيرفر ثم تنفيذ (للأدمن)\n\n' +
+            '**🧠 الذاكرة الدائمة — كيف تعمل فعلاً؟**\n' +
+            '• عندك مع كل وكيل ذاكرة خاصة **مقسمة حسب هويتك** — لا يرى أحد ذكرياتك غيرك.\n' +
+            '• تُخزن في قاعدة البيانات (وليس في المحادثة) — تنجو من تصفير المحادثات وتعطّل البوت.\n' +
+            '• **حقن تلقائي:** قبل كل رسالة تكلمني فيها، أهم 12 ذكرى عنك تُضاف لسياقي تلقائياً — فتفترض أنني أتذكر حتى لو لم تستدعِ شيئاً.\n' +
+            '• **أدواتي:** `remember` (أحفظ)، `recall` (أستدعي بالبحث)، `forget_memory` (أنسى). الاستخدام: قل لي «تذكر أن…» وأنا أحفظ بنفسي.\n' +
+            '• التكرار لا يُكرر الحفظ (dedup)، والحد 200 ذكرى لكل مستخدم، والقديم الأقل تفاعلاً يُحذف تلقائياً.')
         .setFooter({ text: footerTxt })
         .setTimestamp();
 
@@ -146,6 +161,11 @@ function buildHelpEmbeds(botName, extra = {}) {
             '**/المزود** — اعرض أو بدّل مزودي (🐋 DeepSeek / 🌐 Qwen / ⚙️ OpenAI-Compatible)\n' +
             '**/اختبار-المزود** — اختبار اتصال حقيقي مع مزودي الحالي\n' +
             '**/مزود-باو** — إعدادات POW (خاص بـ DeepSeek فقط)\n\n' +
+            '**⚙️ الميزات والإحصائيات**\n' +
+            '**/الميزات** — اعرض ميزاتي أو عطّل/فعّل web_search (لو نموذجك يملك بحثاً مدمجاً)\n' +
+            '**/الاحصائيات** — إحصائيات استخدامي آخر 7 أيام (رسائل/أدوات/مزودون)\n\n' +
+            '**📎 رفع شخصية من ملف**\n' +
+            'منشنني + اكتب `شخصية` + أرفق ملف `.txt` أو `.md` في نفس الرسالة (حتى 1MB و20000 حرف) — أستبدل شخصيتي فوراً.\n\n' +
             '**⚙️ الصلاحيات والإدارة**\n' +
             '**/رتبة-التحكم** — حدد رتبة من يستطيع إدارتي\n' +
             '**/الرتبة-الحالية** — اعرض رتبة التحكم\n\n' +
@@ -154,7 +174,7 @@ function buildHelpEmbeds(botName, extra = {}) {
             '**/فعاليات-وضع** — تلقائي أو يدوي\n' +
             '**/حساب-خاص** / **/حساب-منشن** / **/حساب-تسليمات** — قنوات تحويل الحساب الحقيقي\n' +
             '**/حساب-قناة-فعاليات** / **/حساب-رول-فعاليات** — إعدادات فعاليات الحساب\n\n' +
-            '> للوحة تحكم كاملة (إنشاء وكلاء، إحصائيات، سجلات) استخدم /panel من بوت المدير')
+            '> للوحة تحكم كاملة (إنشاء وكلاء، الإعدادات، المعرفة، الاستباقية، الإحصائيات) استخدم /panel من بوت المدير')
         .setFooter({ text: footerTxt })
         .setTimestamp();
     return [e1, e2];
@@ -286,6 +306,19 @@ function agentRuntimeCommands() {
         new SlashCommandBuilder()
             .setName('اختبار-المزود')
             .setDescription('اختبار اتصال حقيقي مع مزود الذكاء الاصطناعي لهذا الوكيل'),
+
+        new SlashCommandBuilder()
+            .setName('الميزات')
+            .setDescription('⚙️ عرض ميزات هذا الوكيل أو تعطيل/تفعيل إحداها')
+            .addStringOption(option => option
+                .setName('التبديل')
+                .setDescription('الميزة المطلوب تبديلها')
+                .setRequired(false)
+                .addChoices({ name: 'web_search — البحث في الإنترنت', value: 'web_search' })),
+
+        new SlashCommandBuilder()
+            .setName('الاحصائيات')
+            .setDescription('📊 إحصائيات استخدام هذا الوكيل (رسائل/أدوات/مزودون)'),
     ];
 }
 
@@ -330,6 +363,9 @@ function resolveChannelValue(guild, value) {
 // ══════════════════════════════════════════════════════════════
 async function startAgentRuntime(agentConfig) {
 const agentId = String(agentConfig._id || agentConfig.id || 'default');
+
+// 🔐 فك تشفير الأسرار (توكن ديسكورد + توكنات المزودين) — pass-through للنص القديم
+agentConfig = secrets.decryptAgentDoc(agentConfig);
 const agentName = agentConfig.name || agentId;
 const tokenType = normalizeTokenType(agentConfig.token_type || agentConfig.tokenType || 'bot');
 const discordToken = agentConfig.discord_token || agentConfig.discordToken;
@@ -354,7 +390,88 @@ const runtimeSettings = {
     fallback_enabled : Boolean(agentConfig.fallback_enabled),
     fallback_chain   : Array.isArray(agentConfig.fallback_chain) ? agentConfig.fallback_chain.map(String) : [],
     fallback_configs : extractAllProviderConfigs(agentConfig),
+    // ⚙️ ميزات الوكيل القابلة للتعطيل — توافق قديم: بلا إعداد = مفعّلة
+    // (web_search قابل للتعطيل لأن كل نموذج أصبح يملك بحثاً مدمجاً)
+    features : {
+        web_search : agentConfig.features?.web_search !== false,
+    },
+    // 🤖 الاستباقية — إصغاء قنوات بالكلمات المفتاحية (توافق قديم: بلا إعداد = معطلة)
+    proactive_enabled  : Boolean(agentConfig.proactive_enabled),
+    proactive_channels : Array.isArray(agentConfig.proactive_channels) ? agentConfig.proactive_channels : [],
 };
+const proactiveCooldowns = new Map(); // `${guildId}:${channelId}` → آخر إطلاق (ms)
+
+// ══════════════════════════════════════════════════════════════
+//  📎 رفع شخصية من ملف — منطق مشترك لكل أنواع الوكلاء (المستوى 2)
+// ══════════════════════════════════════════════════════════════
+async function handlePersonalityUploadMessage(message) {
+    // إزالة منشن هذا الوكيل من النص
+    const content = String(message.content || '')
+        .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+        .trim();
+
+    // ليس أمر شخصية؟ ليس لنا — يكمل لمسار المحادثة العادي
+    if (!parsePersonalityCommand(content)) return false;
+
+    const accessLevel = getAccessLevel(message.member);
+    const attachments = Array.from(message.attachments.values()).map(a => ({
+        name: a.name, size: a.size, contentType: a.contentType, url: a.url,
+    }));
+
+    const v = validatePersonalityUpload({ content, attachments, accessLevel });
+    if (!v.ok) {
+        await message.reply(v.error);
+        return true; // الأمر لنا لكنه فاشل — لا تكمل للمحادثة
+    }
+
+    const text = await fetchTextAttachment(v.attachment.url);
+    const personality = clampPersonalityText(text);
+    if (!personality) {
+        await message.reply('❌ الملف فارغ أو غير قابل للقراءة.');
+        return true;
+    }
+
+    // تحديث قاعدة البيانات + الـ runtime الحي فوراً
+    const cfg = require('./config');
+    if (!cfg.agents_col || !ObjectId.isValid(String(agentId))) {
+        await message.reply('❌ قاعدة البيانات غير متصلة — لا يمكن الحفظ.');
+        return true;
+    }
+    await cfg.agents_col.updateOne(
+        { _id: new ObjectId(agentId) },
+        { $set: { personality, updated_at: new Date() } },
+    );
+    runtimeSettings.personality = personality;
+
+    try {
+        await cfg.logs_col?.insertOne?.({
+            agent_id: agentId,
+            type: 'personality_upload',
+            message: 'تم تحديث شخصية الوكيل من ملف مرفوع',
+            extra: { source: v.attachment.name, chars: personality.length, by: message.author.id },
+            created_at: new Date(),
+        });
+    } catch (_) {}
+
+    const preview = personality.length > 300 ? `${personality.slice(0, 300)}…` : personality;
+    const emb = agentEmbed({
+        title: '✅ تم تحديث شخصيتي من الملف',
+        description: linesBlock([
+            `📎 **المصدر:** ${v.attachment.name}`,
+            `📏 **الطول:** ${personality.length} حرف (الحد ${PERSONALITY_MAX_CHARS})`,
+            '',
+            '**معاينة:**',
+            `> ${preview.split('\n').join('\n> ')}`,
+            '',
+            'الشخصية الجديدة تعمل الآن فوراً بدون إعادة تشغيل.',
+        ]),
+        color: AGENT_COLORS.success,
+        botName: client.user.displayName || client.user.username,
+    });
+    await message.reply({ embeds: [emb] });
+    return true;
+}
+
 // لقطة من وثيقة الوكيل عند الإقلاع — تُستخدم للتحقق من إعدادات المزودين الآخرين
 const agentConfigSnapshot = { ...agentConfig };
 
@@ -773,6 +890,103 @@ client.on('interactionCreate', async (interaction) => {
             }
         }
 
+        else if (commandName === 'الميزات') {
+            if (!member.permissions.has('Administrator')) {
+                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+                return;
+            }
+            const target = interaction.options.getString('التبديل');
+
+            if (!target) {
+                const f = runtimeSettings.features || {};
+                await interaction.reply({
+                    embeds: [agentEmbed({
+                        title: '⚙️ ميزات هذا الوكيل',
+                        description: linesBlock([
+                            `${(f.web_search !== false) ? '🟢' : '🔴'} **web_search** — البحث في الإنترنت (web_search + read_url)`,
+                            `${(f.web_search !== false) ? 'مفعّلة' : 'معطّلة'} — ${(f.web_search !== false)
+                                ? 'الوكيل يستطيع البحث وقراءة صفحات الويب.'
+                                : 'الوكيل يعتمد على معرفته الداخلية/بحث النموذج المدمج فقط.'}`,
+                            '',
+                            '> للتبديل: `/الميزات التبديل:web_search`',
+                            '> يُطبق التبديل فوراً بدون إعادة تشغيل — ويُحفظ في اللوحة.',
+                        ]),
+                        color: (f.web_search !== false) ? AGENT_COLORS.success : AGENT_COLORS.warning,
+                        botName,
+                    })],
+                });
+                return;
+            }
+
+            if (target !== 'web_search') {
+                await interaction.reply({ content: '❌ ميزة غير معروفة.' });
+                return;
+            }
+
+            const newValue = !(runtimeSettings.features?.web_search !== false);
+            runtimeSettings.features = { ...(runtimeSettings.features || {}), web_search: newValue };
+
+            // حفظ في قاعدة البيانات (دمج مع أي ميزات أخرى محفوظة)
+            try {
+                const cfg = require('./config');
+                const doc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+                const features = { ...(doc?.features || {}), web_search: newValue };
+                await cfg.agents_col.updateOne(
+                    { _id: new ObjectId(agentId) },
+                    { $set: { features, updated_at: new Date() } },
+                );
+            } catch (_) {}
+
+            await interaction.reply({
+                embeds: [agentEmbed({
+                    title: newValue ? '🟢 web_search مفعّلة الآن' : '🔴 web_search معطّلة الآن',
+                    description: newValue
+                        ? 'الوكيل يستطيع البحث في الإنترنت وقراءة الصفحات من جديد.'
+                        : 'الوكيل لن يستدعي web_search/read_url — إن طُلب بحث فسيشرح أن البحث الخارجي معطّل من إعدادات الوكيل.',
+                    color: newValue ? AGENT_COLORS.success : AGENT_COLORS.warning,
+                    botName,
+                })],
+            });
+        }
+
+        else if (commandName === 'الاحصائيات') {
+            if (!member.permissions.has('Administrator')) {
+                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+                return;
+            }
+            await interaction.deferReply({ ephemeral: true }).catch(() => {});
+            const rows = await usage.getAgentUsage(agentId, 7).catch(() => []);
+            const s = usage.summarize(rows);
+            const providersLine = Object.keys(s.provider_calls).length
+                ? Object.entries(s.provider_calls).map(([pid, n]) => `${pid}: **${n}**`).join(' — ')
+                : '—';
+            const toolsLine = s.top_tools.length
+                ? s.top_tools.map(([t, n], i) => `${i + 1}. \`${t}\` — **${n}**`).join('\n')
+                : '—';
+            await interaction.editReply({
+                embeds: [agentEmbed({
+                    title: '📊 إحصائيات آخر 7 أيام',
+                    description: linesBlock([
+                        `💬 **الرسائل المُعالجة:** ${s.messages}`,
+                        `🔧 **استدعاءات الأدوات:** ${s.tool_calls}`,
+                        `🌐 **استدعاءات الويب:** ${s.web_calls}`,
+                        `🧠 **استدعاءات المزودين:** ${Object.values(s.provider_calls).reduce((a, b) => a + b, 0)}`,
+                        providersLine !== '—' ? `↳ ${providersLine}` : null,
+                        `🔄 **تبديلات Fallback:** ${s.fallbacks}`,
+                        `❌ **الأخطاء:** ${s.errors}`,
+                        `⏰ **التذكيرات المُرسلة:** ${s.reminders}`,
+                        '',
+                        '**أكثر الأدوات استخداماً:**',
+                        toolsLine,
+                        '',
+                        '**الرسائل اليومية:**',
+                        usage.renderBars(s.per_day),
+                    ]),
+                    botName,
+                })],
+            }).catch(() => {});
+        }
+
     } catch (error) {
         console.error(`[Slash Error] ${commandName}:`, error);
         try {
@@ -820,17 +1034,47 @@ client.on('messageCreate', async (message) => {
         && message.reference.messageId
         && (await message.fetchReference().catch(() => null))?.author?.id === client.user.id;
 
-    if (!isMention && !isReplyToBot) return;
+    // ═══════════════════════════════════════════════════
+    //  📎 رفع شخصية من ملف — منشن + «شخصية» + مرفق نصي (أدمن/مالك فقط)
+    // ═══════════════════════════════════════════════════
+    if ((isMention || isReplyToBot) && message.attachments.size > 0) {
+        const handled = await handlePersonalityUploadMessage(message).catch((e) => {
+            console.error('[Personality Upload]', e.message);
+            return false;
+        });
+        if (handled) return;
+    }
+
+    // ═══════════════════════════════════════════════════
+    //  🤖 الاستباقية — رسالة غير موجّهة لي في قناة أُصغي فيها؟
+    // ═══════════════════════════════════════════════════
+    let proactiveHit = null;
+    if (!isMention && !isReplyToBot) {
+        if (runtimeSettings.proactive_enabled && runtimeSettings.proactive_channels.length) {
+            proactiveHit = proactive.matchProactive({
+                entries   : runtimeSettings.proactive_channels,
+                channelId : message.channel.id,
+                content   : message.content,
+                isBot     : message.author.bot,
+                isDm      : !message.guild,
+                cooldowns : proactiveCooldowns,
+                guildId   : message.guild?.id || '',
+            });
+        }
+        if (!proactiveHit) return;
+    }
 
     if (tokenType === 'user') {
         const settings = await getAccountSettings(agentId, message.guild.id);
         if (settings.mention_channel_id) await forwardMessage(client, message, settings.mention_channel_id, 'mention');
     }
 
-    // التحقق من أن القناة ضمن المسموحات
-    const allowedIds = await get_allowed_channels(message.guild.id, agentId, allowed_channels_cache);
-    if (!allowedIds.includes(message.channel.id)) {
-        return;
+    // التحقق من أن القناة ضمن المسموحات — الاستباقية تستثنى (قائمة الإصغاء إذنها المستقل)
+    if (!proactiveHit) {
+        const allowedIds = await get_allowed_channels(message.guild.id, agentId, allowed_channels_cache);
+        if (!allowedIds.includes(message.channel.id)) {
+            return;
+        }
     }
 
     // استخراج النص وإزالة منشن البوت
@@ -869,6 +1113,11 @@ client.on('messageCreate', async (message) => {
     if (!content.trim()) {
         await message.reply('وين أساعدك؟ 😄');
         return;
+    }
+
+    // 🤖 ملاحظة الاستباقية داخل السياق — الوكيل يعلم أن الرسالة جاءت من الإصغاء
+    if (proactiveHit) {
+        content = `[رسالة التُقطت بالاستباقية — تطابق الكلمة المفتاحية: "${proactiveHit.keyword}"]\n${content}`;
     }
 
     // حماية التعليمات الداخلية
@@ -939,6 +1188,9 @@ client.on('messageCreate', async (message) => {
     const stopTyping = startTypingLoop(message.channel);
 
     try {
+        // 📊 تتبع الاستخدام — رسالة مستخدم مُعالجة
+        usage.track(agentId, message.guild.id, 'message').catch(() => {});
+
         const result = await runAgent(
             message.guild,
             message.channel,

@@ -20,6 +20,24 @@ const DASH_PREFIX = 'dash';
 const PAGE_SIZE = 25;
 
 const { getProviderOrFallback, listProviders, extractProviderConfig } = require('./providers');
+const secrets = require('./secrets');
+const knowledge = require('./knowledge');
+const usage = require('./usage');
+const proactive = require('./proactive');
+const { is_text_attachment, fetchTextAttachment } = require('./utils');
+
+// 📚 حالة رفع ملفات المعرفة: `${guildId}:${userId}` → { agentId, expiresAt }
+const pendingKnowledgeUploads = new Map();
+const KNOWLEDGE_UPLOAD_WINDOW_MS = 3 * 60 * 1000;
+const KNOWLEDGE_MAX_FILE_BYTES = 1_000_000;
+
+/** تسميات عربية لحقول الأسرار — لأزرار الكشف */
+const SECRET_LABELS = Object.freeze({
+    discord_token : 'توكن ديسكورد',
+    deepseek_token: 'توكن DeepSeek',
+    qwen_token    : 'توكن Qwen',
+    openai_api_key: 'مفتاح OpenAI',
+});
 
 const COLORS = Object.freeze({
     primary: 0x5865F2,
@@ -268,12 +286,14 @@ async function renderAgent(manager, agentId) {
     const id = String(agent._id);
     const running = manager.runtimes.has(id);
     const status = agent.status || (running ? 'running' : 'stopped');
+    // 🔐 نسخة مفكوكة الأسرار للعرض والتحقق (العرض النهائي يقنّع الأسرار)
+    const agentPlain = secrets.decryptAgentDoc(agent);
     const providerObj = getProviderOrFallback(agent.provider);
-    const providerReady = providerObj.validate(extractProviderConfig(agent)).ok;
+    const providerReady = providerObj.validate(extractProviderConfig(agentPlain)).ok;
     const emb = embed(`${agentIcon(agent)} ${agent.name || 'Agent'}`, linesBlock([
         `📌 **النوع:** ${tokenTypeLabel(agent)}`,
         `${providerObj.emoji} **المزود:** ${providerObj.label} — ${providerReady ? 'جاهز ✅' : 'ناقص ❌'}`,
-        `↳ ${providerObj.describe(extractProviderConfig(agent))}`,
+        `↳ ${providerObj.describe(extractProviderConfig(agentPlain))}`,
         `${statusIcon(status)} **الحالة:** ${status}`,
         `🧩 **Runtime:** ${running ? 'متصل ونشط' : 'غير نشط'}`,
         `🎭 **الشخصية:** ${agent.personality ? trim(agent.personality, 120) : 'افتراضية'}`,
@@ -292,10 +312,14 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agent:${id}:start`, 'تشغيل', ButtonStyle.Success, '▶️', isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:stop`, 'إيقاف', ButtonStyle.Danger, '⏹️', !isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:restart`, 'إعادة تشغيل', ButtonStyle.Primary, '🔄', isBusy),
+        button(`${DASH_PREFIX}:agent:${id}:settings`, 'الإعدادات', ButtonStyle.Primary, '⚙️'),
         button(`${DASH_PREFIX}:agent:${id}:edit`, 'تعديل', ButtonStyle.Secondary, '✏️'),
         button(`${DASH_PREFIX}:agent:${id}:aiprovider`, 'المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${id}:channels`, 'القنوات', ButtonStyle.Secondary, '📡'),
         button(`${DASH_PREFIX}:agent:${id}:conversations`, 'المحادثات', ButtonStyle.Secondary, '💬'),
+        button(`${DASH_PREFIX}:agent:${id}:knowledge`, 'المعرفة', ButtonStyle.Secondary, '📚'),
+        button(`${DASH_PREFIX}:agent:${id}:usage:7`, 'الإحصائيات', ButtonStyle.Secondary, '📊'),
+        button(`${DASH_PREFIX}:agent:${id}:proactive`, 'الاستباقية', ButtonStyle.Secondary, '🎯'),
         ...(isDeepSeekAgent ? [button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡')] : []),
         button(`${DASH_PREFIX}:agent:${id}:account`, 'الحساب والفعاليات', ButtonStyle.Secondary, '👤'),
         button(`${DASH_PREFIX}:agent:${id}:notify`, 'الإشعارات', ButtonStyle.Secondary, '🔔'),
@@ -525,6 +549,22 @@ async function renderLogs(agentId = null, page = 0) {
 
 async function renderStats(manager) {
     const data = await overview(manager);
+    // 📊 ملخص الاستخدام الفعلي لكل الوكلاء (آخر 7 أيام)
+    const cfg = require('./config');
+    let usageLine = 'لا بيانات استخدام بعد.';
+    try {
+        const agents = await cfg.agents_col.find({}, { projection: { _id: 1 } }).limit(100).toArray();
+        const totals = { messages: 0, tool_calls: 0, errors: 0, fallbacks: 0 };
+        for (const a of agents) {
+            const rows = await usage.getAgentUsage(String(a._id), 7).catch(() => []);
+            const s = usage.summarize(rows);
+            totals.messages += s.messages;
+            totals.tool_calls += s.tool_calls;
+            totals.errors += s.errors;
+            totals.fallbacks += s.fallbacks;
+        }
+        usageLine = `آخر 7 أيام لكل الوكلاء: 💬 ${totals.messages} رسالة — 🔧 ${totals.tool_calls} أداة — 🔄 ${totals.fallbacks} fallback — ❌ ${totals.errors} خطأ`;
+    } catch (_) {}
     const emb = embed('📊 الإحصائيات', linesBlock([
         `👥 إجمالي الوكلاء: **${data.counts.total}**`,
         `${ICONS.running} يعمل: **${data.counts.running}**`,
@@ -534,7 +574,8 @@ async function renderStats(manager) {
         `${ICONS.bot} Bot Tokens: **${data.counts.bots}**`,
         `${ICONS.user} User Accounts: **${data.counts.users}**`,
         '',
-        'عدادات الرسائل واستهلاك المزودين (DeepSeek / Qwen / OpenAI) ستظهر هنا بعد إضافة قياس telemetry لكل استدعاء دون تغيير AI flow.',
+        usageLine,
+        'إحصائيات مفصلة لكل وكيل: صفحة الوكيل ← زر «الإحصائيات» 📊',
     ]), COLORS.info);
     return { embeds: [emb], components: rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:stats`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]) };
 }
@@ -975,6 +1016,8 @@ async function handleDashboardInteraction(interaction, manager) {
             try { val = interaction.fields.getTextInputValue(key); } catch (_) {}
             if (val && String(val).trim() !== '') $set[key] = String(val).trim();
         }
+        // 🔐 الأسرار تُشفّر قبل الحفظ (passthrough بلا مفتاح)
+        secrets.encryptSecretsInPatch($set);
         await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set });
 
         // تحديث حي للإعدادات إن كان الوكيل يعمل الآن
@@ -982,12 +1025,128 @@ async function handleDashboardInteraction(interaction, manager) {
         if (liveRuntime?.runtimeSettings) {
             if ($set.personality !== undefined) liveRuntime.runtimeSettings.personality = $set.personality;
             const { extractProviderConfig: extractCfg } = require('./providers');
-            const fresh = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            const fresh = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
             liveRuntime.runtimeSettings.providerConfig = extractCfg(fresh);
         }
 
         await manager.logAgent(agentId, 'update', 'تم تعديل إعدادات الوكيل من Dashboard', { fields: Object.keys($set).filter(k => k !== 'updated_at') });
         await interaction.reply(await renderAgent(manager, agentId));
+        return true;
+    }
+
+    // ── ⚙️ نوافذ التعديل المجزأة (صفحة الإعدادات) ──
+
+    if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:edit_identity_modal:`)) {
+        const agentId = parts[2];
+        const cfg = require('./config');
+        const agentDoc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+        if (!agentDoc) return updateInteraction(interaction, await renderAgent(manager, agentId));
+        const $set = { updated_at: new Date() };
+        try {
+            const name = interaction.fields.getTextInputValue('name');
+            if (name && String(name).trim()) $set.name = String(name).trim();
+        } catch (_) {}
+        try {
+            const personality = interaction.fields.getTextInputValue('personality');
+            if (personality !== undefined && String(personality).trim() !== '') $set.personality = String(personality).trim();
+        } catch (_) {}
+        await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set });
+        const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+        if (liveRuntime?.runtimeSettings) {
+            if ($set.personality !== undefined) liveRuntime.runtimeSettings.personality = $set.personality;
+        }
+        await manager.logAgent(agentId, 'update', 'تم تعديل هوية الوكيل (الاسم/الشخصية) من صفحة الإعدادات', { fields: Object.keys($set).filter(k => k !== 'updated_at') });
+        await interaction.reply(await renderAgentSettings(agentId, interaction.guildId));
+        return true;
+    }
+
+    if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:edit_token_modal:`)) {
+        const agentId = parts[2];
+        const cfg = require('./config');
+        const agentDoc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+        if (!agentDoc) return updateInteraction(interaction, await renderAgent(manager, agentId));
+        let newToken = '';
+        try { newToken = interaction.fields.getTextInputValue('discord_token') || ''; } catch (_) {}
+        newToken = String(newToken).trim();
+        if (!newToken) {
+            return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+        }
+        // 🔐 تشفير التوكن قبل الحفظ
+        await cfg.agents_col.updateOne(
+            { _id: new ObjectId(agentId) },
+            { $set: { discord_token: secrets.encryptSecret(newToken), updated_at: new Date() } },
+        );
+        await manager.logAgent(agentId, 'update', 'تم تغيير توكن ديسكورد من صفحة الإعدادات', {});
+        // التوكن الجديد يحتاج إعادة اتصال — إعادة تشغيل تلقائية إن كان يعمل
+        if (manager?.runtimes?.has?.(String(agentId))) {
+            await interaction.reply(await renderAgentSettings(agentId, interaction.guildId));
+            await interaction.followUp({ content: '🔄 تم حفظ التوكن — جاري إعادة تشغيل الوكيل للاتصال به…', ephemeral: true }).catch(() => {});
+            manager.restartAgent(String(agentId), 'discord token changed from settings').catch(() => {});
+            return true;
+        }
+        await interaction.reply(await renderAgentSettings(agentId, interaction.guildId));
+        return true;
+    }
+
+    if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:edit_creds_modal:`)) {
+        const agentId = parts[2];
+        const cfg = require('./config');
+        const agentDoc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+        if (!agentDoc) return updateInteraction(interaction, await renderAgent(manager, agentId));
+        const providerObj = getProviderOrFallback(agentDoc.provider);
+        const $set = { updated_at: new Date() };
+        for (const field of providerObj.modalFields) {
+            let val = null;
+            try { val = interaction.fields.getTextInputValue(field.id); } catch (_) {}
+            if (val && String(val).trim() !== '') $set[field.id] = String(val).trim();
+        }
+        // 🔐 الأسرار تُشفّر قبل الحفظ
+        secrets.encryptSecretsInPatch($set);
+        await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set });
+
+        // تحديث حي لإعدادات المزود الحالية
+        const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+        if (liveRuntime?.runtimeSettings) {
+            const { extractProviderConfig: extractCfg } = require('./providers');
+            const fresh = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
+            liveRuntime.runtimeSettings.providerConfig = extractCfg(fresh);
+            liveRuntime.runtimeSettings.fallback_configs = require('./providers').extractAllProviderConfigs(fresh);
+        }
+        await manager.logAgent(agentId, 'update', `تم تحديث بيانات مزود ${providerObj.label} من صفحة الإعدادات`, { fields: Object.keys($set).filter(k => k !== 'updated_at') });
+        await interaction.reply(await renderAgentSettings(agentId, interaction.guildId));
+        return true;
+    }
+
+    if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:proactive_modal:`)) {
+        // الصيغة: dash:proactive_modal:<agentId>:<channelId>
+        const agentId = parts[2];
+        const channelId = parts[3];
+        const cfg = require('./config');
+        const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+        if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+
+        const keywordsRaw = interaction.fields.getTextInputValue('keywords');
+        const keywords = proactive.cleanKeywords(keywordsRaw);
+        const cooldown = proactive.clampCooldown(interaction.fields.getTextInputValue('cooldown'));
+        if (!keywords.length) {
+            return updateInteraction(interaction, await renderAgentProactive(agentId, interaction.guildId, 'أدخل كلمة مفتاحية واحدة على الأقل (حرفان أو أكثر).'));
+        }
+        const entries = Array.isArray(agent.proactive_channels) ? [...agent.proactive_channels] : [];
+        const existingIdx = entries.findIndex(e => String(e?.channel_id) === String(channelId));
+        const entry = { channel_id: String(channelId), keywords, cooldown_minutes: cooldown };
+        if (existingIdx >= 0) entries[existingIdx] = entry; else entries.push(entry);
+        if (entries.length > 10) entries.length = 10; // حد أقصى 10 قنوات مُصغاة
+
+        await cfg.agents_col.updateOne(
+            { _id: new ObjectId(agentId) },
+            { $set: { proactive_channels: entries, updated_at: new Date() } },
+        );
+        const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+        if (liveRuntime?.runtimeSettings) {
+            liveRuntime.runtimeSettings.proactive_channels = entries;
+        }
+        await manager.logAgent(agentId, 'proactive_update', `إصغاء قناة ${channelId}: ${keywords.join('، ')} (تهدئة ${cooldown} د)`, { entry });
+        await interaction.reply(await renderAgentProactive(agentId, interaction.guildId));
         return true;
     }
 
@@ -1091,7 +1250,7 @@ async function handleDashboardInteraction(interaction, manager) {
         }
         if (interaction.isStringSelectMenu() && action === 'aiprovider_set') {
             // تبديل مزود الذكاء الاصطناعي — لا يمس إعدادات المزودين الآخرين
-            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            const agent = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             const newProviderId = interaction.values[0];
             const targetP = getProviderOrFallback(newProviderId);
@@ -1124,7 +1283,7 @@ async function handleDashboardInteraction(interaction, manager) {
         }
         if (interaction.isStringSelectMenu() && action === 'aiprovider_fb_set') {
             // إضافة/إزالة مزود من سلسلة Fallback — لا يمس إعدادات المزودين
-            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            const agent = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             const [op, pid] = String(interaction.values[0]).split(':');
             const targetP = getProviderOrFallback(pid);
@@ -1168,8 +1327,8 @@ async function handleDashboardInteraction(interaction, manager) {
             return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
         }
         if (action === 'aiprovider_test') {
-            // اختبار اتصال حقيقي مع مزود الوكيل الحالي
-            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            // اختبار اتصال حقيقي مع مزود الوكيل الحالي — بكلمة سر مفكوكة
+            const agent = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }));
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             const providerObj = getProviderOrFallback(agent.provider);
             const page = await renderAgentAIProvider(agentId, interaction.guildId);
@@ -1191,6 +1350,10 @@ async function handleDashboardInteraction(interaction, manager) {
             return interaction.update(await renderAgentConversations(agentId, interaction.guildId));
         }
         if (action === 'view') return updateInteraction(interaction, await renderAgent(manager, agentId));
+        if (action === 'settings') return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+        if (action === 'knowledge') return updateInteraction(interaction, await renderAgentKnowledge(agentId, interaction.guildId));
+        if (action === 'usage') return updateInteraction(interaction, await renderAgentUsage(agentId, parts[4]));
+        if (action === 'proactive') return updateInteraction(interaction, await renderAgentProactive(agentId, interaction.guildId));
         if (action === 'logs') return updateInteraction(interaction, await renderLogs(agentId, parts[4]));
         if (action === 'notify') return updateInteraction(interaction, await renderNotifications(agentId, interaction.guildId));
         if (action === 'channels') return updateInteraction(interaction, await renderAgentChannels(agentId, interaction.guildId));
@@ -1216,6 +1379,143 @@ async function handleDashboardInteraction(interaction, manager) {
             if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
             await interaction.showModal(editAgentModal(agent));
             return true;
+        }
+        if (action === 'edit_identity') {
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            await interaction.showModal(editIdentityModal(agent));
+            return true;
+        }
+        if (action === 'edit_token') {
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            await interaction.showModal(editDiscordTokenModal(agent));
+            return true;
+        }
+        if (action === 'edit_creds') {
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            await interaction.showModal(editProviderCredsModal(agent));
+            return true;
+        }
+        if (action === 'reveal') {
+            // 🔓 كشف سر محدد — رسالة ephemeral لا يراها غير طالبها
+            const field = String(parts[4] || '');
+            if (!secrets.SECRET_FIELDS.includes(field)) {
+                return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+            }
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent || !agent[field]) {
+                return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+            }
+            const value = secrets.decryptSecret(agent[field]);
+            const shown = value === null ? '🔒 غير قابل للفك — مفتاح ENCRYPTION_KEY الحالي لا يطابق ما شُفّر به.' : `\`${value}\``;
+            await interaction.reply({
+                content: `🔓 **${SECRET_LABELS[field] || field}** (لك وحدك — لا تشاركه):\n${shown}`,
+                ephemeral: true,
+            }).catch(() => {});
+            return true;
+        }
+        if (action === 'features_toggle') {
+            // ⚙️ تبديل ميزة — web_search حالياً
+            const feature = String(parts[4] || '');
+            if (feature !== 'web_search') {
+                return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+            }
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const features = { ...(agent.features || {}) };
+            const newValue = features.web_search === false; // false → true (تفعيل)، true/undefined → false
+            features.web_search = newValue;
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { features, updated_at: new Date() } },
+            );
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.features = features;
+            }
+            await manager.logAgent(agentId, 'features_update', `web_search: ${newValue ? 'تفعيل' : 'تعطيل'}`, { features });
+            return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+        }
+        if (action === 'knowledge_upload_start') {
+            // فتح نافذة رفع ملفات المعرفة — 3 دقائق
+            // تنظيف النوافذ المنتهية أولاً (لا تراكم)
+            for (const [k, v] of pendingKnowledgeUploads) {
+                if (Date.now() > v.expiresAt) pendingKnowledgeUploads.delete(k);
+            }
+            const key = `${interaction.guildId}:${interaction.user.id}`;
+            pendingKnowledgeUploads.set(key, {
+                agentId  : String(agentId),
+                expiresAt: Date.now() + KNOWLEDGE_UPLOAD_WINDOW_MS,
+            });
+            const emb = embed('📎 جاري رفع ملفات المعرفة', linesBlock([
+                `أرسل الآن ملفاتك النصية في هذه القناة (<#${interaction.channelId}>).`,
+                '',
+                '**الشروط:**',
+                '• امتدادات نصية: .txt .md .json .csv وغيرها من صيغ النصوص',
+                '• كل ملف ≤ 1MB',
+                '• لديك **3 دقائق** من الآن',
+                '',
+                'سيُستبدل محتوى أي ملف بنفس الاسم، وسيُقطّع ويُفهرس تلقائياً.',
+            ]), COLORS.success);
+            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+                button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
+            ]) });
+        }
+        if (interaction.isStringSelectMenu() && action === 'knowledge_delete') {
+            const source = interaction.values[0];
+            const r = await knowledge.deleteSource(agentId, source);
+            await manager.logAgent(agentId, 'knowledge_delete', `حذف مصدر المعرفة: ${source}`, { deleted: r.deleted });
+            return updateInteraction(interaction, await renderAgentKnowledge(agentId, interaction.guildId, r.deleted ? `حُذف «${source}» (${r.deleted} قطعة).` : 'لا شيء حُذف.'));
+        }
+        if (action === 'knowledge_clear') {
+            const emb = embed('⚠️ مسح قاعدة المعرفة', linesBlock(['سيُحذف كل مستندات المعرفة لهذا الوكيل نهائياً.', 'لا يمكن التراجع.']), COLORS.warning);
+            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+                button(`${DASH_PREFIX}:agent:${agentId}:knowledge_clear_confirm`, 'تأكيد المسح', ButtonStyle.Danger, '🧹'),
+                button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+            ]) });
+        }
+        if (action === 'knowledge_clear_confirm') {
+            const r = await knowledge.clearKnowledge(agentId);
+            await manager.logAgent(agentId, 'knowledge_clear', `مسح قاعدة المعرفة (${r.deleted} قطعة)`, {});
+            return updateInteraction(interaction, await renderAgentKnowledge(agentId, interaction.guildId, r.deleted ? `مُسحت ${r.deleted} قطعة.` : 'كانت فارغة أصلاً.'));
+        }
+        if (action === 'proactive_toggle') {
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const newValue = !agent.proactive_enabled;
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { proactive_enabled: newValue, updated_at: new Date() } },
+            );
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.proactive_enabled = newValue;
+            }
+            await manager.logAgent(agentId, 'proactive_update', `الاستباقية: ${newValue ? 'تفعيل' : 'تعطيل'}`, { enabled: newValue });
+            return updateInteraction(interaction, await renderAgentProactive(agentId, interaction.guildId));
+        }
+        if (interaction.isChannelSelectMenu() && action === 'proactive_channel_add') {
+            await interaction.showModal(proactiveEntryModal(agentId, interaction.values[0]));
+            return true;
+        }
+        if (interaction.isStringSelectMenu() && action === 'proactive_remove') {
+            const channelId = interaction.values[0];
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const entries = (Array.isArray(agent.proactive_channels) ? agent.proactive_channels : [])
+                .filter(e => String(e?.channel_id) !== String(channelId));
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { proactive_channels: entries, updated_at: new Date() } },
+            );
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.proactive_channels = entries;
+            }
+            await manager.logAgent(agentId, 'proactive_update', `إيقاف إصغاء قناة ${channelId}`, {});
+            return updateInteraction(interaction, await renderAgentProactive(agentId, interaction.guildId));
         }
         if (action === 'start') {
             const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
@@ -1419,6 +1719,326 @@ async function renderAgentAIProvider(agentId, guildId) {
     ])] };
 }
 
+// ═══════════════════════════════════════════════════════════
+//  ⚙️ صفحة إعدادات الوكيل — عرض كل الإعدادات + كشف آمن + تعديل مجزأ
+// ═══════════════════════════════════════════════════════════
+
+function notFoundAgentPage(agentId) {
+    return {
+        embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحًا.']), COLORS.danger)],
+        components: rowsFromButtons([button(`${DASH_PREFIX}:agents:0`, 'عودة للوكلاء', ButtonStyle.Secondary, ICONS.back)]),
+    };
+}
+
+async function renderAgentSettings(agentId, guildId) {
+    const cfg = require('./config');
+    const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+    if (!agent) return notFoundAgentPage(agentId);
+
+    const agentPlain = secrets.decryptAgentDoc(agent);
+    const providerObj = getProviderOrFallback(agent.provider);
+    const pCfg = extractProviderConfig(agentPlain);
+    const pValidation = providerObj.validate(pCfg);
+    const features = agent.features || {};
+    const webOn = features.web_search !== false;
+    const personalityLen = (agent.personality || '').length;
+
+    // حقول المزود — الأسرار مقنّعة، البقية ظاهرة
+    const providerLines = providerObj.modalFields.map((f) => {
+        const v = pCfg[f.id];
+        const isSecret = secrets.SECRET_FIELDS.includes(f.id);
+        return `• **${f.label}:** ${v ? (isSecret ? secrets.maskSecret(v) : String(v)) : 'غير محدد ❌'}`;
+    });
+
+    const emb = embed('⚙️ إعدادات الوكيل — ' + (agent.name || 'Agent'), linesBlock([
+        `📌 **الاسم:** ${agent.name || '—'}`,
+        `🧩 **النوع:** ${tokenTypeLabel(agent)}`,
+        `${providerObj.emoji} **المزود:** ${providerObj.label} (\`${providerObj.id}\`) — ${pValidation.ok ? 'جاهز ✅' : `ناقص: ${pValidation.missing.join(', ')}`}`,
+        ...providerLines,
+        `🎫 **توكن ديسكورد:** ${agent.discord_token ? secrets.maskSecret(agentPlain.discord_token || agent.discord_token) : 'غير محدد ❌'}`,
+        `🎭 **الشخصية:** ${personalityLen ? `${personalityLen} حرف (نص/ملف)` : 'افتراضية'}`,
+        `⚙️ **web_search:** ${webOn ? '🟢 مفعّل — البحث والقراءة من الإنترنت' : '🔴 معطّل — يعتمد على بحث النموذج المدمج'}`,
+        '',
+        '**🔒 الأسرار مخفية دائماً** — زر «كشف» يعرض القيمة في رسالة خاصة بك فقط (Ephemeral).',
+        '📎 لتغيير الشخصية من ملف: منشن الوكيل في أي قناة + اكتب **شخصية** + أرفق ملف `.txt`/`.md` (≤ 1MB و20000 حرف).',
+        'كل تعديل يُحفظ في قاعدة البيانات ويُطبق حياً بدون إعادة تشغيل.',
+    ]), COLORS.info);
+
+    // أزرار الكشف — فقط للأسرار المحفوظة فعلاً
+    const revealButtons = secrets.SECRET_FIELDS
+        .filter(f => agent[f])
+        .map(f => button(`${DASH_PREFIX}:agent:${agentId}:reveal:${f}`, `كشف ${SECRET_LABELS[f] || f}`, ButtonStyle.Secondary, '🔓'))
+        .slice(0, 5);
+
+    const components = [];
+    if (revealButtons.length) components.push(...rowsFromButtons(revealButtons));
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:edit_identity`, 'الاسم والشخصية', ButtonStyle.Primary, '✏️'),
+        button(`${DASH_PREFIX}:agent:${agentId}:edit_token`, 'توكن ديسكورد', ButtonStyle.Secondary, '🎫'),
+        button(`${DASH_PREFIX}:agent:${agentId}:edit_creds`, 'بيانات المزود', ButtonStyle.Secondary, '🧠'),
+    ]));
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:features_toggle:web_search`, webOn ? 'تعطيل web_search' : 'تفعيل web_search', webOn ? ButtonStyle.Danger : ButtonStyle.Success, '🌐'),
+        button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
+    ]));
+    return { embeds: [emb], components };
+}
+
+// ── نوافذ التعديل المجزأة ──
+
+function editIdentityModal(agent) {
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_identity_modal:${agent._id}`).setTitle(trim('الاسم والشخصية', 45));
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(80).setValue(safeModalValue(agent.name, 80))),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية (نص مباشر — أو استخدم ملفاً)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500).setValue(safeModalValue(agent.personality, 1500))),
+    );
+    return modal;
+}
+
+function editDiscordTokenModal(agent) {
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_token_modal:${agent._id}`).setTitle(trim('توكن ديسكورد الجديد', 45));
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel('التوكن الجديد (اتركه فارغاً للإبقاء)').setStyle(TextInputStyle.Short).setRequired(false)),
+    );
+    return modal;
+}
+
+function editProviderCredsModal(agent) {
+    const providerObj = getProviderOrFallback(agent.provider);
+    const agentPlain = secrets.decryptAgentDoc(agent);
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_creds_modal:${agent._id}`).setTitle(trim(`بيانات ${providerObj.label}`, 45));
+    const knownValues = {
+        deepseek_token : '',
+        qwen_token     : '',
+        qwen_model     : safeModalValue(agentPlain.qwen_model, 100),
+        openai_base_url: safeModalValue(agentPlain.openai_base_url, 300),
+        openai_api_key : '',
+        openai_model   : safeModalValue(agentPlain.openai_model, 100),
+    };
+    for (const field of providerObj.modalFields.slice(0, 4)) {
+        const isSecret = secrets.SECRET_FIELDS.includes(field.id);
+        modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+                .setCustomId(field.id)
+                .setLabel(trim(isSecret ? `${field.label} (فارغ = إبقاء)` : field.label, 45))
+                .setStyle(field.style === 'paragraph' ? TextInputStyle.Paragraph : TextInputStyle.Short)
+                .setRequired(false)
+                .setMaxLength(field.maxLength || 300)
+                .setValue(knownValues[field.id] || ''),
+        ));
+    }
+    return modal;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  📚 صفحة قاعدة المعرفة RAG — رفع ملفات + حذف مصادر
+// ═══════════════════════════════════════════════════════════
+
+async function renderAgentKnowledge(agentId, guildId, notice = null) {
+    const cfg = require('./config');
+    const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+    if (!agent) return notFoundAgentPage(agentId);
+    const sources = await knowledge.listSources(agentId).catch(() => []);
+    const stats = await knowledge.knowledgeStats(agentId).catch(() => ({ ok: false, chunks: 0, sources: 0 }));
+
+    const emb = embed('📚 قاعدة المعرفة — ' + (agent.name || 'Agent'), linesBlock([
+        `📄 **المصادر:** ${stats.sources || sources.length} — **القطع:** ${stats.chunks || 0}`,
+        '',
+        ...(sources.length
+            ? sources.map(s => `• **${s.source}** — ${s.chunks} قطعة، ${s.chars} حرف`)
+            : ['لا توجد مستندات بعد. ارفع ملفاتك النصية لتصبح الوكيل خبيراً بها.']),
+        notice ? `\n⚠️ ${notice}` : null,
+        '',
+        '**كيف يرفع؟** اضغط «إضافة ملفات» ثم أرسل الملفات (.txt/.md/.json/أكواد…) في هذه القناة خلال 3 دقائق (كل ملف ≤ 1MB).',
+        '**كيف يستخدمها الوكيل؟** تلقائياً عبر أداتي search_knowledge وlist_knowledge (للأدمن/المالك).',
+    ]), COLORS.info);
+
+    const components = [];
+    if (sources.length) {
+        components.push(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`${DASH_PREFIX}:agent:${agentId}:knowledge_delete`)
+                .setPlaceholder('اختر مصدراً لحذفه')
+                .addOptions(sources.slice(0, 25).map(s => ({
+                    label: `🗑️ ${s.source}`.slice(0, 100),
+                    value: s.source,
+                    description: `${s.chunks} قطعة — حذف نهائي`,
+                }))),
+        ));
+        components.push(...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:knowledge_clear`, 'مسح المعرفة كلها', ButtonStyle.Danger, '🧹')]));
+    }
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:knowledge_upload_start`, 'إضافة ملفات', ButtonStyle.Success, '📎'),
+        button(`${DASH_PREFIX}:agent:${agentId}:knowledge`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
+    ]));
+    return { embeds: [emb], components };
+}
+
+/**
+ * التقاط ملفات المعرفة المرسلة من صاحب رفع معلّق — تُستدعى من bot.js على رسائل Manager.
+ * @returns {Promise<boolean>} هل تمت المعالجة (الرسالة كانت رفعاً)
+ */
+async function handleKnowledgeUploadMessage(message, manager) {
+    if (!message?.guild || !message.author || message.author.bot) return false;
+    const key = `${message.guild.id}:${message.author.id}`;
+    const pending = pendingKnowledgeUploads.get(key);
+    if (!pending) return false;
+    if (Date.now() > pending.expiresAt) {
+        pendingKnowledgeUploads.delete(key);
+        return false;
+    }
+
+    const attachments = Array.from(message.attachments.values());
+    const textAtts = attachments.filter(a => is_text_attachment(a));
+    if (!textAtts.length) return false; // رسالة عادية بلا ملفات — تجاهل
+
+    const results = [];
+    for (const att of textAtts) {
+        if ((att.size || 0) > KNOWLEDGE_MAX_FILE_BYTES) {
+            results.push({ name: att.name, ok: false, error: `الحجم ${Math.round((att.size || 0) / 1024)}KB يتجاوز 1MB` });
+            continue;
+        }
+        try {
+            const text = await fetchTextAttachment(att.url);
+            const r = await knowledge.ingestDocument({
+                agentId : pending.agentId,
+                guildId : message.guild.id,
+                source  : att.name || 'مستند',
+                text,
+            });
+            results.push({ name: att.name, ok: r.ok, chunks: r.chunks, error: r.error });
+        } catch (e) {
+            results.push({ name: att.name, ok: false, error: e.message });
+        }
+    }
+
+    const okCount = results.filter(r => r.ok).length;
+    const emb = embed(
+        okCount === results.length ? '📚 تمت إضافة الملفات للمعرفة' : '⚠️ إضافة المعرفة — بعضها فشل',
+        linesBlock([
+            ...results.map(r => r.ok
+                ? `✅ **${r.name}** — ${r.chunks} قطعة`
+                : `❌ **${r.name}** — ${r.error}`),
+            '',
+            okCount > 0 ? 'الوكيل يستطيع البحث فيها الآن عبر search_knowledge.' : 'أعد المحاولة بملفات نصية صحيحة.',
+            `⏳ نافذة الرفع تبقى مفتوحة حتى \`${new Date(pending.expiresAt).toISOString().slice(11, 16)} UTC\` أو حتى إغلاق الصفحة.`,
+        ]),
+        okCount === results.length ? COLORS.success : COLORS.warning,
+    );
+    await message.reply({ embeds: [emb] }).catch(() => {});
+    await manager?.logAgent?.(pending.agentId, 'knowledge_upload', `رفع معرفة: ${results.map(r => `${r.name}${r.ok ? ' ✓' : ' ✗'}`).join('، ')}`, { results }).catch(() => {});
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  📊 صفحة إحصائيات الوكيل
+// ═══════════════════════════════════════════════════════════
+
+async function renderAgentUsage(agentId, days = 7) {
+    const cfg = require('./config');
+    const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+    if (!agent) return notFoundAgentPage(agentId);
+    const d = [1, 7, 30].includes(Number(days)) ? Number(days) : 7;
+
+    const rows = await usage.getAgentUsage(agentId, d).catch(() => []);
+    const s = usage.summarize(rows);
+    const providersLine = Object.keys(s.provider_calls).length
+        ? Object.entries(s.provider_calls).map(([pid, n]) => `${pid}: **${n}**`).join(' — ')
+        : '—';
+    const toolsLine = s.top_tools.length
+        ? s.top_tools.map(([t, n], i) => `${i + 1}. \`${t}\` — **${n}**`).join('\n')
+        : '—';
+
+    const emb = embed(`📊 إحصائيات ${agent.name || 'Agent'} — آخر ${d} يوم`, linesBlock([
+        `💬 **الرسائل المُعالجة:** ${s.messages}`,
+        `🔧 **استدعاءات الأدوات:** ${s.tool_calls}`,
+        `🌐 **استدعاءات الويب:** ${s.web_calls}`,
+        `🧠 **استدعاءات المزودين:** ${Object.values(s.provider_calls).reduce((a, b) => a + b, 0)}${providersLine !== '—' ? ` (${providersLine})` : ''}`,
+        `🔄 **تبديلات Fallback:** ${s.fallbacks}`,
+        `❌ **الأخطاء:** ${s.errors}`,
+        `⏰ **التذكيرات المُرسلة:** ${s.reminders}`,
+        `🔍 **بحث المعرفة:** ${s.knowledge_hits}`,
+        '',
+        '**أكثر الأدوات استخداماً:**',
+        toolsLine,
+        '',
+        '**الرسائل اليومية:**',
+        usage.renderBars(s.per_day),
+    ]), COLORS.info);
+
+    return {
+        embeds: [emb],
+        components: rowsFromButtons([
+            button(`${DASH_PREFIX}:agent:${agentId}:usage:1`, 'اليوم', ButtonStyle.Secondary, '📅', d === 1),
+            button(`${DASH_PREFIX}:agent:${agentId}:usage:7`, '7 أيام', ButtonStyle.Secondary, '🗓️', d === 7),
+            button(`${DASH_PREFIX}:agent:${agentId}:usage:30`, '30 يوم', ButtonStyle.Secondary, '📆', d === 30),
+            button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
+        ]),
+    };
+}
+
+// ═══════════════════════════════════════════════════════════
+//  🤖 صفحة الاستباقية — إصغاء قنوات بالكلمات المفتاحية
+// ═══════════════════════════════════════════════════════════
+
+async function renderAgentProactive(agentId, guildId, notice = null) {
+    const cfg = require('./config');
+    const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+    if (!agent) return notFoundAgentPage(agentId);
+    const enabled = Boolean(agent.proactive_enabled);
+    const entries = proactive.sanitizeEntries(agent.proactive_channels);
+
+    const emb = embed('🤖 الاستباقية — ' + (agent.name || 'Agent'), linesBlock([
+        `**الحالة:** ${enabled ? '🟢 مفعّلة' : '🔴 معطّلة'}`,
+        '',
+        ...(entries.length
+            ? ['**القنوات المُصغاة:**', ...entries.map(e =>
+                `• <#${e.channel_id}> — كلمات: \`${e.keywords.join('`, `')}\` — تهدئة: ${e.cooldown_minutes} د`)]
+            : ['لا قنوات مُصغاة بعد.']),
+        notice ? `\n⚠️ ${notice}` : null,
+        '',
+        'الرسالة تُعالج حتى بدون منشن إذا: كانت في قناة مُصغاة + احتوت كلمة مفتاحية + انتهت التهدئة.',
+        'التهدئة لكل قناة (1–720 دقيقة) تحميك من الإزعاج — والاستباقية لا تعمل إلا بعد تفعيلها.',
+    ]), COLORS.info);
+
+    const components = [];
+    components.push(new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:agent:${agentId}:proactive_channel_add`)
+            .setPlaceholder('اختر قناة للإصغاء إليها')
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
+    ));
+    if (entries.length) {
+        components.push(new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`${DASH_PREFIX}:agent:${agentId}:proactive_remove`)
+                .setPlaceholder('اختر قناة لإيقاف الإصغاء')
+                .addOptions(entries.map(e => ({
+                    label: `قناة ${e.channel_id}`.slice(0, 100),
+                    value: e.channel_id,
+                    description: `كلمات: ${e.keywords.join(', ')}`.slice(0, 100),
+                }))),
+        ));
+    }
+    components.push(...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:proactive_toggle`, enabled ? 'تعطيل الاستباقية' : 'تفعيل الاستباقية', enabled ? ButtonStyle.Danger : ButtonStyle.Success, '🤖'),
+        button(`${DASH_PREFIX}:agent:${agentId}:proactive`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
+    ]));
+    return { embeds: [emb], components };
+}
+
+function proactiveEntryModal(agentId, channelId) {
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:proactive_modal:${agentId}:${channelId}`).setTitle('إصغاء القناة');
+    modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('keywords').setLabel('كلمات مفتاحية مفصولة بفاصلة').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cooldown').setLabel('التهدئة بالدقائق (1-720، افتراضي 10)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(4)),
+    );
+    return modal;
+}
+
 async function renderAgentConversations(agentId, guildId) {
     const cfg = require('./config');
     const { db_list_channel_sessions } = require('./utils');
@@ -1498,8 +2118,13 @@ module.exports = {
     dashboardCommandRoute,
     isDashboardCommand,
     handleDashboardInteraction,
+    handleKnowledgeUploadMessage,
     renderHome,
     renderAgent,
+    renderAgentSettings,
+    renderAgentKnowledge,
+    renderAgentUsage,
+    renderAgentProactive,
     COLORS,
     embed,
     linesBlock,
