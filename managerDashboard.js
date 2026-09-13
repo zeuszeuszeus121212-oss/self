@@ -907,7 +907,10 @@ async function handleDashboardInteraction(interaction, manager) {
     }
     if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_provider:`)) {
         const type = parts[2] === 'user' ? 'user' : 'bot';
-        await interaction.showModal(createAgentModal(type, parts[3] || 'deepseek'));
+        // ⚠️ المزود المختار يأتي من قيم القائمة المنسدلة (interaction.values[0])
+        // وليس من customId — customId يحمل نوع الوكيل فقط (dash:create_provider:<type>)
+        const selectedProviderId = (Array.isArray(interaction.values) && interaction.values[0]) || 'deepseek';
+        await interaction.showModal(createAgentModal(type, selectedProviderId));
         return true;
     }
     if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:agent_select`) {
