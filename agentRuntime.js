@@ -81,6 +81,7 @@ const {
 
 const { dashboardCommands, isDashboardCommand } = require('./managerDashboard');
 const { getAccountSettings, updateAccountSettings, forwardMessage, handleAccountInteraction, handleControlReply, trackGameMessage, startEvent, runEventSeries, rememberActivity, maybeAutoEvent, maybeScheduledEvent, humanizeDisplayName } = require('./accountAgent');
+const { getProviderOrFallback, isValidProvider, listProviders, extractProviderConfig, extractAllProviderConfigs } = require('./providers');
 
 function agentRuntimeCommands() {
     const channelOption = (option) => option
@@ -190,6 +191,21 @@ function agentRuntimeCommands() {
                     { name: 'railway', value: 'railway' },
                     { name: 'telegram', value: 'telegram' },
                 )),
+        new SlashCommandBuilder()
+            .setName('المزود')
+            .setDescription('عرض أو تبديل مزود الذكاء الاصطناعي لهذا الوكيل (DeepSeek / Qwen / OpenAI)')
+            .addStringOption(option => option
+                .setName('الاسم')
+                .setDescription('اسم المزود الجديد (اتركه فارغاً للعرض فقط)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'deepseek — الأصلي', value: 'deepseek' },
+                    { name: 'qwen — عبر chat.qwen.ai', value: 'qwen' },
+                    { name: 'openai — أي مزود متوافق مع OpenAI', value: 'openai' },
+                )),
+        new SlashCommandBuilder()
+            .setName('اختبار-المزود')
+            .setDescription('اختبار اتصال حقيقي مع مزود الذكاء الاصطناعي لهذا الوكيل'),
     ];
 }
 
@@ -237,10 +253,34 @@ const agentId = String(agentConfig._id || agentConfig.id || 'default');
 const agentName = agentConfig.name || agentId;
 const tokenType = normalizeTokenType(agentConfig.token_type || agentConfig.tokenType || 'bot');
 const discordToken = agentConfig.discord_token || agentConfig.discordToken;
-const deepseekToken = agentConfig.deepseek_token || agentConfig.deepseekToken;
+
+// ══════════════════════════════════════════════════════════════
+//  نظام المزودين — تحديد مزود الذكاء الاصطناعي لهذا الوكيل
+//  التوافق القديم: وكلاء بدون حقل provider يعاملون كـ DeepSeek (كما كان)
+// ══════════════════════════════════════════════════════════════
+const providerId = isValidProvider(agentConfig.provider) ? String(agentConfig.provider).toLowerCase() : 'deepseek';
+const provider = getProviderOrFallback(providerId);
+if (!isValidProvider(agentConfig.provider) && agentConfig.provider) {
+    console.warn(`⚠️ [${agentId}] مزود غير معروف "${agentConfig.provider}" — التراجع إلى DeepSeek`);
+}
+
+// إعدادات runtime قابلة للتحديث الحي عبر /المزود (كائن واحد يُمرر بالمرجع)
+const runtimeSettings = {
+    agentId,
+    personality : agentConfig.personality || '',
+    provider    : providerId,
+    providerConfig : extractProviderConfig(agentConfig),
+};
+// لقطة من وثيقة الوكيل عند الإقلاع — تُستخدم للتحقق من إعدادات المزودين الآخرين
+const agentConfigSnapshot = { ...agentConfig };
+
+// التحقق من اكتمال إعدادات المزود (السلوك القديم محفوظ لـ DeepSeek)
+const validation = provider.validate(runtimeSettings.providerConfig);
+if (!validation.ok) {
+    throw new Error(`إعدادات مزود ${provider.label} ناقصة: ${validation.missing.join(', ')} مفقود لهذا الوكيل`);
+}
+
 if (!discordToken) throw new Error('discord_token مفقود لهذا الوكيل');
-if (!deepseekToken) throw new Error('deepseek_token مفقود لهذا الوكيل');
-const personality = agentConfig.personality || '';
 const channel_sessions = new Map();
 const allowed_channels_cache = new Map();
 const sessionLock = new (require('./config').SimpleLock)();
@@ -284,7 +324,7 @@ client.once('ready', async () => {
 //  حدث INTERACTION (للأوامر + Autocomplete)
 // ══════════════════════════════════════════════════════════════
 client.on('interactionCreate', async (interaction) => {
-    const runtimeContext = { agentId, allowed_channels_cache, deepseekToken, personality };
+    const runtimeContext = runtimeSettings;
     if (interaction.customId?.startsWith?.('acct:')) {
         if (await handleAccountInteraction(client, interaction, runtimeContext).catch((e) => { console.error('[Account Interaction]', e); return false; })) return;
     }
@@ -340,6 +380,8 @@ client.on('interactionCreate', async (interaction) => {
                 `## ⚙️ إعدادات (أدمن فقط)\n` +
                 `**/رتبة-التحكم** — حدد رتبة الإدارة\n` +
                 `**/الرتبة-الحالية** — عرض رتبة التحكم\n` +
+                `**/المزود** — عرض/تبديل مزود الذكاء الاصطناعي (DeepSeek / Qwen / OpenAI)\n` +
+                `**/اختبار-المزود** — اختبار اتصال حقيقي مع المزود الحالي\n` +
                 `**/مزود-باو** — تبديل مزود POW\n` +
                 `**/حساب-خاص** — قناة تحويل رسائل الخاص للحساب الحقيقي\n` +
                 `**/حساب-منشن** — قناة تحويل المنشن/الردود للحساب الحقيقي\n` +
@@ -552,7 +594,7 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.deferReply({ ephemeral: true }).catch(() => {});
             const count = interaction.options.getInteger('عدد') || null;
             const minutes = interaction.options.getInteger('دقائق') || null;
-            const result = await runEventSeries(client, guild, interaction.channel, { agentId, allowed_channels_cache, deepseekToken, personality }, { gameName: interaction.options.getString('game'), count: count || 1, minutes: minutes || 0, first: true });
+            const result = await runEventSeries(client, guild, interaction.channel, runtimeSettings, { gameName: interaction.options.getString('game'), count: count || 1, minutes: minutes || 0, first: true });
             const names = result.results.map(g => g.name).join('، ') || '—';
             await interaction.editReply({ content: `${result.ok ? '✅' : '⚠️'} ${result.msg} الألعاب: **${names}**.` }).catch(() => {});
         }
@@ -565,6 +607,89 @@ client.on('interactionCreate', async (interaction) => {
             const provider = interaction.options.getString('provider', true);
             await set_pow_provider(guild.id, provider, agentId);
             await interaction.reply({ content: `✅ تم تبديل مزود POW إلى **${provider}**` });
+        }
+
+        else if (commandName === 'المزود') {
+            if (!member.permissions.has('Administrator')) {
+                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+                return;
+            }
+            const targetId = interaction.options.getString('الاسم');
+
+            // ── عرض الحالة الحالية (بدون معامل) ──
+            if (!targetId) {
+                const current = getProviderOrFallback(runtimeSettings.provider);
+                const lines = ['# 🧠 مزود الذكاء الاصطناعي لهذا الوكيل\n'];
+                lines.push(`**الحالي:** ${current.emoji} ${current.label} (\`${current.id}\`)`);
+                lines.push(`**الحالة:** ${current.describe(runtimeSettings.providerConfig)}`);
+                lines.push('');
+                lines.push('**المزودون المتاحون:**');
+                for (const p of listProviders()) {
+                    const cfg = extractProviderConfig({ ...agentConfigSnapshot || {}, provider: p.id });
+                    const ready = p.validate(cfg).ok ? '✅ جاهز' : '⚠️ يحتاج إعدادات';
+                    lines.push(`- ${p.emoji} **${p.label}** (\`${p.id}\`) — ${ready}`);
+                }
+                lines.push('');
+                lines.push('> للتبديل: `/المزود الاسم:<المزود>` — يجب أن تكون إعدادات المزود الجديد محفوظة للوكيل (من لوحة التحكم أو المعالج).');
+                await interaction.reply({ content: lines.join('\n') });
+                return;
+            }
+
+            // ── تبديل المزود ──
+            if (!isValidProvider(targetId)) {
+                await interaction.reply({ content: `❌ مزود غير معروف: \`${targetId}\`` });
+                return;
+            }
+            const target = getProviderOrFallback(targetId);
+            if (targetId === runtimeSettings.provider) {
+                await interaction.reply({ content: `ℹ️ المزود الحالي هو أصلاً ${target.emoji} **${target.label}**` });
+                return;
+            }
+
+            // التحقق من توفر إعدادات المزود الجديد في قاعدة البيانات
+            const cfg = require('./config');
+            const agentDoc = await cfg.agents_col.findOne({ _id: new (require('mongodb').ObjectId)(agentId) }).catch(() => null);
+            const targetCfg = extractProviderConfig({ ...(agentDoc || agentConfigSnapshot || {}), provider: targetId });
+            const targetValidation = target.validate(targetCfg);
+            if (!targetValidation.ok) {
+                await interaction.reply({
+                    content: `❌ لا يمكن التبديل إلى ${target.emoji} **${target.label}** — إعداداته ناقصة لهذا الوكيل: \`${targetValidation.missing.join(', ')}` +
+                        `\n> احفظ إعدادات المزود أولاً من لوحة التحكم (تعديل الوكيل) أو أعد إنشاء الوكيل باختيار هذا المزود.`,
+                });
+                return;
+            }
+
+            // تحديث قاعدة البيانات + الذاكرة الحية
+            await cfg.agents_col.updateOne(
+                { _id: new (require('mongodb').ObjectId)(agentId) },
+                { $set: { provider: targetId, updated_at: new Date() } },
+            );
+            runtimeSettings.provider = targetId;
+            runtimeSettings.providerConfig = targetCfg;
+
+            // جلسات القنوات من المزود القديم لا تصلح للمزود الجديد — تصفير حي
+            channel_sessions.clear();
+
+            await interaction.reply({
+                content: `✅ تم تبديل مزود الذكاء الاصطناعي إلى ${target.emoji} **${target.label}**\n` +
+                    `${target.describe(targetCfg)}\n` +
+                    `🔄 تم تصفير جلسات القنوات المحفوظة في الذاكرة (المحادثات القديمة تخص المزود السابق).`,
+            });
+        }
+
+        else if (commandName === 'اختبار-المزود') {
+            if (!member.permissions.has('Administrator')) {
+                await interaction.reply({ content: '⛔ هذا الأمر للأدمن فقط.' });
+                return;
+            }
+            await interaction.deferReply({ ephemeral: true }).catch(() => {});
+            const current = getProviderOrFallback(runtimeSettings.provider);
+            try {
+                const msg = await current.testConnection(runtimeSettings.providerConfig);
+                await interaction.editReply({ content: `${current.emoji} **${current.label}**\n${msg}` }).catch(() => {});
+            } catch (e) {
+                await interaction.editReply({ content: `${current.emoji} **${current.label}**\n❌ فشل الاختبار: ${e.message}` }).catch(() => {});
+            }
         }
 
     } catch (error) {
@@ -586,7 +711,7 @@ client.on('messageCreate', async (message) => {
     // تجاهل رسائل الحساب نفسه
     if (message.author.id === client.user.id) return;
 
-    const runtimeContext = { agentId, allowed_channels_cache, deepseekToken, personality };
+    const runtimeContext = runtimeSettings;
     if (await handleControlReply(client, message, runtimeContext).catch(() => false)) return;
 
     // رسائل الخاص للحساب الحقيقي تُحوّل إلى قناة التحكم المحددة.
@@ -743,7 +868,7 @@ client.on('messageCreate', async (message) => {
             thinking,
             accessLevel,
             client,
-            { deepseekToken, personality, agentId },
+            runtimeSettings,
         );
 
         // تحديث الجلسة في RAM و DB
@@ -840,6 +965,8 @@ client.on('invalidated', () => {
         name: agentName,
         tokenType,
         client,
+        // إعدادات المزود الحية — تُحدّث من لوحة التحكم بدون إعادة تشغيل
+        runtimeSettings,
         channel_sessions,
         allowed_channels_cache,
         refreshAllowedChannels: async (guildId) => {

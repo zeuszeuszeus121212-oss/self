@@ -208,9 +208,42 @@ async function retireLegacyDefaultAgents() {
     );
 }
 
-async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot' }) {
+/**
+ * إنشاء وكيل جديد — يدعم المزودين المتعددين.
+ * @param {object} opts
+ *   - provider: 'deepseek' | 'qwen' | 'openai' (افتراضي deepseek للتوافق القديم)
+ *   - providerConfig: { deepseek_token } | { qwen_token, qwen_model } | { openai_base_url, openai_api_key, openai_model }
+ *   التوافق القديم: استدعاء بـ deepseek_token مباشرة يعمل كما هو.
+ */
+async function createAgent({ name, discord_token, deepseek_token, personality = '', token_type = 'bot', provider = null, providerConfig = {} }) {
     const cfg = require('./config');
-    const doc = { name, discord_token, deepseek_token, personality, token_type, status: LIFECYCLE.STOPPED, created_at: new Date(), updated_at: new Date() };
+    const { getProviderOrFallback } = require('./providers');
+
+    // تحديد المزود: صريح، أو استنتاج من deepseek_token (توافق قديم)
+    const providerId = provider ? String(provider).toLowerCase() : (deepseek_token ? 'deepseek' : 'deepseek');
+    const providerObj = getProviderOrFallback(providerId);
+
+    // دمج إعدادات المزود: providerConfig أولاً ثم الحقول القديمة مباشرة
+    const mergedProviderConfig = { ...providerConfig };
+    if (deepseek_token && !mergedProviderConfig.deepseek_token) mergedProviderConfig.deepseek_token = deepseek_token;
+
+    // التحقق من اكتمال إعدادات المزود المختار
+    const validation = providerObj.validate(mergedProviderConfig);
+    if (!validation.ok) {
+        throw new Error(`إعدادات مزود ${providerObj.label} ناقصة: ${validation.missing.join(', ')}`);
+    }
+
+    const doc = {
+        name,
+        discord_token,
+        personality,
+        token_type,
+        provider       : providerObj.id,
+        ...mergedProviderConfig, // حقول المزود تُخزن بحقولها الخاصة (deepseek_token / qwen_token / openai_base_url ...)
+        status         : LIFECYCLE.STOPPED,
+        created_at     : new Date(),
+        updated_at     : new Date(),
+    };
     const res = await cfg.agents_col.insertOne(doc);
     return { ...doc, _id: res.insertedId };
 }

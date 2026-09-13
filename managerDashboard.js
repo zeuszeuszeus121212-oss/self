@@ -19,6 +19,8 @@ const {
 const DASH_PREFIX = 'dash';
 const PAGE_SIZE = 25;
 
+const { getProviderOrFallback, listProviders, extractProviderConfig } = require('./providers');
+
 const COLORS = Object.freeze({
     primary: 0x5865F2,
     success: 0x57F287,
@@ -218,10 +220,11 @@ async function renderHome(manager, interaction) {
 
 function agentOption(agent) {
     const id = String(agent._id);
+    const providerObj = getProviderOrFallback(agent.provider);
     return {
         label: trim(`${statusIcon(agent.status)} ${agent.name || id}`, 100),
         value: id,
-        description: trim(`${tokenTypeLabel(agent)} • ${agent.status || 'stopped'} • آخر نشاط ${fmtDate(agent.last_activity_at || agent.updated_at)}`, 100),
+        description: trim(`${providerObj.emoji} ${providerObj.label} • ${tokenTypeLabel(agent)} • ${agent.status || 'stopped'}`, 100),
         emoji: String(agent.token_type || 'bot') === 'user' ? ICONS.user : ICONS.bot,
     };
 }
@@ -265,11 +268,14 @@ async function renderAgent(manager, agentId) {
     const id = String(agent._id);
     const running = manager.runtimes.has(id);
     const status = agent.status || (running ? 'running' : 'stopped');
+    const providerObj = getProviderOrFallback(agent.provider);
+    const providerReady = providerObj.validate(extractProviderConfig(agent)).ok;
     const emb = embed(`${agentIcon(agent)} ${agent.name || 'Agent'}`, linesBlock([
         `📌 **النوع:** ${tokenTypeLabel(agent)}`,
+        `${providerObj.emoji} **المزود:** ${providerObj.label} — ${providerReady ? 'جاهز ✅' : 'ناقص ❌'}`,
+        `↳ ${providerObj.describe(extractProviderConfig(agent))}`,
         `${statusIcon(status)} **الحالة:** ${status}`,
         `🧩 **Runtime:** ${running ? 'متصل ونشط' : 'غير نشط'}`,
-        `🧠 **DeepSeek Token:** ${agent.deepseek_token ? 'موجود' : 'مفقود'}`,
         `🎭 **الشخصية:** ${agent.personality ? trim(agent.personality, 120) : 'افتراضية'}`,
         `🔔 **قناة إشعارات الوكيل:** ${agent.notification_channel_id ? `<#${agent.notification_channel_id}>` : 'غير محددة'}`,
         `🕒 **آخر تحديث:** ${fmtDate(agent.updated_at)}`,
@@ -284,6 +290,7 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agent:${id}:stop`, 'إيقاف', ButtonStyle.Danger, '⏹️', !isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:restart`, 'إعادة تشغيل', ButtonStyle.Primary, '🔄', isBusy),
         button(`${DASH_PREFIX}:agent:${id}:edit`, 'تعديل', ButtonStyle.Secondary, '✏️'),
+        button(`${DASH_PREFIX}:agent:${id}:aiprovider`, 'المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${id}:channels`, 'القنوات', ButtonStyle.Secondary, '📡'),
         button(`${DASH_PREFIX}:agent:${id}:conversations`, 'المحادثات', ButtonStyle.Secondary, '💬'),
         button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡'),
@@ -302,6 +309,8 @@ function createTypeView() {
         '**الخطوة 1 من 3: اختر نوع الوكيل.**',
         `${ICONS.bot} Bot Token: يمكنه عرض واجهة Dashboard كواجهة فقط، والتنفيذ يبقى في Manager.`,
         `${ICONS.user} User Account: Runtime فقط بدون Slash/Application Commands.`,
+        '',
+        '**الخطوة التالية:** اختيار مزود الذكاء الاصطناعي (DeepSeek / Qwen / OpenAI) 🧠',
     ]), COLORS.success);
     const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
@@ -315,14 +324,71 @@ function createTypeView() {
     return { embeds: [emb], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])] };
 }
 
-function createAgentModal(type) {
-    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:create_modal:${type}`).setTitle(type === 'user' ? 'إنشاء User Account Runtime' : 'إنشاء Bot Agent');
+/**
+ * الخطوة 2 من 3: اختيار مزود الذكاء الاصطناعي.
+ * كل مزود له واجهة وإعدادات مختلفة تماماً في الخطوة التالية.
+ */
+function createProviderView(type) {
+    const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
+        '**الخطوة 2 من 3: اختر مزود الذكاء الاصطناعي.**',
+        '',
+        ...listProviders().map(p => `${p.emoji} **${p.label}** — ${p.description}`),
+        '',
+        'حسب اختيارك ستظهر نافذة بإعدادات مختلفة تماماً لكل مزود.',
+        'نوع الوكيل المختار: **' + (type === 'user' ? 'User Account' : 'Bot Token') + '**',
+    ]), COLORS.success);
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:create_provider:${type}`)
+            .setPlaceholder('اختر مزود الذكاء الاصطناعي')
+            .addOptions(listProviders().map(p => ({
+                label       : p.label,
+                value       : p.id,
+                description : trim(p.description, 100),
+                emoji       : p.emoji,
+            }))),
+    );
+    return { embeds: [emb], components: [row, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:create`, 'رجوع لنوع الوكيل', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:home`, 'إلغاء', ButtonStyle.Secondary, '❌'),
+    ])] };
+}
+
+/**
+ * نافذة إنشاء الوكيل — تتغير بالكامل حسب المزود المختار.
+ * كل مزود يعرّف حقوله في providers/<id>.js (modalFields).
+ */
+function createAgentModal(type, providerId = 'deepseek') {
+    const providerObj = getProviderOrFallback(providerId);
+    const typeLabel = type === 'user' ? 'User Account Runtime' : 'Bot Agent';
+    const modal = new ModalBuilder()
+        .setCustomId(`${DASH_PREFIX}:create_modal:${type}:${providerObj.id}`)
+        .setTitle(trim(`إنشاء ${typeLabel} — ${providerObj.label}`, 45));
+
+    // الحقول الثابتة المشتركة
     modal.addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel(type === 'user' ? 'User Token' : 'Discord Bot Token').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deepseek_token').setLabel('DeepSeek Token').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية / Personality').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500)),
     );
+
+    // حقول المزود — تختلف بالكامل من مزود لآخر
+    // (حد ديسكورد 5 صفوف: اسم + توكن ديسكورد + حتى 3 حقول مزود)
+    const providerRows = providerObj.modalFields.slice(0, 3).map(field => new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+            .setCustomId(field.id)
+            .setLabel(trim(field.label, 45))
+            .setStyle(field.style === 'paragraph' ? TextInputStyle.Paragraph : TextInputStyle.Short)
+            .setRequired(Boolean(field.required))
+            .setMaxLength(field.maxLength || 300),
+    ));
+    for (const row of providerRows) modal.addComponents(row);
+
+    // الشخصية: فقط إذا بقي مكان ضمن حد 5 صفوف
+    if (2 + providerObj.modalFields.length < 5) {
+        modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('personality').setLabel('الشخصية / Personality').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500),
+        ));
+    }
     return modal;
 }
 
@@ -351,14 +417,40 @@ function accountRunModal(agentId) {
     return modal;
 }
 
+/**
+ * نافذة تعديل الوكيل — حقول المزود تتطلب حسب مزود الوكيل نفسه.
+ * حقول بيانات الاعتماد تبقى فارغة (اختيارية) ولا تُستبدل إلا بإدخال جديد.
+ */
 function editAgentModal(agent) {
-    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_modal:${agent._id}`).setTitle('تعديل إعدادات الوكيل');
+    const providerObj = getProviderOrFallback(agent.provider);
+    const modal = new ModalBuilder().setCustomId(`${DASH_PREFIX}:edit_modal:${agent._id}`).setTitle(trim(`تعديل الوكيل — ${providerObj.label}`, 45));
+
     modal.addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('اسم الوكيل').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(80).setValue(safeModalValue(agent.name, 80))),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('personality').setLabel('الشخصية').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(1500).setValue(safeModalValue(agent.personality, 1500))),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('discord_token').setLabel('Discord Token جديد (اختياري)').setStyle(TextInputStyle.Short).setRequired(false)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deepseek_token').setLabel('DeepSeek Token جديد (اختياري)').setStyle(TextInputStyle.Short).setRequired(false)),
     );
+
+    // حقول المزود الخاصة — حتى 3 حقول ضمن حد ديسكورد
+    const knownValues = {
+        deepseek_token : '',
+        qwen_token     : '',
+        qwen_model     : safeModalValue(agent.qwen_model, 100),
+        openai_base_url: safeModalValue(agent.openai_base_url, 300),
+        openai_api_key : '',
+        openai_model   : safeModalValue(agent.openai_model, 100),
+    };
+    for (const field of providerObj.modalFields.slice(0, 3)) {
+        modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+                .setCustomId(field.id)
+                .setLabel(trim(`${field.label} (اتركه فارغاً للإبقاء)`, 45))
+                .setStyle(field.style === 'paragraph' ? TextInputStyle.Paragraph : TextInputStyle.Short)
+                .setRequired(false)
+                .setMaxLength(field.maxLength || 300)
+                .setValue(knownValues[field.id] || ''),
+        ));
+    }
     return modal;
 }
 
@@ -439,7 +531,7 @@ async function renderStats(manager) {
         `${ICONS.bot} Bot Tokens: **${data.counts.bots}**`,
         `${ICONS.user} User Accounts: **${data.counts.users}**`,
         '',
-        'عدادات الرسائل واستهلاك DeepSeek ستظهر هنا بعد إضافة قياس telemetry لكل استدعاء دون تغيير AI flow.',
+        'عدادات الرسائل واستهلاك المزودين (DeepSeek / Qwen / OpenAI) ستظهر هنا بعد إضافة قياس telemetry لكل استدعاء دون تغيير AI flow.',
     ]), COLORS.info);
     return { embeds: [emb], components: rowsFromButtons([button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:stats`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)]) };
 }
@@ -809,7 +901,13 @@ async function handleDashboardInteraction(interaction, manager) {
     }
 
     if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:create_type`) {
-        await interaction.showModal(createAgentModal(interaction.values[0]));
+        // الخطوة 2: اختيار مزود الذكاء الاصطناعي (واجهة كل مزود تختلف في النافذة التالية)
+        await interaction.update(createProviderView(interaction.values[0]));
+        return true;
+    }
+    if (interaction.isStringSelectMenu() && id.startsWith(`${DASH_PREFIX}:create_provider:`)) {
+        const type = parts[2] === 'user' ? 'user' : 'bot';
+        await interaction.showModal(createAgentModal(type, parts[3] || 'deepseek'));
         return true;
     }
     if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:agent_select`) {
@@ -828,15 +926,30 @@ async function handleDashboardInteraction(interaction, manager) {
     }
 
     if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:create_modal:`)) {
+        // الصيغة: dash:create_modal:<type>:<provider> — التوافق القديم: بدون مزود = deepseek
         const type = parts[2] === 'user' ? 'user' : 'bot';
+        const providerObj = getProviderOrFallback(parts[3] || 'deepseek');
+
+        // جمع إعدادات المزود من الحقول الخاصة به فقط
+        const providerConfig = {};
+        for (const field of providerObj.modalFields) {
+            try {
+                const v = interaction.fields.getTextInputValue(field.id);
+                if (v && String(v).trim() !== '') providerConfig[field.id] = String(v).trim();
+            } catch (_) { /* حقل اختياري غير مُدخل */ }
+        }
+        let personality = '';
+        try { personality = interaction.fields.getTextInputValue('personality') || ''; } catch (_) {}
+
         const agent = await manager.createAgent({
             name: interaction.fields.getTextInputValue('name'),
             discord_token: interaction.fields.getTextInputValue('discord_token'),
-            deepseek_token: interaction.fields.getTextInputValue('deepseek_token'),
-            personality: interaction.fields.getTextInputValue('personality') || '',
+            personality,
             token_type: type,
+            provider: providerObj.id,
+            providerConfig,
         });
-        await manager.logAgent(String(agent._id), 'create', 'تم إنشاء وكيل من Dashboard', { token_type: type });
+        await manager.logAgent(String(agent._id), 'create', `تم إنشاء وكيل من Dashboard بمزود ${providerObj.label}`, { token_type: type, provider: providerObj.id });
         await interaction.reply(await renderAgent(manager, String(agent._id)));
         return true;
     }
@@ -844,12 +957,29 @@ async function handleDashboardInteraction(interaction, manager) {
     if (interaction.isModalSubmit() && id.startsWith(`${DASH_PREFIX}:edit_modal:`)) {
         const agentId = parts[2];
         const cfg = require('./config');
+        const agentDoc = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+        if (!agentDoc) return updateInteraction(interaction, await renderAgent(manager, agentId));
+
+        // حقول المزود الخاصة بوكيله هو — لا حقول مزودين آخرين
+        const providerObj = getProviderOrFallback(agentDoc.provider);
+        const collectible = ['name', 'personality', 'discord_token', ...providerObj.modalFields.map(f => f.id)];
         const $set = { updated_at: new Date() };
-        for (const key of ['name', 'personality', 'discord_token', 'deepseek_token']) {
-            const val = interaction.fields.getTextInputValue(key);
-            if (val) $set[key] = val;
+        for (const key of collectible) {
+            let val = null;
+            try { val = interaction.fields.getTextInputValue(key); } catch (_) {}
+            if (val && String(val).trim() !== '') $set[key] = String(val).trim();
         }
         await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set });
+
+        // تحديث حي للإعدادات إن كان الوكيل يعمل الآن
+        const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+        if (liveRuntime?.runtimeSettings) {
+            if ($set.personality !== undefined) liveRuntime.runtimeSettings.personality = $set.personality;
+            const { extractProviderConfig: extractCfg } = require('./providers');
+            const fresh = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            liveRuntime.runtimeSettings.providerConfig = extractCfg(fresh);
+        }
+
         await manager.logAgent(agentId, 'update', 'تم تعديل إعدادات الوكيل من Dashboard', { fields: Object.keys($set).filter(k => k !== 'updated_at') });
         await interaction.reply(await renderAgent(manager, agentId));
         return true;
@@ -953,6 +1083,54 @@ async function handleDashboardInteraction(interaction, manager) {
             await manager.logAgent(agentId, 'provider_update', 'تم تحديث مزود POW للوكيل من Dashboard', { provider: interaction.values[0] });
             return interaction.update(await renderAgentProvider(agentId, interaction.guildId));
         }
+        if (interaction.isStringSelectMenu() && action === 'aiprovider_set') {
+            // تبديل مزود الذكاء الاصطناعي — لا يمس إعدادات المزودين الآخرين
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const newProviderId = interaction.values[0];
+            const targetP = getProviderOrFallback(newProviderId);
+            const targetCfg = extractProviderConfig({ ...agent, provider: newProviderId });
+            const v = targetP.validate(targetCfg);
+            if (!v.ok) {
+                const emb = embed('❌ لا يمكن التبديل إلى ' + targetP.label, linesBlock([
+                    `إعدادات المزود ناقصة لهذا الوكيل: **${v.missing.join(', ')}**`,
+                    '',
+                    'احفظ إعدادات المزود أولاً من زر **تعديل** في صفحة الوكيل،',
+                    'أو أنشئ الوكيل من جديد باختيار هذا المزود في المعالج.',
+                ]), COLORS.danger);
+                return interaction.update({ embeds: [emb], components: rowsFromButtons([
+                    button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'عودة', ButtonStyle.Secondary, ICONS.back),
+                ]) });
+            }
+            await cfg.agents_col.updateOne(
+                { _id: new ObjectId(agentId) },
+                { $set: { provider: targetP.id, updated_at: new Date() } },
+            );
+            // تحديث حي للـ Runtime بدون إعادة تشغيل
+            const liveRuntime = manager?.runtimes?.get?.(String(agentId));
+            if (liveRuntime?.runtimeSettings) {
+                liveRuntime.runtimeSettings.provider = targetP.id;
+                liveRuntime.runtimeSettings.providerConfig = targetCfg;
+            }
+            liveRuntime?.channel_sessions?.clear?.(); // جلسات المزود القديم لا تصلح للجديد
+            await manager.logAgent(agentId, 'ai_provider_update', `تم تبديل مزود الذكاء الاصطناعي إلى ${targetP.label}`, { provider: targetP.id });
+            return interaction.update(await renderAgentAIProvider(agentId, interaction.guildId));
+        }
+        if (action === 'aiprovider_test') {
+            // اختبار اتصال حقيقي مع مزود الوكيل الحالي
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const providerObj = getProviderOrFallback(agent.provider);
+            const page = await renderAgentAIProvider(agentId, interaction.guildId);
+            await interaction.update(page);
+            try {
+                const msg = await providerObj.testConnection(extractProviderConfig(agent));
+                await interaction.followUp({ content: `🧪 **اختبار ${providerObj.label}**\n${msg}`, ephemeral: true });
+            } catch (e) {
+                await interaction.followUp({ content: `🧪 **اختبار ${providerObj.label}**\n❌ ${e.message}`, ephemeral: true });
+            }
+            return true;
+        }
         if (interaction.isStringSelectMenu() && action === 'conversation_delete') {
             const { db_reset_channel_session } = require('./utils');
             await db_reset_channel_session(interaction.guildId, interaction.values[0], agentId);
@@ -967,6 +1145,7 @@ async function handleDashboardInteraction(interaction, manager) {
         if (action === 'channels') return updateInteraction(interaction, await renderAgentChannels(agentId, interaction.guildId));
         if (action === 'conversations') return updateInteraction(interaction, await renderAgentConversations(agentId, interaction.guildId));
         if (action === 'provider') return updateInteraction(interaction, await renderAgentProvider(agentId, interaction.guildId));
+        if (action === 'aiprovider') return updateInteraction(interaction, await renderAgentAIProvider(agentId, interaction.guildId));
         if (action === 'account') return updateInteraction(interaction, await renderAccountSettings(agentId, interaction.guildId));
         if (action === 'account_adv') return updateInteraction(interaction, await renderAccountAdvanced(agentId, interaction.guildId));
         if (action === 'conversation_create') { await interaction.showModal(conversationCreateModal(agentId)); return true; }
@@ -1115,6 +1294,45 @@ async function renderAgentProvider(agentId, guildId) {
             ]),
     );
     return { embeds: [emb], components: [row, ...rowsFromButtons([button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back), button(`${DASH_PREFIX}:agent:${agentId}:provider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh)])] };
+}
+
+/**
+ * صفحة مزود الذكاء الاصطناعي للوكيل — عرض/تبديل/اختبار.
+ * منفصلة تماماً عن صفحة مزود POW (أمور مختلفة تماماً).
+ */
+async function renderAgentAIProvider(agentId, guildId) {
+    const cfg = require('./config');
+    const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+    if (!agent) return { embeds: [embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف.']), COLORS.danger)], components: [] };
+    const current = getProviderOrFallback(agent.provider);
+    const emb = embed('🧠 مزود الذكاء الاصطناعي للوكيل', linesBlock([
+        `الوكيل: **${agent.name || 'غير معروف'}**`,
+        `المزود الحالي: ${current.emoji} **${current.label}**`,
+        `الحالة: ${current.validate(extractProviderConfig(agent)).ok ? 'جاهز ✅' : 'ناقص ❌'}`,
+        `↳ ${current.describe(extractProviderConfig(agent))}`,
+        '',
+        '**المزودون المتاحون:**',
+        ...listProviders().map(p => `${p.emoji} **${p.label}** — ${p.id === current.id ? 'الحالي' : (p.validate(extractProviderConfig({ ...agent, provider: p.id })).ok ? 'جاهز للتبديل' : 'يحتاج إعدادات')}`),
+        '',
+        'التبديل لا يمس إعدادات المزودين الآخرين المحفوظة، ويُطبق حياً بدون إعادة تشغيل.',
+        'جلسات المحادثات القديمة تُصفّر عند التبديل (كل مزود له جلساته الخاصة).',
+    ]), COLORS.info);
+    const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:agent:${agentId}:aiprovider_set`)
+            .setPlaceholder('اختر مزود الذكاء الاصطناعي')
+            .addOptions(listProviders().map(p => ({
+                label      : `${p.label}${p.id === current.id ? ' (الحالي)' : ''}`,
+                value      : p.id,
+                description: trim(p.description, 100),
+                emoji      : p.emoji,
+            }))),
+    );
+    return { embeds: [emb], components: [row, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:agent:${agentId}:aiprovider_test`, 'اختبار الاتصال', ButtonStyle.Primary, '🧪'),
+        button(`${DASH_PREFIX}:agent:${agentId}:view`, 'عودة للوكيل', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:agent:${agentId}:aiprovider`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+    ])] };
 }
 
 async function renderAgentConversations(agentId, guildId) {

@@ -18,8 +18,9 @@ const {
     _err,
     findChannel, findGuild,
     toolAllowedForAccess, executeAllowedForAccess,
-    _stream_ds,
 } = require('../utils');
+
+const { getProviderOrFallback, extractProviderConfig } = require('../providers');
 
 const { buildSystem } = require('./systemPrompt');
 
@@ -171,6 +172,14 @@ async function runAgent(
     runtime = {},
 ) {
     const system    = buildSystem(botName, mode, thinking, accessLevel, runtime.personality || '');
+
+    // ── نظام المزودين: تحديد مزود هذا الوكيل وإعداداته ──
+    // التوافق القديم: وكلاء بدون حقل provider يعاملون كـ DeepSeek (نفس السلوك الأصلي)
+    const provider     = getProviderOrFallback(runtime.provider);
+    const providerConf = (runtime.providerConfig && Object.keys(runtime.providerConfig).length)
+        ? runtime.providerConfig
+        : extractProviderConfig({ ...runtime, provider: provider.id });
+
     let curSid      = sessionId;
     let curPmid     = parentMessageId;
     let curPrompt   = (
@@ -182,17 +191,26 @@ async function runAgent(
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
     for (let step = 0; step < MAX_STEPS; step++) {
-        console.log(`[Agent ${step + 1}/${MAX_STEPS}] mode=${mode} thinking=${thinking} access=${accessLevel}`);
+        console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${provider.id} mode=${mode} thinking=${thinking} access=${accessLevel}`);
 
         let raw;
         try {
-            const dsResult = await _stream_ds(curPrompt, guildId, curSid, curPmid, mode, thinking, runtime.deepseekToken, runtime.agentId || 'default');
-            raw     = dsResult.fullText;
-            curSid  = dsResult.sessionId;
-            curPmid = dsResult.newParentMessageId;
+            const aiResult = await provider.chat({
+                prompt           : curPrompt,
+                guildId,
+                sessionId        : curSid,
+                parentMessageId  : curPmid,
+                mode,
+                thinking,
+                config           : providerConf,
+                agentId          : runtime.agentId || 'default',
+            });
+            raw     = aiResult.fullText;
+            curSid  = aiResult.sessionId;
+            curPmid = aiResult.newParentMessageId;
         } catch (e) {
             return {
-                reply      : `⚠️ خطأ في الاتصال بالنموذج: ${e.message}`,
+                reply      : `⚠️ خطأ في الاتصال بالنموذج (${provider.label}): ${e.message}`,
                 newSid     : curSid,
                 newPmid    : curPmid,
                 filesToSend: [],

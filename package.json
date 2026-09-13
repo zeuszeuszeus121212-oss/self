@@ -1,13 +1,13 @@
 {
   "name": "disor-bot",
-  "version": "7.0.0",
-  "description": "Disor Bot v7.0 Ironclad — Discord Bot (Node.js port)",
+  "version": "7.1.0",
+  "description": "Disor Bot v7.1 Ironclad — Multi-Provider AI Agent Platform (DeepSeek / Qwen / OpenAI-Compatible)",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
     "dev": "node bot.js",
     "update": "npm update",
-    "test": "node --check config.js && node --check discordAdapter.js && node --check managerDashboard.js && node --check agentRuntime.js && node --check bot.js && node --check utils.js && node --check tools/index.js && node --check tools/agent.js && node --check tools/systemPrompt.js && node --check tools/readTools.js && node --check tools/executeAction.js && node --check accountAgent.js"
+    "test": "node --check config.js && node --check discordAdapter.js && node --check managerDashboard.js && node --check agentRuntime.js && node --check bot.js && node --check utils.js && node --check providers/index.js && node --check providers/deepseek.js && node --check providers/qwen.js && node --check providers/openai.js && node --check tools/index.js && node --check tools/agent.js && node --check tools/systemPrompt.js && node --check tools/readTools.js && node --check tools/executeAction.js && node --check accountAgent.js"
   },
   "dependencies": {
     "discord.js": ">=14.0.0",
