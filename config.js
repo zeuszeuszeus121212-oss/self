@@ -7,6 +7,10 @@
 
 'use strict';
 
+// ⚠️ أول require — حقن webcrypto للبيئات القديمة (Node < 19)
+// درايفر mongodb 7.x يستخدم globalThis.crypto مباشرة وينهار بدونه
+require('./polyfills');
+
 const dotenv = require('dotenv');
 dotenv.config();
 

@@ -8,11 +8,15 @@
 
 'use strict';
 
+// ⚠️ أول require على الإطلاق — حقن webcrypto للبيئات القديمة (Node < 19)
+// بدون هذا ينهار اتصال MongoDB: "crypto is not defined" داخل درايفر mongodb 7.x
+require('./polyfills');
+
 const { ObjectId } = require('mongodb');
 const { Client, GatewayIntentBits, Partials, REST, Routes } = require('discord.js');
 const { DISCORD_TOKEN, connectMongo } = require('./config');
 const { startAgentRuntime } = require('./agentRuntime');
-const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage, handlePersonalityUploadMessage } = require('./managerDashboard');
+const { dashboardCommands, handleDashboardInteraction, embed, linesBlock, COLORS, handleKnowledgeUploadMessage, handlePersonalityUploadMessage, handleSecretUploadMessage } = require('./managerDashboard');
 const secrets = require('./secrets');
 
 const LIFECYCLE = Object.freeze({
@@ -299,6 +303,12 @@ async function startManagerBot() {
             await handlePersonalityUploadMessage(message, module.exports);
         } catch (e) {
             console.error('[Personality Upload]', e.message);
+        }
+        // 🍪 التقاط أسرار المزودين المرسلة كملف/لصق من صاحب رفع معلّق (كوكيز Gemini الأطول من 4000 حرف)
+        try {
+            await handleSecretUploadMessage(message, module.exports);
+        } catch (e) {
+            console.error('[Secret Upload]', e.message);
         }
     });
     await managerClient.login(DISCORD_TOKEN);

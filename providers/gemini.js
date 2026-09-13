@@ -80,6 +80,9 @@ function normalizeCookiesInput(raw) {
     let s = String(raw || '');
     s = s.replace(/^\s*[Cc]ookie\s*:\s*/, '');            // كلمة "Cookie:" في البداية
     s = s.replace(/[\r\n]+/g, '; ');                      // الأسطر الجديدة → فاصلة كوكيز
+    // توحيد الفواصل: إزالة الفواصل المكررة/المسافات الزائدة
+    // (نسخ DevTools غالباً تنتهي كل كوكي بـ ; فينتج ;; عند دمج الأسطر)
+    s = s.split(';').map(x => x.trim()).filter(Boolean).join('; ');
     return s.trim();
 }
 
@@ -277,9 +280,10 @@ const geminiProvider = {
     description: 'Gemini عبر gemini.google.com بالكوكيز (وليس توكن) — جلسات حقيقية وتتبع محادثة وتحديث كوكيز تلقائي',
 
     modalFields: [
-        // ⚠️ 4000 = الحد الأقصى لدى ديسكورد — ترويسة Cookie الحقيقية من المتصفح
-        // طويلة (500–3000 حرف) وأي قصّ = كوكيز ميتة "failed to get session tokens"
-        { id: 'gemini_cookies', label: 'الصق سطر Cookie كاملاً من المتصفح (حتى 4000 حرف)', style: 'paragraph', required: true, maxLength: 4000 },
+        // ⚠️ 4000 = الحد الأقصى المطلق لنوافذ ديسكورد — لا يمكن رفعه أبداً.
+        // كوكيز أطول من 4000؟ تُرسل كملف من زر «الكوكيز من ملف» في صفحة إعدادات الوكيل (بلا حد فعلي).
+        // الحقل اختياري هنا حتى لا يُحجب إنشاء الوكيل، والتحقق الحقيقي يحدث عند التشغيل.
+        { id: 'gemini_cookies', label: 'سطر Cookie كاملاً — أو من ملف لاحقاً', style: 'paragraph', required: false, maxLength: 4000 },
     ],
 
     validate(config = {}) {

@@ -37,6 +37,13 @@ const pendingPersonalityUploads = new Map();
 const PERSONALITY_UPLOAD_WINDOW_MS = 3 * 60 * 1000;
 const PERSONALITY_MAX_FILE_BYTES = 1_000_000;
 
+// 🍪 حالة إرسال سر المزود كملف/لصق — الحل الرسمي لتجاوز حد ديسكورد المطلق 4000 حرف
+// (ترويسة Cookie كاملة من المتصفح تتجاوز 4000 أحياناً ولا يمكن لصقها في أي نافذة)
+// `${guildId}:${userId}` → { agentId, fieldId, fieldLabel, expiresAt }
+const pendingSecretUploads = new Map();
+const SECRET_UPLOAD_WINDOW_MS = 3 * 60 * 1000;
+const SECRET_MAX_FILE_BYTES = 1_000_000;
+
 // 🗄️ مسودات إضافة مزود (2.5-E): `${guildId}:${userId}` → { name, base_url, api_key, models, from_db }
 const pendingProviderDrafts = new Map();
 const PROVIDER_DRAFT_TTL_MS = 15 * 60 * 1000;
@@ -1872,6 +1879,38 @@ async function handleDashboardInteraction(interaction, manager) {
             await manager.logAgent(agentId, 'capabilities_update', `${labels[cap]}: ${newValue ? 'تفعيل' : 'تعطيل'}`, { capabilities });
             return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
         }
+        if (action === 'secret_file') {
+            // 🍪 فتح نافذة انتظار سر المزود كملف/لصق — تجاوز حد ديسكورد 4000 حرف
+            const agent = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
+            if (!agent) return updateInteraction(interaction, await renderAgent(manager, agentId));
+            const providerObj = getProviderOrFallback(agent.provider);
+            const field = providerObj.modalFields.find(f => secrets.SECRET_FIELDS.includes(f.id));
+            if (!field) return updateInteraction(interaction, await renderAgentSettings(agentId, interaction.guildId));
+            for (const [k, v] of pendingSecretUploads) {
+                if (Date.now() > v.expiresAt) pendingSecretUploads.delete(k);
+            }
+            const key = `${interaction.guildId}:${interaction.user.id}`;
+            pendingSecretUploads.set(key, {
+                agentId   : String(agentId),
+                fieldId   : field.id,
+                fieldLabel: field.label,
+                expiresAt : Date.now() + SECRET_UPLOAD_WINDOW_MS,
+            });
+            const emb = embed('📎 إرسال قيمة أطول من 4000 حرف', linesBlock([
+                `حد نوافذ ديسكورد **4000 حرف** حد مطلق لا يمكن رفعه — لذلك القيم الأطول (مثل ترويسة Cookie كاملة) تُرسل **كملف**.`,
+                '',
+                `أرسل الآن في هذه القناة (<#${interaction.channelId}>) **بإحدى الطريقتين**:`,
+                `• 📎 **ملف نصي** ‎(\.txt / \.md / \.json أو أي ملف نصي ≤ 1MB) يحتوي ${field.label}`,
+                '• 📝 **لصق مباشر** كرسالة نصية عادية (تصل حتى 2000 حرف للرسالة)',
+                '',
+                '• لديك **3 دقائق** من الآن',
+                '• تُنظّف وتُتحقق ثم تُشفَّر وتُحفظ فوراً وتُطبَّق حياً بدون إعادة تشغيل',
+                '• رسالة بلا ملف ولا نص تُتجاهل والنافذة تبقى مفتوحة',
+            ]), COLORS.success);
+            return updateInteraction(interaction, { embeds: [emb], components: rowsFromButtons([
+                button(`${DASH_PREFIX}:agent:${agentId}:settings`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back),
+            ]) });
+        }
         if (action === 'personality_file') {
             // 📎 فتح نافذة انتظار ملف الشخصية — أرسل الملف الآن وسيصبح هو الشخصية
             for (const [k, v] of pendingPersonalityUploads) {
@@ -2227,6 +2266,7 @@ async function renderAgentSettings(agentId, guildId) {
         '',
         '**🔒 الأسرار مخفية دائماً** — زر «كشف» يعرض القيمة في رسالة خاصة بك فقط (Ephemeral).',
         '📎 لتغيير الشخصية من ملف: اضغط «شخصية من ملف» ثم أرسل الملف `.txt`/`.md` في هذه القناة خلال 3 دقائق (≤ 1MB و20000 حرف).',
+        '🍪 قيمة أطول من حد 4000 (ترويسة Cookie كاملة)؟ اضغط «الكوكيز من ملف» وأرسلها ملفاً نصياً أو لصقاً — تُحفظ كاملة دون قصّ.',
         'كل تعديل يُحفظ في قاعدة البيانات ويُطبق حياً بدون إعادة تشغيل.',
     ]), COLORS.info);
 
@@ -2238,11 +2278,16 @@ async function renderAgentSettings(agentId, guildId) {
 
     const components = [];
     if (revealButtons.length) components.push(...rowsFromButtons(revealButtons));
+    // 🍪 زر تجاوز حد 4000 — إرسال قيمة السر (كوكيز Gemini الطويلة مثلاً) كملف أو لصق مباشر
+    const secretField = providerObj.modalFields.find(f => secrets.SECRET_FIELDS.includes(f.id));
     components.push(...rowsFromButtons([
         button(`${DASH_PREFIX}:agent:${agentId}:edit_identity`, 'الاسم والشخصية', ButtonStyle.Primary, '✏️'),
         button(`${DASH_PREFIX}:agent:${agentId}:edit_token`, 'توكن ديسكورد', ButtonStyle.Secondary, '🎫'),
         button(`${DASH_PREFIX}:agent:${agentId}:edit_creds`, 'بيانات المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${agentId}:personality_file`, 'شخصية من ملف', ButtonStyle.Success, '📎'),
+        ...(secretField ? [button(`${DASH_PREFIX}:agent:${agentId}:secret_file`,
+            secretField.id === 'gemini_cookies' ? 'الكوكيز من ملف (بلا حد)' : 'قيمة السر من ملف',
+            ButtonStyle.Success, secretField.id === 'gemini_cookies' ? '🍪' : '🔑')] : []),
     ]));
     components.push(...rowsFromButtons([
         button(`${DASH_PREFIX}:agent:${agentId}:cap_toggle:thinking`, thinkingOn ? 'تعطيل التفكير' : 'تفعيل التفكير', thinkingOn ? ButtonStyle.Danger : ButtonStyle.Success, '🧠'),
@@ -2492,6 +2537,134 @@ async function handlePersonalityUploadMessage(message, manager) {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  🍪 التقاط أسرار المزودين من ملف/لصق — تجاوز حد ديسكورد 4000 حرف
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * يلتقط رسائل أصحاب رفع سر معلّق (زر «الكوكيز من ملف» في صفحة الإعدادات):
+ * ملف نصي واحد (≤ 1MB) أو لصق مباشر كنص الرسالة.
+ * كوكيز Gemini تُنظّف (إزالة "Cookie:" والأسطر الجديدة) وتُتحقق (معرف جلسة إلزامي)
+ * ثم تُشفَّر وتُحفظ وتُطبَّق حياً على الـ Runtime.
+ * @param {import('discord.js').Message} message
+ * @param {object} manager
+ * @returns {Promise<boolean>} هل كانت الرسالة جزءاً من رفع سر معلّق
+ */
+async function handleSecretUploadMessage(message, manager) {
+    if (!message?.guild || !message.author || message.author.bot) return false;
+    const key = `${message.guild.id}:${message.author.id}`;
+    const pending = pendingSecretUploads.get(key);
+    if (!pending) return false;
+    if (Date.now() > pending.expiresAt) {
+        pendingSecretUploads.delete(key);
+        return false;
+    }
+
+    // 1) المصدر: مرفق نصي أو لصق مباشر
+    const attachments = Array.from(message.attachments.values());
+    let raw = '';
+    let sourceName = null;
+    if (attachments.length) {
+        const textAtts = attachments.filter(a => is_text_attachment(a));
+        if (!textAtts.length) {
+            await message.reply({
+                embeds: [embed('❌ الملف غير نصي', linesBlock([
+                    'الملفات المقبولة: `.txt` / `.md` / `.json` أو أي ملف نصي (≤ 1MB).',
+                    'أعد الإرسال — النافذة ما زالت مفتوحة.',
+                ]), COLORS.danger)],
+            }).catch(() => {});
+            return true;
+        }
+        const att = textAtts[0];
+        if ((att.size || 0) > SECRET_MAX_FILE_BYTES) {
+            await message.reply(`❌ الملف كبير (${Math.round((att.size || 0) / 1024)}KB) — الحد 1MB. ترويسة Cookie الحقيقية نادراً تتجاوز 10KB.`).catch(() => {});
+            return true;
+        }
+        try {
+            raw = await fetchTextAttachment(att.url);
+        } catch (e) {
+            await message.reply(`❌ فشل قراءة الملف: ${e.message}`).catch(() => {});
+            return true;
+        }
+        sourceName = att.name;
+    } else if (message.content && message.content.trim()) {
+        raw = message.content;
+        sourceName = 'لصق مباشر';
+    } else {
+        return false; // رسالة عادية بلا ملف ولا نص — تجاهل
+    }
+
+    // 2) تطبيع حسب نوع الحقل — كوكيز Gemini تُنظف من "Cookie:" والأسطر الجديدة والمسافات
+    let value = String(raw || '').trim();
+    if (pending.fieldId === 'gemini_cookies') {
+        try {
+            value = require('./providers/gemini').__internals.normalizeCookiesInput(value);
+        } catch (_) { /* أبقِ القيمة كما هي */ }
+    }
+    if (!value) {
+        await message.reply('❌ المحتوى فارغ بعد التطبيع — أعد الإرسال (النافذة ما زالت مفتوحة).').catch(() => {});
+        return true;
+    }
+
+    // 3) تحقق حسب المزود — كوكيز بلا معرف جلسة تُرفض بالاسم والنافذة تبقى مفتوحة
+    const cfg = require('./config');
+    const agentDoc = await cfg.agents_col.findOne({ _id: new ObjectId(pending.agentId) }).catch(() => null);
+    if (!agentDoc) {
+        pendingSecretUploads.delete(key);
+        return true;
+    }
+    const providerObj = getProviderOrFallback(agentDoc.provider);
+    if (providerObj.id === 'gemini' && pending.fieldId === 'gemini_cookies') {
+        const v = providerObj.validate({ gemini_cookies: value });
+        if (!v.ok) {
+            await message.reply({
+                embeds: [embed('❌ كوكيز غير مكتملة — لم تُحفظ', linesBlock([
+                    ...v.missing.map(m => `• ${m}`),
+                    '',
+                    'النافذة ما زالت مفتوحة — أعد إرسال سطر Cookie كاملاً.',
+                ]), COLORS.danger)],
+            }).catch(() => {});
+            return true;
+        }
+    }
+
+    // 4) حفظ مشفّر + تطبيق حي فوري
+    const patch = { updated_at: new Date(), [pending.fieldId]: value };
+    secrets.encryptSecretsInPatch(patch);
+    try {
+        await cfg.agents_col.updateOne({ _id: new ObjectId(pending.agentId) }, { $set: patch });
+    } catch (e) {
+        await message.reply(`❌ فشل الحفظ في قاعدة البيانات: ${e.message}`).catch(() => {});
+        return true;
+    }
+    try {
+        const liveRuntime = manager?.runtimes?.get?.(String(pending.agentId));
+        if (liveRuntime?.runtimeSettings) {
+            const fresh = secrets.decryptAgentDoc(await cfg.agents_col.findOne({ _id: new ObjectId(pending.agentId) }));
+            const providersMod = require('./providers');
+            liveRuntime.runtimeSettings.providerConfig = providersMod.extractProviderConfig(fresh);
+            liveRuntime.runtimeSettings.fallback_configs = providersMod.extractAllProviderConfigs(fresh);
+        }
+    } catch (_) { /* التحديث الحي أفضل جهد — الحفظ نجح */ }
+
+    pendingSecretUploads.delete(key);
+
+    try {
+        await manager?.logAgent?.(String(pending.agentId), 'update', `تم تحديث ${pending.fieldLabel} من ${sourceName} (${value.length} حرف — كامل دون قصّ)`, { field: pending.fieldId, length: value.length, source: sourceName, by: message.author.id });
+    } catch (_) {}
+
+    const emb = embed('✅ تم حفظ القيمة كاملة — بلا حد 4000', linesBlock([
+        `📎 **المصدر:** ${sourceName}`,
+        `🔑 **الحقل:** ${pending.fieldLabel}`,
+        `📏 **الطول:** ${value.length} حرف — وصل كاملاً دون أي قصّ`,
+        `🔒 **القيمة المخزنة:** ${secrets.maskSecret(value)} (مشفرة AES في قاعدة البيانات)`,
+        '',
+        'طُبِّقت حياً على الوكيل بدون إعادة تشغيل.',
+    ]), COLORS.success);
+    await message.reply({ embeds: [emb] }).catch(() => {});
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════
 //  📊 صفحة إحصائيات الوكيل
 // ═══════════════════════════════════════════════════════════
 
@@ -2679,6 +2852,7 @@ module.exports = {
     handleDashboardInteraction,
     handleKnowledgeUploadMessage,
     handlePersonalityUploadMessage,
+    handleSecretUploadMessage,
     renderHome,
     renderAgent,
     renderAgentSettings,
