@@ -22,9 +22,10 @@ const {
     toolAllowedForAccess, executeAllowedForAccess,
 } = require('../utils');
 
-const { getProviderOrFallback, extractProviderConfig, buildFallbackChain } = require('../providers');
+const { getProviderOrFallback, extractProviderConfig, buildFallbackChain, authFieldFor, splitFieldKeys, withKeyIndex } = require('../providers');
 const errorReporter = require('../errorReporter'); // 🕶️ وجه البوكر — بلا تسريب تقني للقنوات العامة
 const qwenAccounts = require('../qwenAccounts'); // 🌐 حساب Qwen تلقائي لكل سيرفر (v7.9)
+const channelHistory = require('../channelHistory'); // 🧷 ذاكرة القناة الدائمة — لا انقطاع عند تبديل المزود (v7.11)
 const webTools = require('./webTools');
 const memory   = require('../memory');
 const reminders = require('../reminders');
@@ -194,6 +195,29 @@ async function _downloadToTmp(url) {
 const MAX_STEPS = 24;
 const MAX_FALSE_SUCCESS_ATTEMPTS = 1; // محاولة تصحيح واحدة فقط
 
+// ═══════════════════════════════════════════════════════════
+//  🚶 سلّم التعافي (v7.11 — طلب المالك):
+//  خطأ → محادثة جديدة + إعادة الطلب → خطأ مرة أخرى → إعادة الكرة →
+//  خطأ مرة أخرى → 🔑 المفتاح التالي → نفدت المفاتيح → 🌐 المزود التالي.
+//  وكل ذلك مع الحفاظ على ذاكرة القناة كاملة عبر الحقن من channelHistory.
+// ═══════════════════════════════════════════════════════════
+const RETRIES_PER_KEY = 2;        // محاولتا «محادثة جديدة» لكل مفتاح قبل تبديله
+
+// 🙈 إشارة التجاهل — النموذج يرد بها وحدها حين تشخصيته ألا يرد
+const IGNORE_SIGNAL_RE = /^\s*(?:ignore[_-]?msg|\[ignore\]|\[تجاهل\]|تجاهل_الرسالة|\{\s*["']?ignore["']?\s*:\s*true\s*\})\s*\.?\s*$/i;
+function isIgnoreSignal(raw) {
+    return IGNORE_SIGNAL_RE.test(String(raw || ''));
+}
+
+// 😄 تحقق إيموجي للتفاعل البشري — يونيكود قياسي أو مخصص <a?:name:id>
+function isValidReactEmoji(emoji) {
+    const e = String(emoji || '').trim();
+    if (!e || e.length > 64) return false;
+    if (/^<a?:[\w~]{2,32}:\d{15,25}>$/.test(e)) return true;
+    // يونيكود: رموز تعبيرية + معدلات + ZWJ sequences
+    return /^[\p{Extended_Pictographic}\p{Emoji_Component}\u200d\ufe0f]{1,8}$/u.test(e);
+}
+
 // ══════════════════════════════════════════════════════════════
 //  💬 أدوات وضع «المحادثة» — الأدوات الأساسية الممتعة فقط
 //  ذاكرة + تذكيرات + قراءة (معلومات السيرفر/العضو/الرسائل).
@@ -241,10 +265,8 @@ async function runAgent(
 
     // ── نظام المزودين + سلسلة Fallback ──
     // [0] الأساسي دائماً — البدائل فقط عند تفعيل fallback وتوفر إعداداتها كاملة
+    // (chainIdx/keyIdx/جميع حالة سلّم التعافي معرفة أسفل مع باقي الحالة)
     const chain     = buildFallbackChain(runtime);
-    let chainIdx    = 0;
-    const provider     = chain[0].obj;
-    const providerConf = chain[0].config;
 
     // 🌐 حساب Qwen التلقائي لكل سيرفر (v7.9):
     // لو المزود الأساسي Qwen ووُجد حساب مفعّل خاص بهذا السيرفر → يُستخدم توكنه
@@ -262,17 +284,68 @@ async function runAgent(
 
     let curSid      = sessionId;
     let curPmid     = parentMessageId;
+    const agentIdStr = runtime.agentId || 'default';
+    const channelIdStr = requester.channelId || channel?.id || null;
+
+    // 🧷 ذاكرة القناة الدائمة — تُبنى مرة واحدة وتُحقن عند «كل» بداية جلسة
+    // جديدة (أول استدعاء بلا جلسة، أو بعد أي فشل/تبديل مفتاح/تبديل مزود) —
+    // فيكمل الحوار من حيث توقف مهما تغيّر المفتاح أو المزود (طلب المالك v7.11).
+    let historyBlock = '';
+    try {
+        historyBlock = await channelHistory.renderBlock({
+            agentId : agentIdStr,
+            guildId,
+            channelId: channelIdStr,
+            botName,
+            limit   : 24,
+        });
+    } catch (_) { historyBlock = ''; }
+    let historyInjected = false;
+
     let curPrompt   = (
         `${system}\n\n` +
         `[مستوى صلاحية المستخدم داخل البوت: ${accessLevel}]\n\n` +
         `${botContext}\n\n${userInfo}\n\nUser: ${userMsg}`
     );
-    
+    // أول استدعاء بلا جلسة قائمة؟ حقن ذاكرة القناة فوراً
+    if (!curSid && historyBlock) {
+        curPrompt = `${historyBlock}\n\n${curPrompt}`;
+        historyInjected = true;
+    }
+    // البرومبت الأساسي (رسالة المستخدم كما هي) — يُستعاد عند كل بداية جلسة جديدة
+    // حتى لا يفقد المزود الجديد رسالة المستخدم الأصلية أبداً
+    let basePrompt  = curPrompt;
+
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
     // 🕶️ سجل فشلالسلسلة — يذهب للتقرير المفصل (قناة الإشعارات) وليس للقناة العامة
     const chainErrors = [];
-    let silentRetryDone = false; // محاولة صامتة واحدة عند غياب البدائل — للأخطاء العابرة (رد فارغ/مهلة)
+
+    // 🚶 حالة سلّم التعافي — لكل مزود: فهرس المفتاح الحالي + عدد محاولات «محادثة جديدة»
+    let chainIdx = 0;
+    let keyIdx   = 0;
+    let retries  = 0;
+    /** بناء إعدادات المزود النشط بمفتاحه الحالي (بدون تعديل السلسلة الأصلية) */
+    const activeConfig = () => {
+        const entry = chain[chainIdx];
+        const rotated = withKeyIndex(entry.id, entry.config, keyIdx);
+        return rotated || entry.config;
+    };
+    /** هل يوجد مفتاح تالٍ لهذا المزود؟ */
+    const hasNextKey = () => withKeyIndex(chain[chainIdx].id, chain[chainIdx].config, keyIdx + 1) !== null;
+    /** بداية جلسة جديدة نظيفة — مع حقن ذاكرة القناة إن لم تُحقن بعد */
+    const freshConversation = () => {
+        curSid  = null;
+        curPmid = null;
+        if (historyBlock && !historyInjected) {
+            basePrompt = `${historyBlock}\n\n${basePrompt}`;
+            historyInjected = true;
+        }
+        curPrompt = basePrompt;
+    };
+
+    // 😄 تفاعلات الإيموجي المتراكمة — رد الإيموجي البشري (قد يكون بدون نص إطلاقاً)
+    const reactEmojis = [];
 
     // 💬 وضع المحادثة: نفس حلقة الوكيل لكن بحوّاسه الصامتة المقيّدة فقط
     // (CHAT_MODE_TOOLS) — لا تنفيذ إداري ولا ويب ولا ملفات؛ المعرفة المرفوعة
@@ -284,7 +357,7 @@ async function runAgent(
 
     for (let step = 0; step < MAX_STEPS; step++) {
         const activeProvider = chain[chainIdx];
-        console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${activeProvider.id}${chainIdx > 0 ? ' (fallback)' : ''} mode=${mode} thinking=${thinking} access=${accessLevel}`);
+        console.log(`[Agent ${step + 1}/${MAX_STEPS}] provider=${activeProvider.id}${chainIdx > 0 ? ' (fallback)' : ''}${keyIdx > 0 ? ` key#${keyIdx + 1}` : ''} mode=${mode} thinking=${thinking} access=${accessLevel}`);
 
         let raw;
         try {
@@ -299,41 +372,59 @@ async function runAgent(
                 search           : nativeSearch,
                 // 🖼️ صور مرفقة من رسالة المستخدم (رؤية النموذج — يدعمها Qwen وOpenAI)
                 images           : Array.isArray(requester.images) ? requester.images : [],
-                config           : activeProvider.config,
-                agentId          : runtime.agentId || 'default',
+                config           : activeConfig(),
+                agentId          : agentIdStr,
             });
             raw     = aiResult.fullText;
             curSid  = aiResult.sessionId;
             curPmid = aiResult.newParentMessageId;
         } catch (e) {
-            // ── Fallback تلقائي: جرّب المزود التالي في السلسلة ──
-            if (chainIdx < chain.length - 1) {
-                const failed = activeProvider;
-                chainErrors.push({ id: failed.id, label: failed.obj?.label || failed.id || 'مزود', message: String(e.message || e).slice(0, 300) });
-                chainIdx++;
-                const next = chain[chainIdx];
-                console.warn(`⚠️ [Fallback] فشل ${failed.obj?.label || failed.id} (${String(e.message).slice(0, 120)}) — التحويل إلى ${next.obj?.label || next.id}`);
-                track('fallback', { from: failed.obj.id, to: next.obj.id });
-                // جلسات كل مزود مستقلة — نبدأ جلسة جديدة لدى البديل
-                curSid  = null;
-                curPmid = null;
-                step--; // إعادة نفس الخطوة على البديل (لا تستهلك محاولة)
-                continue;
-            }
+            // ═══════════════════════════════════════════════════
+            //  🚶 سلّم التعافي — محادثة جديدة ×2 → 🔑 مفتاح تالٍ → 🌐 مزود تالٍ
+            //  (كل قفزة تبدأ محادثة جديدة بذاكرة القناة كاملة محقونة)
+            // ═══════════════════════════════════════════════════
+            const failNote = String(e.message || e).slice(0, 200);
 
-            // 🩹 محاولة صامتة واحدة عند غياب البدائل — أخطاء مثل "رد فارغ" غالباً عابرة
-            // (لا ينفذها سوى مرة واحدة لكل استدعاء runAgent حتى لا يتضاعف زمن الفشل الحقيقي)
-            if (!silentRetryDone && chain.length === 1) {
-                silentRetryDone = true;
-                console.warn(`⚠️ [Provider] فشل ${activeProvider.obj?.label || activeProvider.id} (${String(e.message).slice(0, 120)}) — محاولة صامتة ثانية`);
+            // 1️⃣ محادثة جديدة على نفس المفتاح (محاولتان)
+            if (retries < RETRIES_PER_KEY) {
+                retries++;
+                chainErrors.push({ id: activeProvider.id, label: activeProvider.obj?.label || activeProvider.id || 'مزود', message: failNote, stage: `محادثة جديدة #${retries}` });
+                console.warn(`⚠️ [Recovery] فشل ${activeProvider.obj?.label || activeProvider.id} (${failNote.slice(0, 120)}) — محادثة جديدة + إعادة الطلب (${retries}/${RETRIES_PER_KEY})`);
                 track('retry', { provider: activeProvider.id });
-                curSid  = null;
-                curPmid = null;
+                freshConversation();
                 step--; // لا تستهلك خطوة
                 continue;
             }
 
-            chainErrors.push({ id: activeProvider.id, label: activeProvider.obj?.label || activeProvider.id || 'مزود', message: String(e.message || e).slice(0, 300) });
+            // 2️⃣ 🔑 المفتاح التالي لنفس المزود
+            if (hasNextKey()) {
+                keyIdx++;
+                retries = 0;
+                chainErrors.push({ id: activeProvider.id, label: activeProvider.obj?.label || activeProvider.id || 'مزود', message: failNote, stage: `تبديل إلى المفتاح #${keyIdx + 1}` });
+                console.warn(`🔑 [Recovery] نفدت محاولات ${activeProvider.obj?.label || activeProvider.id} — التبديل إلى المفتاح #${keyIdx + 1}`);
+                track('key_rotate', { provider: activeProvider.id });
+                freshConversation();
+                step--;
+                continue;
+            }
+
+            // 3️⃣ 🌐 المزود التالي في سلسلة الوكيل
+            if (chainIdx < chain.length - 1) {
+                const failed = activeProvider;
+                chainIdx++;
+                keyIdx = 0;
+                retries = 0;
+                const next = chain[chainIdx];
+                chainErrors.push({ id: failed.id, label: failed.obj?.label || failed.id || 'مزود', message: failNote, stage: 'التحويل للمزود البديل' });
+                console.warn(`🌐 [Recovery] فشل ${failed.obj?.label || failed.id} بكل مفاتيحه — التحويل إلى ${next.obj?.label || next.id}`);
+                track('fallback', { from: failed.obj.id, to: next.obj.id });
+                freshConversation();
+                step--;
+                continue;
+            }
+
+            // 4️⃣ نفد كل شيء — الوجه البوكر للقناة والتقرير الكامل للإشعارات
+            chainErrors.push({ id: activeProvider.id, label: activeProvider.obj?.label || activeProvider.id || 'مزود', message: failNote, stage: 'فشل نهائي' });
             track('error', { provider: activeProvider.id });
 
             // 🕶️ وجه البوكر:
@@ -366,6 +457,24 @@ async function runAgent(
 
         console.log(`  raw: ${raw.slice(0, 300)}`);
 
+        // ═══════════════════════════════════════════════════
+        //  🙈 حرية التجاهل — شخصيته القرار (طلب المالك v7.11):
+        //  لو رد النموذج إشارة التجاهل وحدها → لا يُرسل أي رد للقناة،
+        //  ويضع النظام إيموجي على رسالة المستخدم دالة على أن النموذج
+        //  اختار عدم الرد. النموذج لا يُجبر على الرد غصباً عنه.
+        // ═══════════════════════════════════════════════════
+        if (isIgnoreSignal(raw)) {
+            console.log(`🙈 [Agent] النموذج اختار تجاهل هذه الرسالة بشخصيته`);
+            return {
+                ignored    : true,
+                reply      : null,
+                newSid     : curSid,
+                newPmid    : curPmid,
+                filesToSend: [],
+                react      : [],
+            };
+        }
+
         const jsonObjects    = extractJsonObjects(raw);
         const allResults     = [];
         // ملاحظة: filesToSend مرفوعة لنطاق runAgent كاملاً — الملفات (صور مولدة/ملفات)
@@ -373,6 +482,20 @@ async function runAgent(
         let finalReplyText   = null;
 
         for (const obj of jsonObjects) {
+            // 😄 تفاعل الإيموجي — لمسة بشرية: يقدر يتفاعل فقط بلا كلام،
+            // أو يتفاعل ويرد معه. يُعالج قبل كل شيء حتى في وضع المحادثة.
+            if (obj.tool === 'react' || obj.react) {
+                const emoji = String((obj.params && (obj.params.emoji || obj.params.emote)) || obj.react || '').trim();
+                if (isValidReactEmoji(emoji)) {
+                    reactEmojis.push(emoji);
+                    allResults.push(`[REACT_ADDED: ${emoji}]`);
+                    if (obj.reply) finalReplyText = obj.reply;
+                } else {
+                    allResults.push(JSON.stringify(_err('إيموجي غير صالح — استخدم إيموجي يونيكود قياسي أو <اسم:ID> من إيموجيات السيرفر')));
+                }
+                continue;
+            }
+
             if (obj.reply && !obj.tool && !obj.file && !obj.action) {
                 finalReplyText = obj.reply;
                 continue;
@@ -816,9 +939,21 @@ async function runAgent(
             allResults.push(`[UNKNOWN_TOOL: ${tool}]`);
         }
 
+        // 😄 رد إيموجي فقط — بلا أي نص (لمسة بشرية: تفاعل بلا كلام)
+        if (reactEmojis.length && !finalReplyText && allResults.every(r => r.startsWith('[REACT_ADDED'))) {
+            return {
+                reply      : null,
+                react      : reactEmojis.slice(0, 3),
+                newSid     : curSid,
+                newPmid    : curPmid,
+                filesToSend: filesToSend,
+            };
+        }
+
         if (finalReplyText) {
             return {
                 reply      : finalReplyText,
+                react      : reactEmojis.slice(0, 3),
                 newSid     : curSid,
                 newPmid    : curPmid,
                 filesToSend: filesToSend,
@@ -840,6 +975,7 @@ async function runAgent(
 
             return {
                 reply      : raw,
+                react      : reactEmojis.slice(0, 3),
                 newSid     : curSid,
                 newPmid    : curPmid,
                 filesToSend: filesToSend,
@@ -855,6 +991,7 @@ async function runAgent(
         reply      : chatMode
             ? 'طوويلة هالموضوع عليّ 😅 قسّمها لي رسائل أصغر وأكمل معك'
             : '⚠️ وصلت للحد الأعلى من خطوات الأدوات. نفذت ما استطعت، وإذا بقي جزء من الطلب أعد إرساله لأكمل من آخر نتيجة.',
+        react      : reactEmojis.slice(0, 3),
         newSid     : curSid,
         newPmid    : curPmid,
         filesToSend: [],
@@ -864,5 +1001,7 @@ async function runAgent(
 module.exports = {
     extractJsonObjects,
     runAgent,
+    isIgnoreSignal,
+    isValidReactEmoji,
     CHAT_MODE_TOOLS,
 };

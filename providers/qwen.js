@@ -432,7 +432,8 @@ const qwenProvider = {
 
     /** حقول نوافذ الإنشاء/التعديل الخاصة بهذا المزود */
     modalFields: [
-        { id: 'qwen_token', label: 'Qwen Token (Bearer من chat.qwen.ai)', style: 'short', required: true },
+        // 🔑 v7.11: عدة توكنات مسموحة — كل توكن في سطر أو مفصول بـ | أو ,
+        { id: 'qwen_token', label: 'Qwen Token (عدة توكنات كل بسطر)', style: 'paragraph', required: true },
         { id: 'qwen_model', label: 'معرّف النموذج (اختياري — افتراضي qwen3.8-max)', style: 'short', required: false },
     ],
 
@@ -448,8 +449,9 @@ const qwenProvider = {
 
     /** سطر حالة مختصر لعرضه في اللوحة */
     describe(config = {}) {
+        const { describeKeys } = require('./index');
         const model = config.qwen_model || DEFAULT_MODEL;
-        return `Token: ${config.qwen_token ? 'موجود ✅' : 'مفقود ❌'} | Model: ${model}`;
+        return `Token: ${describeKeys(this.id, config)} | Model: ${model}`;
     },
 
     /**

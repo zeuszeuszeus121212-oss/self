@@ -303,24 +303,41 @@ async function getOverview() {
     const col = registryCol();
     if (!col) return [];
     let docs = [];
-    try { docs = await col.find({}).sort({ joined_at: -1 }).limit(100).toArray(); } catch (_) { return []; }
+    try { docs = await col.find({}).sort({ joined_at: -1 }).limit(500).toArray(); } catch (_) { return []; }
 
+    // ⚡ v7.11: إحصائيات النشاط كلها باستعلام تجميعي واحد بدل 2×N استعلام —
+    // كانت الإطالة هنا تجعل /الرصد يتجاوز مهلة ديسكورد 3 ثوان فيظهر بالأحمر.
     const actCol = activityCol();
-    const out = [];
-    for (const d of docs) {
-        let lastActivity = null;
-        let totalChats = 0;
-        if (actCol) {
+    const stats = new Map(); // guild_id -> { total, last }
+    if (actCol) {
+        try {
+            const agg = await actCol.aggregate([
+                { $group: { _id: '$guild_id', total: { $sum: 1 }, last: { $max: '$created_at' } } },
+            ]).toArray();
+            for (const row of (agg || [])) {
+                stats.set(String(row._id), { total: row.total || 0, last: row.last || null });
+            }
+        } catch (_) {
+            // تجميع غير مدعوم؟ رجوع آمن للاستعلام الفردي (نفس النتيجة أبطأ)
             try {
-                lastActivity = await actCol.findOne({ guild_id: d.guild_id }, { sort: { created_at: -1 } });
-                totalChats = await actCol.countDocuments({ guild_id: d.guild_id });
+                const gids = docs.map(d => d.guild_id);
+                for (const gid of gids) {
+                    const last = await actCol.findOne({ guild_id: gid }, { sort: { created_at: -1 } }).catch(() => null);
+                    const total = await actCol.countDocuments({ guild_id: gid }).catch(() => 0);
+                    stats.set(gid, { total, last });
+                }
             } catch (_) {}
         }
+    }
+
+    const out = [];
+    for (const d of docs) {
+        const s = stats.get(String(d.guild_id)) || { total: 0, last: null };
         const live = liveActivity.get(d.guild_id) || null;
         out.push({
             ...d,
-            total_chats: totalChats,
-            last_activity: lastActivity,
+            total_chats: s.total,
+            last_activity: s.last ? { created_at: s.last } : null,
             live: live && (Date.now() - live.at < 5 * 60 * 1000) ? live : null,
         });
     }

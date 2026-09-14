@@ -725,7 +725,7 @@ function qwenAccountBadge(acc) {
     return String(acc.status || '—');
 }
 
-async function renderRadar(manager) {
+async function renderRadar(manager, page = 0) {
     const guildRegistry = require('./guildRegistry');
     const qwenAccounts = require('./qwenAccounts');
     const rows = await guildRegistry.getOverview();
@@ -742,30 +742,40 @@ async function renderRadar(manager) {
         ]))) };
     }
 
+    // 📄 ترقيم الصفحات (v7.11): 8 سيرفرات لكل صفحة — الصفحة الكاملة تبقى
+    // تحت سقف نص ديسكورد مهما كبر عدد السيرفرات المسجلة.
+    const PER_PAGE = 8;
+    const pages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
+    const safePage = Math.min(Math.max(Number(page) || 0, 0), pages - 1);
+    const pageRows = rows.slice(safePage * PER_PAGE, safePage * PER_PAGE + PER_PAGE);
+
+    // ⚡ دفعة حسابات Qwen لكل السيرفرات المعروضة باستعلام واحد
+    const accs = await qwenAccounts.describeGuildAccounts(pageRows.map(g => g.guild_id)).catch(() => new Map());
+
     const lines = [
         `**${ICONS.radar} العلم التام عن بوتاتك:** ${activeCount} سيرفر نشط من أصل ${rows.length} مسجل.`,
+        `📄 صفحة **${safePage + 1}/${pages}**`,
         '',
     ];
 
-    for (const g of rows.slice(0, 15)) {
+    for (const g of pageRows) {
         const state = g.left ? '🚪 خرج' : (g.live ? '🟢 يتكلم معه الآن' : '🟢 موجود');
         lines.push(`**${g.left ? '『خرج』' : '🏰'} ${g.name}** — ${state}`);
         lines.push(`   🆔 \`${g.guild_id}\` • 👥 ${g.member_count ?? '—'} عضو • 📅 انضم: ${fmtDate(g.joined_at)}`);
-        lines.push(`   👤 أضافه: ${g.added_by_tag ? `**@${g.added_by_tag}**` : 'غير معروف'} (${g.added_by_id ? `\`${g.added_by_id}\`` : '—'})`);
-        lines.push(`   💬 محادثات مسجلة: **${g.total_chats ?? 0}** • آخر نشاط: ${g.last_activity ? fmtDate(g.last_activity.created_at) : 'لا شيء بعد'}`);
-        if (g.live) lines.push(`   🔴 الآن: **@${g.live.username}** في #${g.live.channelName} مع ${g.live.agentName || 'وكيل'}`);
-        const acc = await qwenAccounts.describeGuildAccount(g.guild_id);
+        lines.push(`   👤 أضافه: ${g.added_by_tag ? `**@${g.added_by_tag}**` : 'غير معروف'}${g.added_by_id ? ` (\`${g.added_by_id}\`)` : ''}`);
+        lines.push(`   💬 محادثات مسجلة: **${g.total_chats ?? 0}** • آخر نشاط: ${g.last_activity ? fmtDate(g.last_activity.created_at) : 'لا شيء بعد'}${g.live ? `\n   🔴 الآن: **@${g.live.username}** في #${g.live.channelName} مع ${g.live.agentName || 'وكيل'}` : ''}`);
+        const acc = accs.get(String(g.guild_id));
         lines.push(`   🌐 Qwen: ${qwenAccountBadge(acc)}`);
         lines.push('');
     }
 
-    if (rows.length > 15) lines.push(`*…و${rows.length - 15} سيرفر آخر — استخدم أمر /الرصد من جديد بعد المراجعة أو لاحقاً.*`);
-
     const buttons = [];
-    for (const g of rows.filter(r => !r.left).slice(0, 4)) {
+    for (const g of pageRows.filter(r => !r.left).slice(0, 4)) {
         buttons.push(button(`${DASH_PREFIX}:radar_guild:${g.guild_id}`, trim(g.name, 25), ButtonStyle.Secondary, '🏰'));
     }
     buttons.push(button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Primary, ICONS.refresh));
+    buttons.push(button(`${DASH_PREFIX}:radar_page:${safePage - 1}`, 'السابق', ButtonStyle.Secondary, '⬅️', safePage <= 0));
+    buttons.push(button(`${DASH_PREFIX}:radar_page:${safePage + 1}`, 'التالي', ButtonStyle.Secondary, '➡️', safePage >= pages - 1));
     buttons.push(button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back));
 
     const emb = embed('🛰️ لوحة الرصد — العلم التام', linesBlock(lines), COLORS.live);
@@ -892,7 +902,17 @@ async function renderSystem(manager) {
 }
 
 async function updateInteraction(interaction, payload) {
-    if (interaction.isChatInputCommand()) return interaction.reply(payload);
+    if (interaction.isChatInputCommand()) {
+        // 🕐 v7.11: الصفحات الثقيلة (استعلامات قاعدة بيانات) قد تتجاوز مهلة ديسكورد
+        // 3 ثوان — الرد المؤجل أولاً ثم التعديل يمنع الخطأ الأحمر تماماً.
+        if (interaction.replied || interaction.deferred) return interaction.editReply(payload).catch(() => interaction.followUp(payload).catch(() => {}));
+        try {
+            await interaction.deferReply();
+        } catch (_) {
+            return interaction.reply(payload).catch(() => {});
+        }
+        return interaction.editReply(payload).catch(() => {});
+    }
     if (interaction.isStringSelectMenu() || interaction.isButton() || interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu()) return interaction.update(payload);
     return interaction.reply(payload);
 }
@@ -1282,6 +1302,11 @@ async function handleDashboardInteraction(interaction, manager) {
             await interaction.showModal(providerAddModal());
             return true;
         }
+        // 🕐 v7.11: تأجيل الرد فوراً قبل أي استعلام — الحماية من مهلة ديسكورد 3 ثوان
+        // (كانت /الرصد تتجاوزها فتظهر رسالة حمراء — الآن لا صفحة تتجاوزها أبداً)
+        if (!interaction.replied && !interaction.deferred) {
+            await interaction.deferReply().catch(() => {});
+        }
         if (commandRoute === 'providers') {
             return updateInteraction(interaction, await renderProviders());
         }
@@ -1291,7 +1316,7 @@ async function handleDashboardInteraction(interaction, manager) {
             const mode = interaction.options.getString('mode', true); // 'credits' أو 'no_credits'
             const agents = await cfg.agents_col.find({}).sort({ name: 1 }).limit(25).toArray();
             if (!agents.length) {
-                await interaction.reply({ ...v2Payload(embed('❌ لا يوجد وكلاء', linesBlock(['لا يوجد وكلاء في قاعدة البيانات.']), COLORS.danger)), flags: V2_EPHEMERAL_FLAGS });
+                await updateInteraction(interaction, { ...v2Payload(embed('❌ لا يوجد وكلاء', linesBlock(['لا يوجد وكلاء في قاعدة البيانات.']), COLORS.danger)), flags: V2_EPHEMERAL_FLAGS });
                 return true;
             }
             const emb = embed('🔧 تشغيل يدوي', linesBlock([
@@ -1305,7 +1330,7 @@ async function handleDashboardInteraction(interaction, manager) {
                     .setPlaceholder('اختر الوكيل')
                     .addOptions(agents.map(agentOption)),
             );
-            await interaction.reply({ ...v2Payload(withRows(emb, [row])) });
+            await updateInteraction(interaction, { ...v2Payload(withRows(emb, [row])) });
             return true;
         }
 
@@ -1864,6 +1889,7 @@ async function handleDashboardInteraction(interaction, manager) {
     if (parts[1] === 'system') return updateInteraction(interaction, await renderSystem(manager));
     if (parts[1] === 'radar') return updateInteraction(interaction, await renderRadar(manager));
     if (parts[1] === 'radar_refresh') return updateInteraction(interaction, await renderRadar(manager));
+    if (parts[1] === 'radar_page') return updateInteraction(interaction, await renderRadar(manager, parseInt(parts[2], 10) || 0));
     if (parts[1] === 'radar_guild') return updateInteraction(interaction, await renderRadarGuild(manager, parts[2]));
     if (parts[1] === 'radar_qwen') return updateInteraction(interaction, await handleRadarQwenRetry(manager, parts[2]));
     if (parts[1] === 'activity_notify_toggle') {

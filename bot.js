@@ -396,6 +396,24 @@ async function bootAgents() {
     require('./guildRegistry').startRegistryTimers();
     // 🌐 حسابات Qwen التلقائية — مجدول التجديد (v7.9)
     require('./qwenAccounts').startQwenAccountTimers();
+
+    // ⏰ محرك تذكيرات احتياطي من المدير (v7.11 — طلب المالك):
+    // تذكير وكيل متوقف/فاشل لا يموت معه — المدير يرسله مكانه
+    // (فلتر shouldHandle يستثني الوكلاء الذين يعمل محركهم الخاص الآن)
+    try {
+        const { startReminderEngine } = require('./reminders');
+        const managerReminderEngine = startReminderEngine({
+            client: managerClient,
+            shouldHandle: (aid) => {
+                const r = runtimes.get(String(aid));
+                return !r; // لا يوجد runtime حي لهذا الوكيل — التذكير مسؤولية المدير
+            },
+        });
+        module.exports.__managerReminderEngine = managerReminderEngine;
+        console.log('⏰ محرك تذكيرات المدير الاحتياطي يعمل (يغطي الوكلاء المتوقفين)');
+    } catch (e) {
+        console.error('❌ فشل بدء محرك تذكيرات المدير الاحتياطي:', e.message);
+    }
 }
 
 module.exports = {

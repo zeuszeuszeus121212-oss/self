@@ -241,6 +241,45 @@ async function buildMemoryContext({ agentId, guildId, userId } = {}) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════
+//  🧷 الحفظ التلقائي الحتمي — «تذكر أن…» يعمل مهما فعل النموذج (v7.11)
+//  المستخدم قال «تذكر»؟ لا نترك الأمر للنموذج — النظام يحفظ مباشرة.
+// ═══════════════════════════════════════════════════════════
+
+// أنماط الطلب الصريح بالحفظ: تذكر أن / اذكر أن / احفظ أن / لا تنسى أن...
+const AUTO_CAPTURE_RE = /(?:^|\s)(?:تذكر|اذكر|تذكّر|احفظ|سجل|خليك\s+فاكر|لا\s+تنسى?|لا\s+تنسَ)\s+(?:أن|ان|إن|اني|أنني|إني|اني)\s+(.+)/i;
+
+/**
+ * التقاط الحفظ الصريح من رسالة المستخدم — حتمي وصامت.
+ * يضمن أن «تذكر أنني...» يُحفظ فعلاً حتى لو لم يستدعِ النموذج أداة remember.
+ * @returns {{saved: number, texts: string[]}} ما حُفظ فعلاً (dedup يمنع التكرار)
+ */
+async function maybeAutoCapture({ agentId, guildId, userId, text } = {}) {
+    const out = { saved: 0, texts: [] };
+    try {
+        const raw = String(text || '').trim();
+        if (!raw || raw.length > 2000 || !userId) return out;
+        const m = raw.match(AUTO_CAPTURE_RE);
+        if (!m || !m[1]) return out;
+        const content = m[1].trim().slice(0, 300);
+        if (!content) return out;
+        const r = await rememberFact({
+            agentId,
+            guildId,
+            userId,
+            content,
+            kind   : 'fact',
+            tags   : ['تلقائي'],
+        });
+        if (r && r.ok) {
+            out.saved = 1;
+            out.texts.push(content);
+            console.log(`🧷 [Memory] حفظ تلقائي حتمي: «${content.slice(0, 60)}»`);
+        }
+    } catch (_) {}
+    return out;
+}
+
 /** إحصائيات ذاكرة وكيل (للوحة التحكم) */
 async function memoryStats(agentId) {
     const c = col();
@@ -272,6 +311,7 @@ module.exports = {
     recallFacts,
     forgetFacts,
     buildMemoryContext,
+    maybeAutoCapture,
     memoryStats,
     clearAgentMemory,
     // داخلية للاختبارات

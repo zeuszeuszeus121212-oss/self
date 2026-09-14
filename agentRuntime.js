@@ -86,6 +86,8 @@ const { enqueueChannelTask } = require('./channelQueue');
 const qwenAccounts = require('./qwenAccounts');
 // 🛰️ سجل السيرفرات والنشاط — العلم التام للمالك (v7.9)
 const guildRegistry = require('./guildRegistry');
+// 🧷 ذاكرة القناة الدائمة — تنجو من تبديل المزود/المفتاح (v7.11)
+const channelHistory = require('./channelHistory');
 
 const {
     createDiscordClient,
@@ -758,7 +760,7 @@ client.on('interactionCreate', async (interaction) => {
             const mode = interaction.options.getString('وضع') || 'default';
             const thinking = (interaction.options.getString('تفكير') || 'off') === 'on';
 
-            // إعادة تعيين جلسة القناة في RAM و DB
+            // إعادة تعيين جلسة القناة في RAM و DB + ذاكرة القناة الدائمة
             const key = `${guildId}_${targetChanId}`;
             await sessionLock.acquire(() => {
                 channel_sessions.set(key, {
@@ -769,6 +771,8 @@ client.on('interactionCreate', async (interaction) => {
                 });
             });
             await db_reset_channel_session(guildId, targetChanId, agentId);
+            // 🧷 تصفير ذاكرة القناة الدائمة أيضاً — بداية حوار نظيف فعلاً
+            await channelHistory.clearChannel({ agentId, guildId, channelId: targetChanId }).catch(() => {});
 
             const chName = chObj.name || `ID:${targetChanId}`;
             const modeLabel = mode === 'expert' ? '🧠 خبير' : '🗨️ عادي';
@@ -806,6 +810,7 @@ client.on('interactionCreate', async (interaction) => {
             }
             await sessionLock.acquire(() => channel_sessions.delete(`${guild.id}_${ch.id}`));
             await db_reset_channel_session(guild.id, ch.id, agentId);
+            await channelHistory.clearChannel({ agentId, guildId: guild.id, channelId: ch.id }).catch(() => {}); // 🧷 ذاكرة القناة تُصفّر معها
             await interaction.reply({ content: `✅ تم حذف/تصفير محادثة **#${ch.name}** لهذا الوكيل.` });
         }
 
@@ -965,13 +970,15 @@ client.on('interactionCreate', async (interaction) => {
             runtimeSettings.provider = targetId;
             runtimeSettings.providerConfig = targetCfg;
 
-            // جلسات القنوات من المزود القديم لا تصلح للمزود الجديد — تصفير حي
+            // جلسات المزود القديم لا تصلح للمزود الجديد — تصفير حي.
+            // 🧷 v7.11: ذاكرة القناة الدائمة لا تُمس — الحوار يكمل من حيث توقف
+            // على المزود الجديد عبر الحقن التلقائي لآخر أحداث القناة.
             channel_sessions.clear();
 
             await interaction.reply({
                 content: `✅ تم تبديل مزود الذكاء الاصطناعي إلى ${target.emoji} **${target.label}**\n` +
                     `${target.describe(targetCfg)}\n` +
-                    `🔄 تم تصفير جلسات القنوات المحفوظة في الذاكرة (المحادثات القديمة تخص المزود السابق).` +
+                    `🧷 ذاكرة القنوات محفوظة بالكامل — الحوار يكمل من حيث توقف على المزود الجديد بدون أي نسيان.` +
                     incompleteNote,
             });
         }
@@ -1295,6 +1302,11 @@ client.on('messageCreate', async (message) => {
         if (memCtx) botContext = `${botContext}\n\n${memCtx}`;
     } catch (_) {}
 
+    // 🧷 الحفظ التلقائي الحتمي — «تذكر أنني...» يُحفظ فوراً من النظام نفسه
+    // حتى لو لم يستدعِ النموذج أداة remember (ضمان عمل الذاكرة — v7.11)
+    memory.maybeAutoCapture({ agentId, guildId: message.guild.id, userId: author.id, text: content })
+        .catch(() => {});
+
     // 🎭 ما يلي (ساعة الرمل + الجلسة + runAgent + الرد) داخل قائمة القناة — بالترتيب الصارم
     const queued = enqueueChannelTask(chQueueKey, async () => {
         // بدأت دورتي — أزل 👀 (لو كانت علامة انتظار) وأظهر ⏳
@@ -1374,13 +1386,77 @@ client.on('messageCreate', async (message) => {
                 );
             }
 
-            const replyText = result.reply || '✅ تم.';
+            // ═══════════════════════════════════════════════════
+            //  🙈 حرية التجاهل — النموذج اختار عدم الرد بشخصيته (v7.11)
+            //  لا يُرسل أي رد إطلاقاً — فقط إيموجي صامت على رسالة المستخدم
+            //  يدل على أن النموذج رأى الرسالة وقرر ألا يرد عليها.
+            // ═══════════════════════════════════════════════════
+            if (result.ignored) {
+                // 🧷 سجل الرسالة المتجاهلة في ذاكرة القناة (بصمة: تجاهلتُها عمداً)
+                channelHistory.appendMessage({
+                    agentId,
+                    guildId: message.guild.id,
+                    channelId: message.channel.id,
+                    role: 'user',
+                    content,
+                    userId: author.id,
+                    username: displayName,
+                    ignored: true,
+                }).catch(() => {});
+
+                guildRegistry.recordActivity({
+                    agentId,
+                    agentName,
+                    guildId    : message.guild.id,
+                    guildName  : message.guild.name,
+                    channelId  : message.channel.id,
+                    channelName: message.channel.name,
+                    userId     : author.id,
+                    username   : author.username,
+                }).catch(() => {});
+
+                try {
+                    await message.react('🙈');
+                    await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
+                } catch (_) {}
+                return;
+            }
+
+            // 🧷 ذاكرة القناة الدائمة — رسالة المستخدم تُسجل قبل الرد
+            await channelHistory.appendMessage({
+                agentId,
+                guildId: message.guild.id,
+                channelId: message.channel.id,
+                role: 'user',
+                content,
+                userId: author.id,
+                username: displayName,
+            }).catch(() => {});
+
+            // 😄 تفاعل الإيموجي — لمسة بشرية (قد يكون الرد كله إيموجي بلا نص)
+            if (Array.isArray(result.react) && result.react.length) {
+                for (const em of result.react) {
+                    await message.react(em).catch(() => {});
+                }
+            }
+
+            const replyText = result.reply || '';
             const chunks = [];
             for (let i = 0; i < replyText.length; i += 1990) {
                 chunks.push(replyText.slice(i, i + 1990));
             }
 
             const files = (result.filesToSend || []).map(fp => ({ attachment: fp, name: path.basename(fp) }));
+
+            // 🧍 إيقاع بشري طبيعي (v7.11): وقت قراءة لرسالتك + وقت كتابة للرد —
+            // بلا typing وهمي، فقط فاصل زمني طبيعي بين وصولك وردّه كأنه إنسان.
+            if (chunks.length) {
+                const jitter = (v) => Math.round(v * (0.75 + Math.random() * 0.5));
+                const readingMs = Math.min(2000, jitter(content.length * 10));
+                const typingMs = Math.min(4500, jitter((replyText.length || 40) * 8));
+                const delay = Math.min(7000, 500 + readingMs + typingMs);
+                await new Promise(r => setTimeout(r, delay));
+            }
 
             if (chunks.length > 0) {
                 // إرسال الجزء الأول مع الملفات إن وجدت
@@ -1392,6 +1468,17 @@ client.on('messageCreate', async (message) => {
                 for (let i = 1; i < chunks.length; i++) {
                     await message.channel.send(chunks[i]);
                 }
+
+                // 🧷 ذاكرة القناة الدائمة — رد الوكيل يُسجل بعد إرساله فعلاً
+                channelHistory.appendMessage({
+                    agentId,
+                    guildId: message.guild.id,
+                    channelId: message.channel.id,
+                    role: 'assistant',
+                    content: replyText,
+                    userId: null,
+                    username: botName,
+                }).catch(() => {});
             } else if (files.length > 0) {
                 await message.reply({ files });
             }

@@ -177,7 +177,7 @@ const openaiProvider = {
         // ⚠️ 4000 = حد ديسكورد — بعض البروكسيات تأخذ كوكيز كاملة كمفتاح (مثل Gemini cookies)
         // المفتاح اختياري في النافذة: يُرسل كملف/لصق من زر «الكوكيز من ملف» في صفحة الإعدادات
         // بعد الإنشاء (نفس تدفق كوكيز Gemini) — فلا يفشل إنشاء الوكيل ب«المفتاح مفقود».
-        { id: 'openai_api_key', label: 'API Key — أو من ملف لاحقاً', style: 'short', required: false, maxLength: 4000 },
+        { id: 'openai_api_key', label: 'API Key (عدة مفاتيح كل واحد بسطر)', style: 'paragraph', required: false, maxLength: 4000 },
         { id: 'openai_model', label: 'اسم النموذج (مثل gpt-4o-mini)', style: 'short', required: true },
     ],
 
@@ -190,8 +190,9 @@ const openaiProvider = {
     },
 
     describe(config = {}) {
+        const { describeKeys } = require('./index');
         const base = config.openai_base_url || DEFAULT_BASE_URL;
-        return `Base: ${base} | Model: ${config.openai_model || '—'} | Key: ${config.openai_api_key ? 'موجود ✅' : 'مفقود ❌'}`;
+        return `Base: ${base} | Model: ${config.openai_model || '—'} | Key: ${describeKeys(this.id, config)}`;
     },
 
     /**

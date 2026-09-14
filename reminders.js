@@ -213,13 +213,16 @@ async function cancelReminder({ agentId, userId, id } = {}) {
 /**
  * بدء محرك التذكيرات لهذا الوكيل
  * @param {object} opts
- *   agentId - معرف الوكيل
+ *   agentId - معرف الوكيل (يُتجاهل مع shouldHandle)
  *   client  - عميل ديسكورد الخاص بالوكيل (الإرسال عبره)
  *   intervalMs - فترة المسح (للاختبارات)
+ *   shouldHandle - (اختياري v7.11) فلتر: (agentId) => boolean — للفحص عبر كل التذكيرات
+ *                  يُستخدم من بوت المدير ليغطي تذكيرات الوكلاء المتوقفين فقط.
  * @returns {{stop: Function, tick: Function}} tick للاختبارات
  */
-function startReminderEngine({ agentId, client, intervalMs = SCAN_INTERVAL_MS } = {}) {
+function startReminderEngine({ agentId, client, intervalMs = SCAN_INTERVAL_MS, shouldHandle = null } = {}) {
     const running = { stopped: false };
+    const filterByAgent = typeof shouldHandle !== 'function';
 
     async function tick(now = new Date()) {
         if (running.stopped) return { fired: 0 };
@@ -228,11 +231,15 @@ function startReminderEngine({ agentId, client, intervalMs = SCAN_INTERVAL_MS } 
 
         let due = [];
         try {
-            due = await c.find({ agent_id: String(agentId || 'default'), active: true }).toArray();
+            due = filterByAgent
+                ? await c.find({ agent_id: String(agentId || 'default'), active: true }).toArray()
+                : await c.find({ active: true }).toArray();
         } catch (_) { return { fired: 0 }; }
 
         let fired = 0;
         for (const doc of (due || [])) {
+            // فلتر المدير: هذا الوكيل يعمل حالياً؟ محركه الخاص يتكفل بتذكيراته — تجاوز
+            if (!filterByAgent && !shouldHandle(String(doc.agent_id || ''))) continue;
             const dueAt = new Date(doc.due_at).getTime();
             if (isNaN(dueAt)) continue;
             const isDue = dueAt <= now.getTime();
@@ -274,20 +281,33 @@ async function deactivate(c, doc, reason) {
     } catch (_) {}
 }
 
-/** إرسال التذكير عبر عميل الوكيل — حماية كاملة من الأخطاء */
+/** إرسال التذكير عبر عميل الوكيل — حماية كاملة من الأخطاء + احتياطي الخاص (DM) */
 async function deliverReminder(client, doc, lateBy = 0) {
+    const mention = doc.user_id ? `<@${doc.user_id}>` : '';
+    const lateNote = lateBy > 5 * 60_000 ? ` (متأخر ${Math.round(lateBy / 60_000)} دقيقة — البوت كان غير متصل)` : '';
+    const msg = `⏰ **تذكير**${lateNote}\n${mention}\n${doc.text}`;
     try {
         const channel = await client.channels.fetch(String(doc.channel_id)).catch(() => null);
-        if (!channel || typeof channel.send !== 'function') return false;
-        const mention = doc.user_id ? `<@${doc.user_id}>` : '';
-        const lateNote = lateBy > 5 * 60_000 ? ` (متأخر ${Math.round(lateBy / 60_000)} دقيقة — البوت كان غير متصل)` : '';
-        const msg = `⏰ **تذكير**${lateNote}\n${mention}\n${doc.text}`;
-        await channel.send(msg.slice(0, 1900));
-        return true;
+        if (channel && typeof channel.send === 'function') {
+            await channel.send(msg.slice(0, 1900));
+            return true;
+        }
     } catch (e) {
-        console.error(`[Reminder] فشل إرسال تذكير ${doc._id}:`, e.message);
-        return false;
+        console.error(`[Reminder] فشل إرسال تذكير ${doc._id} في القناة:`, e.message);
     }
+    // 🪂 احتياطي: فشلت القناة (محذوفة/بلا وصول)؟ رسالة خاصة للمستخدم حتى لا يضيع التذكير أبداً
+    try {
+        if (doc.user_id && typeof client.users?.fetch === 'function') {
+            const user = await client.users.fetch(String(doc.user_id)).catch(() => null);
+            if (user && typeof user.send === 'function') {
+                await user.send(`⏰ **تذكير**${lateNote}\n${doc.text}`.slice(0, 1900));
+                return true;
+            }
+        }
+    } catch (e) {
+        console.error(`[Reminder] فشل احتياطي الخاص للتذكير ${doc._id}:`, e.message);
+    }
+    return false;
 }
 
 module.exports = {

@@ -59,7 +59,7 @@ async function run() {
         ok(`2) العشوائية سليمة — ${seen.size} وجه مختلف ظهر في 200 سحبة`);
     }
 
-    // ── 3) مزود مفرد يفشل → محاولة صامتة واحدة ثم وجه بلا تفاصيل + تقرير كامل ──
+    // ── 3) مزود مفرد يفشل → محادثتان جديدتان إضافيتان (سلّم v7.11) ثم وجه بلا تفاصيل + تقرير كامل ──
     {
         errorReporter._resetForTests();
         const reports = [];
@@ -80,7 +80,7 @@ async function run() {
             { userId: 'U9', username: 'مستخدم', channelId: 'c9' },
         );
 
-        assert.strictEqual(calls, 2, `محاولة صامتة واحدة قبل الاستسلام (استدعاءان): ${calls}`);
+        assert.strictEqual(calls, 3, `سلّم v7.11: محاولة أولى + محادثتا جديدتان قبل الاستسلام (3 استدعاءات): ${calls}`);
         assert.ok(errorReporter.isPublicFace(result.reply), `الرد العام وجه بشري: ${result.reply}`);
         for (const word of FORBIDDEN_IN_PUBLIC) {
             assert.ok(!result.reply.includes(word), `تسريب «${word}» في الرد العام!`);
@@ -97,7 +97,7 @@ async function run() {
         assert.ok(msg.includes('U9') && msg.includes('مستخدم'), 'المتفاعل محدد في التقرير');
 
         delete providers.PROVIDERS.fake_alone;
-        ok('3) مزود مفرد: محاولة صامتة + وجه عام نظيف + تقرير مفصل وصل');
+        ok('3) مزود مفرد: محادثتان جديدتان + وجه عام نظيف + تقرير مفصل وصل');
     }
 
     // ── 4) تهدئة التكرار — نفس الخطأ لا يغرق القناة ──
@@ -144,7 +144,7 @@ async function run() {
             { agentId: 'ER2', provider: 'fake_quiet', providerConfig: {} },
             { userId: 'U1' },
         );
-        assert.strictEqual(calls, 2, 'المحاولة الصامتة تعمل حتى بلا قناة إشعارات');
+        assert.strictEqual(calls, 3, 'سلّم v7.11 يعمل حتى بلا قناة إشعارات (3 استدعاءات)');
         assert.ok(errorReporter.isPublicFace(result.reply), 'الوجه العام يعمل بلا مُخبِر');
         delete providers.PROVIDERS.fake_quiet;
         errorReporter._resetForTests();

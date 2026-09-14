@@ -22,7 +22,9 @@ const deepseekProvider = {
 
     /** حقول نوافذ الإنشاء/التعديل الخاصة بهذا المزود */
     modalFields: [
-        { id: 'deepseek_token', label: 'DeepSeek Token', style: 'short', required: true },
+        // 🔑 v7.11: يمكن إدخال أكثر من توكن في نفس الحقل (كل توكن في سطر، أو فاصله بـ | أو ,) —
+        // يتبدل المحرك تلقائياً للمفتاح التالي عند فشل الحالي.
+        { id: 'deepseek_token', label: 'DeepSeek Token (عدة توكنات كل بسطر)', style: 'paragraph', required: true },
     ],
 
     validate(config = {}) {
@@ -32,7 +34,8 @@ const deepseekProvider = {
     },
 
     describe(config = {}) {
-        return `Token: ${config.deepseek_token ? 'موجود ✅' : 'مفقود ❌'} | POW: مفعّل (نفس السلوك الأصلي)`;
+        const { describeKeys } = require('./index');
+        return `Token: ${describeKeys(this.id, config)} | POW: مفعّل (نفس السلوك الأصلي)`;
     },
 
     /**

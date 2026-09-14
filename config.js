@@ -87,6 +87,7 @@ let providers_col = null; // 🗄️ المزودون المحفوظون (2.5 �
 let qwen_guild_accounts_col = null; // 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
 let guild_registry_col = null; // 🛰️ سجل السيرفرات التي أُضيف إليها البوت (v7.9)
 let guild_activity_col = null; // 💬 سجل من يتكلم مع البوت وأين ومتى (v7.9)
+let channel_history_col = null; // 🧷 ذاكرة القنوات الدائمة — تنجو من تبديل المزود/المفتاح (v7.11)
 
 /**
  * يقوم بالاتصال بـ MongoDB وتهيئة المتغيرات
@@ -109,6 +110,7 @@ async function connectMongo() {
         qwen_guild_accounts_col = db.collection('qwen_guild_accounts');
         guild_registry_col = db.collection('guild_registry');
         guild_activity_col = db.collection('guild_activity');
+        channel_history_col = db.collection('channel_history');
         console.log('✅ MongoDB متصل بنجاح');
     } catch (err) {
         console.error('❌ فشل الاتصال بـ MongoDB:', err.message);
@@ -202,6 +204,7 @@ module.exports = {
     get qwen_guild_accounts_col() { return qwen_guild_accounts_col; },
     get guild_registry_col() { return guild_registry_col; },
     get guild_activity_col() { return guild_activity_col; },
+    get channel_history_col() { return channel_history_col; },
 
     // RAM Cache
     channel_sessions,

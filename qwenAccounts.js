@@ -345,6 +345,33 @@ async function describeGuildAccount(guildId) {
     }
 }
 
+/**
+ * ⚡ دفعة وثائق حسابات عدة سيرفرات باستعلام واحد (v7.11)
+ * تستخدمها لوحة الرصد بدل استعلام لكل سيرفر — تقضي على تجاوز مهلة الـ3 ثوان.
+ * @param {string[]} guildIds
+ * @returns {Promise<Map<string, object>>} guildId -> وثيقة الحساب المصغرة
+ */
+async function describeGuildAccounts(guildIds = []) {
+    const out = new Map();
+    const ids = (Array.isArray(guildIds) ? guildIds : []).map(String).filter(Boolean);
+    if (!ids.length) return out;
+    const col = accountsCol();
+    if (!col) return out;
+    try {
+        const docs = await col.find({ guild_id: { $in: ids } }).toArray();
+        for (const doc of (docs || [])) {
+            out.set(String(doc.guild_id), {
+                status: doc.status,
+                email: doc.email,
+                created_at: doc.created_at,
+                expires_at: doc.expires_at,
+                last_error: doc.last_error || '',
+            });
+        }
+    } catch (_) {}
+    return out;
+}
+
 /** كل حسابات السيرفرات — للوحة الرصد */
 async function listGuildAccounts() {
     const col = accountsCol();
@@ -386,6 +413,7 @@ module.exports = {
     ensureGuildAccount,
     getGuildQwenToken,
     describeGuildAccount,
+    describeGuildAccounts,
     listGuildAccounts,
     sweepAccounts,
     startQwenAccountTimers,

@@ -98,6 +98,73 @@ function extractAllProviderConfigs(agentDoc) {
 }
 
 /**
+ * 🔑 المفاتيح المتعددة لكل مزود (v7.11 — طلب المالك):
+ * المالك يستطيع إدخال أكثر من مفتاح/توكن لنفس المزود في نفس الحقل،
+ * مفصولة بسطر جديد أو «|» (أو «,» للمفاتيح النصية البسيطة — وليس
+ * للكوكيز لأن الكوكيز نفسها تحوي فواصل). عند فشل المزود يستدل
+ * محرك التعافي على المفتاح التالي تلقائياً.
+ */
+
+// حقل الهوية (المفتاح) لكل مزود — ما يدور حوله تبديل المفاتيح
+const AUTH_FIELD = {
+    deepseek: 'deepseek_token',
+    qwen    : 'qwen_token',
+    openai  : 'openai_api_key',
+    gemini  : 'gemini_cookies',
+};
+
+/** الكوكيز حقول حساسة للفاصلة — لا نقسم عليها بالفواصل */
+const COMMA_SAFE_FIELDS = new Set(['deepseek_token', 'qwen_token', 'openai_api_key']);
+
+/**
+ * تقسيم مفاتيح حقل معين باحترام طبيعته (كوكيز أم مفتاح نصي)
+ */
+function splitFieldKeys(fieldId, value) {
+    const raw = String(value ?? '');
+    if (!raw.trim()) return [];
+    let parts = raw.split(/\r?\n|\|/g);
+    if (COMMA_SAFE_FIELDS.has(String(fieldId))) parts = parts.flatMap(p => p.split(/,(?![^(]*\))/g));
+    const keys = parts.map(s => s.trim()).filter(Boolean);
+    return [...new Set(keys)];
+}
+
+/** حقل الهوية لمزود معين */
+function authFieldFor(providerId) {
+    return AUTH_FIELD[String(providerId)] || null;
+}
+
+/**
+ * عدد المفاتيح المتاحة في إعدادات مزود
+ * @returns {number} 0 إن لم يوجد مفتاح، 1 مفتاح واحد، 2+ متعدد
+ */
+function countKeys(providerId, config = {}) {
+    const field = authFieldFor(providerId);
+    if (!field) return 0;
+    return splitFieldKeys(field, config[field]).length;
+}
+
+/** وصف حالة المفاتيح لسطر الحالة */
+function describeKeys(providerId, config = {}) {
+    const n = countKeys(providerId, config);
+    if (!n) return 'مفقود ❌';
+    if (n === 1) return 'موجود ✅';
+    return `موجود ✅ (${n} مفاتيح بديلة 🔑)`;
+}
+
+/**
+ * نسخة إعدادات بمفتاح محدد (بدون تعديل الأصل)
+ * @param {number} keyIdx فهرس المفتاح — 0 هو الأساسي
+ * @returns {object|null} null إن تجاوز الفهرس عدد المفاتيح
+ */
+function withKeyIndex(providerId, config = {}, keyIdx = 0) {
+    const field = authFieldFor(providerId);
+    if (!field) return keyIdx === 0 ? { ...config } : null;
+    const keys = splitFieldKeys(field, config[field]);
+    if (keyIdx >= keys.length) return null;
+    return { ...config, [field]: keys[keyIdx] };
+}
+
+/**
  * بناء سلسلة Fallback للوكيل — الأساسي أولاً ثم البدائل الجاهزة بالترتيب.
  * @param {object} runtime - runtimeSettings للوكيل:
  *   { provider, providerConfig, fallback_enabled, fallback_chain, fallback_configs }
@@ -139,4 +206,11 @@ module.exports = {
     extractProviderConfig,
     extractAllProviderConfigs,
     buildFallbackChain,
+    // 🔑 المفاتيح المتعددة (v7.11)
+    AUTH_FIELD,
+    authFieldFor,
+    splitFieldKeys,
+    countKeys,
+    describeKeys,
+    withKeyIndex,
 };

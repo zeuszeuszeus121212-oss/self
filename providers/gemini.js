@@ -286,7 +286,8 @@ const geminiProvider = {
         // ⚠️ 4000 = الحد الأقصى المطلق لنوافذ ديسكورد — لا يمكن رفعه أبداً.
         // كوكيز أطول من 4000؟ تُرسل كملف من زر «الكوكيز من ملف» في صفحة إعدادات الوكيل (بلا حد فعلي).
         // الحقل اختياري هنا حتى لا يُحجب إنشاء الوكيل، والتحقق الحقيقي يحدث عند التشغيل.
-        { id: 'gemini_cookies', label: 'سطر Cookie كاملاً — أو من ملف لاحقاً', style: 'paragraph', required: false, maxLength: 4000 },
+        // 🔑 v7.11: كل سطر = جلسة بديلة كاملة — يتبدل المحرك للسطر التالي عند فشل الحالي.
+        { id: 'gemini_cookies', label: 'سطر Cookie (كل سطر جلسة بديلة 🔑)', style: 'paragraph', required: false, maxLength: 4000 },
     ],
 
     validate(config = {}) {
@@ -314,7 +315,11 @@ const geminiProvider = {
             const hasSecure = Boolean(parsed['__Secure-1PSID'] || parsed.SID);
             note = hasSecure ? 'كوكيز سليمة الشكل ✅' : 'الشكل غير مكتمل ⚠️';
         }
-        return `Cookies: ${c ? `موجودة ✅ (${Object.keys(parseCookieString(c)).length} مفتاحاً — ${note})` : 'مفقودة ❌'}`;
+        // 🔑 v7.11: الكوكيز نفسها قد تكون مجموعة جلسات متعددة (كل سطر جلسة بديلة)
+        const { countKeys } = require('./index');
+        const sessions = countKeys(this.id, config);
+        const sessionsNote = sessions > 1 ? ` — 🔑 ${sessions} جلسات بديلة` : '';
+        return `Cookies: ${c ? `موجودة ✅ (${Object.keys(parseCookieString(c)).length} مفتاحاً — ${note})` : 'مفقودة ❌'}${sessionsNote}`;
     },
 
     /**
