@@ -107,6 +107,10 @@ async function notify({ type = 'runtime', agentId = null, title = 'Runtime Event
     return true;
 }
 
+// 🕶️ حقن المُخبِر — أخطاء الوكلاء الحقيقية (المفصلة) تصل قناة الإشعارات عبر المدير،
+// بينما القنوات العامة ترى اعتذاراً بشرياً محايداً فقط (سياسة وجه البوكر)
+require('./errorReporter').setManagerNotifier(notify);
+
 async function logAgent(agentId, type, message, extra = {}) {
     const cfg = require('./config');
     try {

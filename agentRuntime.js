@@ -28,6 +28,7 @@ const {
     ApplicationCommandType,
 } = require('discord.js');
 const axios = require('axios');
+const errorReporter = require('./errorReporter'); // 🕶️ وجه البوكر — خصوصية الأخطاء + قناة الإشعارات
 
 // استيراد ملفات المشروع
 const {
@@ -423,6 +424,7 @@ if (!isValidProvider(agentConfig.provider) && agentConfig.provider) {
 // إعدادات runtime قابلة للتحديث الحي عبر /المزود (كائن واحد يُمرر بالمرجع)
 const runtimeSettings = {
     agentId,
+    agentName , // 🕶️ اسم الوكيل الودود — يظهر في تقارير الأخطاء لقناة الإشعارات
     kind        : agentConfig.kind === 'chat' ? 'chat' : 'agent', // 💬 محادثة خالصة / 🤖 وكيل بأدوات
     personality : agentConfig.personality || '',
     provider    : providerId,
@@ -1092,12 +1094,25 @@ client.on('interactionCreate', async (interaction) => {
 
     } catch (error) {
         console.error(`[Slash Error] ${commandName}:`, error);
+        // 🕶️ بلا تفاصيل تقنية في القناة — سطر محايد فقط، والتقرير الكامل لقناة الإشعارات
+        errorReporter.reportAgentError({
+            agentId,
+            agentName,
+            agentKind : runtimeSettings.kind,
+            client,
+            source    : 'slash',
+            guild     : interaction.guild || null,
+            channel   : interaction.channel || null,
+            user      : interaction.user ? { id: interaction.user.id, username: interaction.user.username || '' } : null,
+            error,
+            context   : `أمر /${commandName}`,
+        }).catch(() => {});
         try {
-            const detail = String(error?.message || error).slice(0, 200);
+            const neutral = '⚠️ صار خلل بسيط أثناء تنفيذ الأمر — جرب مرة ثانية.';
             if (!interaction.replied && !interaction.deferred) {
-                await interaction.reply({ content: `⚠️ حدث خطأ أثناء معالجة الأمر: ${detail}` });
+                await interaction.reply({ content: neutral });
             } else {
-                await interaction.followUp({ content: `⚠️ حدث خطأ: ${detail}` });
+                await interaction.followUp({ content: neutral });
             }
         } catch (_) {}
     }
@@ -1379,8 +1394,23 @@ client.on('messageCreate', async (message) => {
 
     } catch (error) {
         console.error('[Agent Error]', error);
+
+        // 🕶️ وجه البوكر: القناة العامة ترى اعتذاراً بشرياً فقط — بلا أي تفاصيل تقنية.
+        // التقرير الكامل (التشخيص + الأثر + الموقع) يذهب لقناة الإشعارات.
+        errorReporter.reportAgentError({
+            agentId,
+            agentName,
+            agentKind : runtimeSettings.kind,
+            client,
+            source    : 'unexpected',
+            guild     : message.guild || null,
+            channel   : message.channel || null,
+            user      : message.author ? { id: message.author.id, username: message.author.username || '' } : null,
+            error,
+        }).catch(() => {});
+
         try {
-            await message.reply(`⚠️ خطأ غير متوقع: ${String(error.message || error).slice(0, 300)}`);
+            await message.reply(errorReporter.randomPublicFace());
         } catch (_) {}
         try {
             await message.react('❌');

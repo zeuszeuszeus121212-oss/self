@@ -135,8 +135,14 @@ async function run() {
         ok('5) حلقة كاملة: فشل أساسي → بديل يجيب + جلسة نظيفة');
     }
 
-    // ── 6) فشل الكل → رسالة خطأ من آخر مزود ──
+    // ── 6) فشل الكل → وجه بشري محايد للقناة العامة + تقرير مفصل لقناة الإشعارات ──
     {
+        // 🕶️ حقن مُخبِر مؤقت لالتقاط التقرير المفصل
+        const errorReporter = require('../errorReporter');
+        errorReporter._resetForTests();
+        const reports = [];
+        errorReporter.setManagerNotifier(async (r) => { reports.push(r); });
+
         providers.PROVIDERS.fake_backup2 = { ...fakeBackup, id: 'fake_backup2', async chat() { throw new Error('البديل الثاني مات'); } };
         const result = await runAgent(
             null, null, 'مرحبا', '', '', 'وكيل', null, null, 'g1', 'default', false, 'member', null,
@@ -146,9 +152,21 @@ async function run() {
             },
             { userId: 'U1' },
         );
-        assert.ok(result.reply.includes('البديل الثاني مات'), `آخر خطأ يُعرض: ${result.reply}`);
+        // القناة العامة: وجه بشري محايد — صفر تفاصيل تقنية
+        assert.ok(errorReporter.isPublicFace(result.reply), `الرد العام يجب أن يكون وجهاً بشرياً: ${result.reply}`);
+        assert.ok(!result.reply.includes('البديل الثاني مات'), 'لا يجوز تسريب رسالة الخطأ للقناة العامة');
+        assert.ok(!result.reply.includes('مزود') && !result.reply.includes('نموذج') && !result.reply.includes('⚠️'), 'لا ذكر لمزود/نموذج/تحذير في الرد العام');
+        // قناة الإشعارات: التقرير الكامل وصل
+        await new Promise(r => setTimeout(r, 60));
+        assert.strictEqual(reports.length, 1, `تقرير واحد للإشعارات: ${reports.length}`);
+        assert.strictEqual(reports[0].type, 'agent_error');
+        assert.strictEqual(reports[0].level, 'error');
+        assert.ok(String(reports[0].message).includes('البديل الثاني مات'), 'التقرير المفصل يحتوي التشخيص الحقيقي');
+        assert.ok(String(reports[0].message).includes('AG1'), 'التقرير يحدد الوكيل');
+        assert.ok(String(reports[0].message).includes('الاحتياطي الوهمي'), 'التقرير يذكر المزود الفاشل');
         delete providers.PROVIDERS.fake_backup2;
-        ok('6) فشل السلسلة كلها → رسالة خطأ واضحة');
+        errorReporter._resetForTests();
+        ok('6) فشل السلسلة كلها → وجه بشري للعامة + تقرير مفصل للإشعارات');
     }
 
     // ── 7) الأساسي يعمل → البديل لا يُلمس إطلاقاً ──

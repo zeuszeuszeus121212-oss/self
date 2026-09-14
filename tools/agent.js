@@ -23,6 +23,7 @@ const {
 } = require('../utils');
 
 const { getProviderOrFallback, extractProviderConfig, buildFallbackChain } = require('../providers');
+const errorReporter = require('../errorReporter'); // 🕶️ وجه البوكر — بلا تسريب تقني للقنوات العامة
 const webTools = require('./webTools');
 const memory   = require('../memory');
 const reminders = require('../reminders');
@@ -251,6 +252,10 @@ async function runAgent(
     
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
+    // 🕶️ سجل فشلالسلسلة — يذهب للتقرير المفصل (قناة الإشعارات) وليس للقناة العامة
+    const chainErrors = [];
+    let silentRetryDone = false; // محاولة صامتة واحدة عند غياب البدائل — للأخطاء العابرة (رد فارغ/مهلة)
+
     // 💬 وضع المحادثة: نفس حلقة الوكيل لكن بأدوات أساسية مقيدة فقط
     // (CHAT_MODE_TOOLS) — لا تنفيذ إداري ولا ويب ولا ملفات ولا معرفة.
     const chatMode = agentKind === 'chat';
@@ -285,9 +290,10 @@ async function runAgent(
             // ── Fallback تلقائي: جرّب المزود التالي في السلسلة ──
             if (chainIdx < chain.length - 1) {
                 const failed = activeProvider;
+                chainErrors.push({ id: failed.id, label: failed.obj?.label || failed.id || 'مزود', message: String(e.message || e).slice(0, 300) });
                 chainIdx++;
                 const next = chain[chainIdx];
-                console.warn(`⚠️ [Fallback] فشل ${failed.obj.label} (${String(e.message).slice(0, 120)}) — التحويل إلى ${next.obj.label}`);
+                console.warn(`⚠️ [Fallback] فشل ${failed.obj?.label || failed.id} (${String(e.message).slice(0, 120)}) — التحويل إلى ${next.obj?.label || next.id}`);
                 track('fallback', { from: failed.obj.id, to: next.obj.id });
                 // جلسات كل مزود مستقلة — نبدأ جلسة جديدة لدى البديل
                 curSid  = null;
@@ -295,9 +301,41 @@ async function runAgent(
                 step--; // إعادة نفس الخطوة على البديل (لا تستهلك محاولة)
                 continue;
             }
+
+            // 🩹 محاولة صامتة واحدة عند غياب البدائل — أخطاء مثل "رد فارغ" غالباً عابرة
+            // (لا ينفذها سوى مرة واحدة لكل استدعاء runAgent حتى لا يتضاعف زمن الفشل الحقيقي)
+            if (!silentRetryDone && chain.length === 1) {
+                silentRetryDone = true;
+                console.warn(`⚠️ [Provider] فشل ${activeProvider.obj?.label || activeProvider.id} (${String(e.message).slice(0, 120)}) — محاولة صامتة ثانية`);
+                track('retry', { provider: activeProvider.id });
+                curSid  = null;
+                curPmid = null;
+                step--; // لا تستهلك خطوة
+                continue;
+            }
+
+            chainErrors.push({ id: activeProvider.id, label: activeProvider.obj?.label || activeProvider.id || 'مزود', message: String(e.message || e).slice(0, 300) });
             track('error', { provider: activeProvider.id });
+
+            // 🕶️ وجه البوكر:
+            //   القناة العامة ترى اعتذاراً بشرياً محايداً فقط — صفر تفاصيل مزود/نموذج/توكن.
+            //   التقرير الكامل (السلسلة + التشخيص + الموقع) يذهب لقناة الإشعارات.
+            errorReporter.reportAgentError({
+                agentId        : runtime.agentId || 'default',
+                agentName      : runtime.agentName || null,
+                agentKind,
+                client,
+                source         : 'provider',
+                guild,
+                channel,
+                user           : requester?.userId ? { id: requester.userId, username: requester.username || '' } : null,
+                providerErrors : chainErrors,
+                error          : e,
+                context        : `خطوة ${step + 1}/${MAX_STEPS} — نمط ${mode}`,
+            }).catch(() => {});
+
             return {
-                reply      : `⚠️ خطأ في الاتصال بالنموذج (${activeProvider.label}): ${e.message}`,
+                reply      : errorReporter.randomPublicFace(),
                 newSid     : curSid,
                 newPmid    : curPmid,
                 filesToSend: [],
@@ -792,7 +830,10 @@ async function runAgent(
     }
 
     return {
-        reply      : '⚠️ وصلت للحد الأعلى من خطوات الأدوات. نفذت ما استطعت، وإذا بقي جزء من الطلب أعد إرساله لأكمل من آخر نتيجة.',
+        // 💬 وضع المحادثة: رسالة بشرية بلا أي ذكر ل"أدوات/خطوات/نظام" — الوكيل لا يعلم بها أصلاً
+        reply      : chatMode
+            ? 'طوويلة هالموضوع عليّ 😅 قسّمها لي رسائل أصغر وأكمل معك'
+            : '⚠️ وصلت للحد الأعلى من خطوات الأدوات. نفذت ما استطعت، وإذا بقي جزء من الطلب أعد إرساله لأكمل من آخر نتيجة.',
         newSid     : curSid,
         newPmid    : curPmid,
         filesToSend: [],

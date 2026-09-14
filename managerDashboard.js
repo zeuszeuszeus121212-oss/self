@@ -665,6 +665,8 @@ async function renderNotifications(agentId = null, guildId = null) {
         agent ? `🔔 قناة الوكيل: ${agent.notification_channel_id ? `<#${agent.notification_channel_id}>` : 'غير محددة'}` : null,
         '',
         'الأحداث: تشغيل، توقف، Restart، فشل، Disconnect، Reconnect، أخطاء Runtime، وتعديلات إدارية.',
+        '🚨 **أخطاء الوكلاء الحقيقية تصل هنا أيضاً:** تفاصيل المزود والتشخيص الكامل وأين حدث الخطأ.',
+        '🕶️ في قنوات المحادثة العامة يرى الناس رداً بشرياً محايداً فقط — بلا أي تفاصيل تقنية أو أسماء مزودين.',
     ]), COLORS.info);
     const components = [
         new ActionRowBuilder().addComponents(
