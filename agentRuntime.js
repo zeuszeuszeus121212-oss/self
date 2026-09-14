@@ -83,6 +83,15 @@ const {
 // 🎭 قائمة انتظار الرسائل — واحد واحد بس: الأول يُرد ثم الثاني (v7.9)
 // 🛠️ v7.12: agentChannelKey — قائمة كل وكيل مستقلة حتى لو تشارك وكيلاان نفس القناة
 const { enqueueChannelTask, agentChannelKey } = require('./channelQueue');
+// 🛡️ v7.13 «بلا أدمن» — فحص القدرة على الرد قبل استهلاك الـ AI + ساعة توقف القائمة
+const {
+    checkReplyAbility,
+    isMissingPermissionsError,
+    withTaskTimeout,
+    buildPermissionDiagLines,
+    PERM_LABELS_AR,
+    DEFAULT_TASK_TIMEOUT_MS,
+} = require('./permissions');
 // 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
 const qwenAccounts = require('./qwenAccounts');
 // 🛰️ سجل السيرفرات والنشاط — العلم التام للمالك (v7.9)
@@ -375,11 +384,17 @@ function agentBotCommands() {
  * 🪪 بطاقة /شرح — Components V2 احترافية
  * تعريف البوت: ذكاء اصطناعي مصمم للتفاعل مع أعضاء السيرفر وترفيههم،
  * مطوّر بواسطة زيوس. تُعرض على كل بوت وكيل منشأ.
+ * 🛡️ v7.13: diagLines اختيارية — فحص صلاحياتي الحقيقي في قناة الأمر
+ * (الأدمن غير مطلوب — يكفي الحد الأدنى) بدل صمت غامض بدون أدمن.
  * @param {string} botName اسم البوت الظاهر
+ * @param {string[]|null} [diagLines=null] أسطر التشخيص من buildPermissionDiagLines
  */
-function buildIntroPayload(botName) {
+function buildIntroPayload(botName, diagLines = null) {
     const ui = require('./ui');
     const name = String(botName || 'هذا البوت');
+    const extra = Array.isArray(diagLines) && diagLines.length
+        ? ['', '─'.repeat(12), '', ...diagLines]
+        : [];
     const card = ui.container({
         accent: ui.ACCENTS.primary,
         title: `✨ ${name}`,
@@ -387,6 +402,7 @@ function buildIntroPayload(botName) {
             '**ذكاء اصطناعي مصمم للتفاعل مع أعضاء السيرفر** — يحاور، يساعد، يسلي، ويضيف روحاً حقيقية للمجتمع.',
             '',
             'تحدث معه بشكل طبيعي: منشنه في أي قناة أو راسله خاصاً، وسيرد عليك بذكاء وبشخصيته الخاصة.',
+            ...extra,
             '',
             `> 🛠️ مطوّر بواسطة **زيوس** <@656783724662226963>`,
         ].join('\n'),
@@ -686,10 +702,21 @@ client.on('interactionCreate', async (interaction) => {
 
         // أوامر إدارة الوكلاء نُقلت بالكامل إلى Manager Dashboard.
 
-        // 🪪 أمر الوكيل الوحيد المسجل: /شرح — بطاقة تعريفية V2
+        // 🪪 أمر الوكيل الوحيد المسجل: /شرح — بطاقة تعريفية V2 + فحص صلاحيات حي (v7.13)
         if (commandName === 'شرح') {
             const botName = client.user.displayName || client.user.username;
-            await interaction.reply(buildIntroPayload(botName)).catch(() => {});
+            // 🛡️ تشخيص حقيقي: هل أستطيع الرد هنا؟ الأدمن غير مطلوب — الحد الأدنى فقط.
+            let diagLines = null;
+            if (tokenType === 'bot' && interaction.guild) {
+                const me = interaction.guild.members?.me
+                    || interaction.guild.members.cache.get(client.user.id)
+                    || null;
+                const chPerms = me && interaction.channel && typeof interaction.channel.permissionsFor === 'function'
+                    ? interaction.channel.permissionsFor(me)
+                    : null;
+                diagLines = buildPermissionDiagLines(chPerms);
+            }
+            await interaction.reply(buildIntroPayload(botName, diagLines)).catch(() => {});
             return;
         }
 
@@ -1232,6 +1259,42 @@ client.on('messageCreate', async (message) => {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  🛡️ v7.13 «بلا أدمن» — فحص القدرة على الرد قبل أي شيء
+    //  شكوى المالك: وكلاء بلا رتبة أدمن يضعون إيموجي فقط ولا يردون.
+    //  الجذر: لو كانت «إرسال الرسائل» مفقودة في القناة كان الرد يُولَّد
+    //  بالذكاء الاصطناعي أولاً ثم يرمي 50013 — فيرى الناس إيموجي فقط.
+    //  الآن: نفحص قبل استهلاك الـ AI إطلاقاً — ولا يشترط أدمن أبداً،
+    //  يكفي الحد الأدنى (عرض القناة + إرسال الرسائل). الحسابات الحقيقية
+    //  (user token) لا تُفحص — فهي تعمل بصلاحيات الحساب البشري نفسه.
+    // ══════════════════════════════════════════════════════════════
+    if (tokenType === 'bot') {
+        const botMember = message.guild.members?.me
+            || message.guild.members.cache.get(client.user.id)
+            || null;
+        const chPerms = botMember && typeof message.channel.permissionsFor === 'function'
+            ? message.channel.permissionsFor(botMember)
+            : null;
+        const ability = checkReplyAbility({ perms: chPerms, hasBotMember: Boolean(botMember) });
+        if (!ability.ok) {
+            const missingNames = ability.missing.map((p) => `«${PERM_LABELS_AR[p] || p}»`).join(' و ');
+            try { await message.react('🔇'); } catch (_) {}
+            errorReporter.reportAgentError({
+                agentId,
+                agentName,
+                agentKind : runtimeSettings.kind,
+                client,
+                source    : 'permissions',
+                guild     : message.guild,
+                channel   : message.channel,
+                user      : { id: message.author.id, username: message.author.username || '' },
+                error     : new Error(`البوت صامت في #${message.channel.name || '—'} — صلاحيات ناقصة: ${missingNames}`),
+                context   : `لم تُستهلك أي خدمات ذكاء اصطناعي. الإصلاح (الأدمن غير مطلوب): إعدادات القناة ← صلاحيات الأدوار ← امنح رتبة البوت ${missingNames}، أو أضف رتبة بصلاحيات الإرسال للبوت.`,
+            }).catch(() => {});
+            return; // صمت مقصود مع إشارة واضحة — بلا هدر وبلا انسداد للقائمة
+        }
+    }
+
     // استخراج النص وإزالة منشن البوت
     let content = message.content;
     content = content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
@@ -1360,28 +1423,57 @@ client.on('messageCreate', async (message) => {
             // 📊 تتبع الاستخدام — رسالة مستخدم مُعالجة
             usage.track(agentId, message.guild.id, 'message').catch(() => {});
 
-            const result = await runAgent(
-                message.guild,
-                message.channel,
-                content,
-                userInfo,
-                botContext,
-                botName,
-                cs.session_id,
-                cs.parent_message_id,
-                message.guild.id,
-                mode,
-                thinking,
-                accessLevel,
-                client,
-                runtimeSettings,
-                {
-                    userId: author.id,
-                    username: author.username,
-                    channelId: message.channel.id,
-                    images: attachedImages, // 🖼️ صور الرسالة — تُرفع OSS لـ Qwen / image_url لـ OpenAI
-                },
+            // ⏱️ v7.13 ساعة توقف صارمة — مهمة عالقة (مزود لا يستجيب/شبكة ميتة)
+            // لا تحتجز قائمة القناة أبداً: بعد المهلة تُحرر القائمة للرسائل
+            // التالية فوراً + إيموجي ⏰ + تقرير للمالك. العمل المتأخر قد يكمل
+            // بالخلفية (رد متأخر أفضل من صمت أبدي).
+            const outcome = await withTaskTimeout(
+                () => runAgent(
+                    message.guild,
+                    message.channel,
+                    content,
+                    userInfo,
+                    botContext,
+                    botName,
+                    cs.session_id,
+                    cs.parent_message_id,
+                    message.guild.id,
+                    mode,
+                    thinking,
+                    accessLevel,
+                    client,
+                    runtimeSettings,
+                    {
+                        userId: author.id,
+                        username: author.username,
+                        channelId: message.channel.id,
+                        images: attachedImages, // 🖼️ صور الرسالة — تُرفع OSS لـ Qwen / image_url لـ OpenAI
+                    },
+                ),
+                DEFAULT_TASK_TIMEOUT_MS,
             );
+
+            if (outcome.timedOut) {
+                try {
+                    await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
+                    await message.react('⏰');
+                } catch (_) {}
+                errorReporter.reportAgentError({
+                    agentId,
+                    agentName,
+                    agentKind : runtimeSettings.kind,
+                    client,
+                    source    : 'timeout',
+                    guild     : message.guild,
+                    channel   : message.channel,
+                    user      : { id: author.id, username: author.username || '' },
+                    error     : new Error(`تجاوز توليد الرد الحد الزمني (${Math.round(DEFAULT_TASK_TIMEOUT_MS / 1000)} ثانية) — آخر من كلّمه: @${author.username}`),
+                    context   : 'قائمة الانتظار حُررت تلقائياً — الرسائل التالية لن تبقى معلّقة بـ 👀. إن تكرر مع مزود بعينه فتأكد من حالته.',
+                }).catch(() => {});
+                return;
+            }
+
+            const result = outcome.result;
 
             // تحديث الجلسة في RAM و DB
             await sessionLock.acquire(() => {
@@ -1528,6 +1620,11 @@ client.on('messageCreate', async (message) => {
         } catch (error) {
             console.error('[Agent Error]', error);
 
+            // 🛡️ v7.13 — لو فشل الإرسال نفسه بصلاحيات ناقصة (50013 Missing
+            // Permissions) فالناس سيرون إيموجي فقط مهما حاولنا: التشخيص يجب
+            // أن يصل للمالك بحلٍّ واضح (الأدمن غير مطلوب — يكفي الإرسال).
+            const permFail = isMissingPermissionsError(error);
+
             // 🕶️ وجه البوكر: القناة العامة ترى اعتذاراً بشرياً فقط — بلا أي تفاصيل تقنية.
             // التقرير الكامل (التشخيص + الأثر + الموقع) يذهب لقناة الإشعارات.
             errorReporter.reportAgentError({
@@ -1535,18 +1632,21 @@ client.on('messageCreate', async (message) => {
                 agentName,
                 agentKind : runtimeSettings.kind,
                 client,
-                source    : 'unexpected',
+                source    : permFail ? 'permissions' : 'unexpected',
                 guild     : message.guild || null,
                 channel   : message.channel || null,
                 user      : message.author ? { id: message.author.id, username: message.author.username || '' } : null,
                 error,
+                context   : permFail
+                    ? 'اكتُشف بعد توليد الرد: البوت فقد صلاحية «إرسال الرسائل» في القناة. الإصلاح (الأدمن غير مطلوب): امنح رتبة البوت «إرسال الرسائل» + «عرض القناة» في إعدادات القناة.'
+                    : '',
             }).catch(() => {});
 
             try {
                 await message.reply(errorReporter.randomPublicFace());
             } catch (_) {}
             try {
-                await message.react('❌');
+                await message.react(permFail ? '🔐' : '❌');
                 await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
             } catch (_) {}
         }
