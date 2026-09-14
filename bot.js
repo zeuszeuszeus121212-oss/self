@@ -111,6 +111,10 @@ async function notify({ type = 'runtime', agentId = null, title = 'Runtime Event
 // بينما القنوات العامة ترى اعتذاراً بشرياً محايداً فقط (سياسة وجه البوكر)
 require('./errorReporter').setManagerNotifier(notify);
 
+// 🛰️ RAQEEB + 🌐 حسابات Qwen — إشعارات المالك عبر نفس قناة الإشعارات (v7.9)
+require('./guildRegistry').setNotifier(notify);
+require('./qwenAccounts').setNotifier(notify);
+
 async function logAgent(agentId, type, message, extra = {}) {
     const cfg = require('./config');
     try {
@@ -382,6 +386,11 @@ async function bootAgents() {
     // ⬅️ بدء نظام الجدولة الذكي
     const { startScheduleTimers } = require('./accountAgent');
     startScheduleTimers(module.exports);
+
+    // 🛰️ RAQEEB — قصّ سجل النشاط دورياً (v7.9)
+    require('./guildRegistry').startRegistryTimers();
+    // 🌐 حسابات Qwen التلقائية — مجدول التجديد (v7.9)
+    require('./qwenAccounts').startQwenAccountTimers();
 }
 
 module.exports = {

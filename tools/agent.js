@@ -24,6 +24,7 @@ const {
 
 const { getProviderOrFallback, extractProviderConfig, buildFallbackChain } = require('../providers');
 const errorReporter = require('../errorReporter'); // 🕶️ وجه البوكر — بلا تسريب تقني للقنوات العامة
+const qwenAccounts = require('../qwenAccounts'); // 🌐 حساب Qwen تلقائي لكل سيرفر (v7.9)
 const webTools = require('./webTools');
 const memory   = require('../memory');
 const reminders = require('../reminders');
@@ -241,6 +242,20 @@ async function runAgent(
     let chainIdx    = 0;
     const provider     = chain[0].obj;
     const providerConf = chain[0].config;
+
+    // 🌐 حساب Qwen التلقائي لكل سيرفر (v7.9):
+    // لو المزود الأساسي Qwen ووُجد حساب مفعّل خاص بهذا السيرفر → يُستخدم توكنه
+    // (عزل الحظر/الحدود — حادثة سيرفر لا تحرق حساب الجميع). بلا حساب جاهز
+    // يعمل الوكيل بتوكنه المُهيأ كما هو — صفر تأثير على التوفر.
+    try {
+        if (chain[0].id === 'qwen' && guildId) {
+            const guildTok = await qwenAccounts.getGuildQwenToken(guildId);
+            if (guildTok) {
+                chain[0].config = { ...chain[0].config, qwen_token: guildTok };
+                console.log('[QwenAccounts] استخدام حساب السيرفر التلقائي للتوكن');
+            }
+        }
+    } catch (_) {}
 
     let curSid      = sessionId;
     let curPmid     = parentMessageId;

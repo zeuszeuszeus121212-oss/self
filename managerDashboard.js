@@ -71,7 +71,7 @@ const COLORS = Object.freeze({
 
 const ICONS = Object.freeze({
     panel: '🧭', agents: '👥', add: '➕', settings: '⚙️', notifications: '🔔', logs: '📜', stats: '📊', system: '🖥️',
-    running: '🟢', stopped: '⚫', failed: '🔴', starting: '🟡', restarting: '🔄', bot: '🤖', user: '👤', back: '↩️', refresh: '🔄',
+    radar: '🛰️', running: '🟢', stopped: '⚫', failed: '🔴', starting: '🟡', restarting: '🔄', bot: '🤖', user: '👤', back: '↩️', refresh: '🔄',
 });
 
 const DASHBOARD_COMMAND_ROUTES = Object.freeze({
@@ -87,6 +87,7 @@ const DASHBOARD_COMMAND_ROUTES = Object.freeze({
     'تشغيل-يدوي': 'manual_run',
     'المزودون': 'providers',
     'اضافة-مزود': 'prov_add_cmd',
+    'الرصد': 'radar',
 });
 
 // ---------- حالة بناء الجدولة ----------
@@ -122,6 +123,7 @@ function dashboardCommands() {
                     )),
         new SlashCommandBuilder().setName('المزودون').setDescription('🗄️ عرض المزودين المحفوظين في قاعدة البيانات (OpenAI-Compatible والبروكسيات)'),
         new SlashCommandBuilder().setName('اضافة-مزود').setDescription('➕ معالج تفاعلي لإضافة مزود جديد (base_url + مفتاح + نماذجه) وحفظه في قاعدة البيانات'),
+        new SlashCommandBuilder().setName('الرصد').setDescription('🛰️ لوحة الرصد الكاملة: السيرفرات ومن أضاف البوت ومتى ومن يتكلم معه'),
     ];
 }
 
@@ -667,6 +669,8 @@ async function renderNotifications(agentId = null, guildId = null) {
         'الأحداث: تشغيل، توقف، Restart، فشل، Disconnect، Reconnect، أخطاء Runtime، وتعديلات إدارية.',
         '🚨 **أخطاء الوكلاء الحقيقية تصل هنا أيضاً:** تفاصيل المزود والتشخيص الكامل وأين حدث الخطأ.',
         '🕶️ في قنوات المحادثة العامة يرى الناس رداً بشرياً محايداً فقط — بلا أي تفاصيل تقنية أو أسماء مزودين.',
+        '🛰️ **إشعارات الرصد تصل هنا أيضاً:** إضافة البوت لسيرفر جديد (ومن أضافه) + كل محادثة جديدة (من/أين/متى) — تتحكم بها من الإعدادات.',
+        '🌐 **حسابات Qwen التلقائية:** إنشاء/تفعيل حساب خاص لكل سيرفر — الحالة في /الرصد.',
     ]), COLORS.info);
     const components = [
         new ActionRowBuilder().addComponents(
@@ -685,10 +689,13 @@ async function renderNotifications(agentId = null, guildId = null) {
 
 async function renderSettings(guildId) {
     const settings = guildId ? await managerSettings(guildId).catch(() => null) : null;
+    const guildRegistry = require('./guildRegistry');
+    const activityNotify = await guildRegistry.activityNotifyEnabled();
     const emb = embed('⚙️ إعدادات المنصة', linesBlock([
         '**إعدادات Dashboard وRuntime من مكان واحد.**',
         `🛡️ رتبة الإدارة: ${settings?.admin_role_id ? `<@&${settings.admin_role_id}>` : 'المالك فقط'}`,
         `🔔 قناة الإشعارات العامة: ${settings?.notification_channel_id ? `<#${settings.notification_channel_id}>` : 'غير محددة'}`,
+        `🛰️ إشعارات الرصد (انضمام سيرفر/محادثات): ${activityNotify ? '**مفعّلة** ✅' : '**مطفأة** ⛔'}`,
         `🔁 إعادة الاتصال: مفعلة عبر Manager Lifecycle`,
         `🧾 التسجيل: مفعّل في agent_logs`,
     ]), COLORS.dark);
@@ -696,9 +703,123 @@ async function renderSettings(guildId) {
         new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`${DASH_PREFIX}:settings_admin_role`).setPlaceholder('اختر رتبة الإدارة للوحة')),
         ...rowsFromButtons([
             button(`${DASH_PREFIX}:notifications`, 'قناة الإشعارات', ButtonStyle.Secondary, ICONS.notifications),
+            button(`${DASH_PREFIX}:activity_notify_toggle`, activityNotify ? 'إطفاء إشعارات الرصد' : 'تفعيل إشعارات الرصد', activityNotify ? ButtonStyle.Danger : ButtonStyle.Success, ICONS.radar),
             button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
         ]),
     ])) };
+}
+
+// ═════════════════════════════════════════════════════════════
+//  🛰️ RAQEEB — لوحة الرصد الكاملة (v7.9)
+//  أي السيرفرات فيها البوت، من أضافه ومتى، من يتكلم معه الآن
+//  ومن قبل، حالة حساب Qwen التلقائي لكل سيرفر.
+// ═════════════════════════════════════════════════════════════
+
+function qwenAccountBadge(acc) {
+    if (!acc) return '— (بلا حساب)';
+    if (acc.status === 'active') return `✅ مفعّل (${acc.email})`;
+    if (acc.status === 'pending') return `⏳ قيد التفعيل (${acc.email}${acc.last_error ? ` — ${acc.last_error}` : ''})`;
+    if (acc.status === 'failed') return `❌ فشل (${acc.last_error || 'غير معروف'})`;
+    return String(acc.status || '—');
+}
+
+async function renderRadar(manager) {
+    const guildRegistry = require('./guildRegistry');
+    const qwenAccounts = require('./qwenAccounts');
+    const rows = await guildRegistry.getOverview();
+    const activeCount = rows.filter(r => !r.left).length;
+
+    if (!rows.length) {
+        const emb = embed('🛰️ لوحة الرصد', linesBlock([
+            '**لا توجد سيرفرات مسجلة بعد.**',
+            'بمجرد إضافة البوت لأي سيرفر سيُسجل هنا: من أضافه، ومتى، ومن يتكلم معه.',
+        ]), COLORS.dark);
+        return { ...v2Payload(withRows(emb, rowsFromButtons([
+            button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+            button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
+        ]))) };
+    }
+
+    const lines = [
+        `**${ICONS.radar} العلم التام عن بوتاتك:** ${activeCount} سيرفر نشط من أصل ${rows.length} مسجل.`,
+        '',
+    ];
+
+    for (const g of rows.slice(0, 15)) {
+        const state = g.left ? '🚪 خرج' : (g.live ? '🟢 يتكلم معه الآن' : '🟢 موجود');
+        lines.push(`**${g.left ? '『خرج』' : '🏰'} ${g.name}** — ${state}`);
+        lines.push(`   🆔 \`${g.guild_id}\` • 👥 ${g.member_count ?? '—'} عضو • 📅 انضم: ${fmtDate(g.joined_at)}`);
+        lines.push(`   👤 أضافه: ${g.added_by_tag ? `**@${g.added_by_tag}**` : 'غير معروف'} (${g.added_by_id ? `\`${g.added_by_id}\`` : '—'})`);
+        lines.push(`   💬 محادثات مسجلة: **${g.total_chats ?? 0}** • آخر نشاط: ${g.last_activity ? fmtDate(g.last_activity.created_at) : 'لا شيء بعد'}`);
+        if (g.live) lines.push(`   🔴 الآن: **@${g.live.username}** في #${g.live.channelName} مع ${g.live.agentName || 'وكيل'}`);
+        const acc = await qwenAccounts.describeGuildAccount(g.guild_id);
+        lines.push(`   🌐 Qwen: ${qwenAccountBadge(acc)}`);
+        lines.push('');
+    }
+
+    if (rows.length > 15) lines.push(`*…و${rows.length - 15} سيرفر آخر — استخدم أمر /الرصد من جديد بعد المراجعة أو لاحقاً.*`);
+
+    const buttons = [];
+    for (const g of rows.filter(r => !r.left).slice(0, 4)) {
+        buttons.push(button(`${DASH_PREFIX}:radar_guild:${g.guild_id}`, trim(g.name, 25), ButtonStyle.Secondary, '🏰'));
+    }
+    buttons.push(button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Primary, ICONS.refresh));
+    buttons.push(button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back));
+
+    const emb = embed('🛰️ لوحة الرصد — العلم التام', linesBlock(lines), COLORS.live);
+    return { ...v2Payload(withRows(emb, rowsFromButtons(buttons))) };
+}
+
+async function renderRadarGuild(manager, guildId) {
+    const guildRegistry = require('./guildRegistry');
+    const qwenAccounts = require('./qwenAccounts');
+    const detail = await guildRegistry.getGuildDetail(guildId);
+    if (!detail) return updateInteractionErrorScreen('هذا السيرفر غير مسجل في سجل الرصد.');
+
+    const acc = await qwenAccounts.describeGuildAccount(guildId);
+    const lines = [
+        `**🏰 ${detail.name}** ${detail.left ? '*(خرج البوت منه)*' : ''}`,
+        `🆔 \`${detail.guild_id}\` • 👥 ${detail.member_count ?? '—'} عضو • 📅 انضم: ${fmtDate(detail.joined_at)}`,
+        `👤 أضافه: ${detail.added_by_tag ? `**@${detail.added_by_tag}** (\`${detail.added_by_id}\`)` : 'غير معروف'}`,
+        `👑 مالك السيرفر: ${detail.owner_id ? `<@${detail.owner_id}>` : '—'}`,
+        `🌐 حساب Qwen: ${qwenAccountBadge(acc)}${acc ? `\n   📧 بريد الحساب: \`${acc.email}\`` : ''}`,
+        '',
+        '**💬 آخر من تكلم مع البوت (من/أين/متى — بلا محتوى):**',
+    ];
+
+    if (!detail.activity.length) {
+        lines.push('   لا نشاط مسجل بعد.');
+    } else {
+        for (const a of detail.activity.slice(0, 15)) {
+            lines.push(`   • **@${a.username || '؟'}** في #${a.channel_name || a.channel_id || '؟'} — ${fmtDate(a.created_at)} — وكيل: ${a.agent_name || '—'}`);
+        }
+    }
+
+    const buttons = [
+        button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        button(`${DASH_PREFIX}:radar_qwen:${guildId}`, 'إعادة محاولة تفعيل Qwen', ButtonStyle.Secondary, '🌐'),
+        button(`${DASH_PREFIX}:radar`, 'كل السيرفرات', ButtonStyle.Secondary, ICONS.back),
+    ];
+
+    const emb = embed(`🛰️ رصد سيرفر — ${detail.name}`, linesBlock(lines), COLORS.info);
+    return { ...v2Payload(withRows(emb, rowsFromButtons(buttons))) };
+}
+
+function updateInteractionErrorScreen(message) {
+    return { ...v2Payload(embed('ℹ️ لا يوجد سجل', linesBlock([message]), COLORS.warning)) };
+}
+
+async function handleRadarQwenRetry(manager, guildId) {
+    const qwenAccounts = require('./qwenAccounts');
+    const res = await qwenAccounts.ensureGuildAccount(guildId, { reason: 'radar_retry' });
+    await manager.notify({
+        type: 'qwen_account',
+        level: res.ok ? 'success' : 'warning',
+        title: res.ok ? `🌐 حساب Qwen لسيرفر \`${guildId}\` جاهز` : `🌐 حساب Qwen لسيرفر \`${guildId}\`: ${res.error || 'ما زال قيد التفعيل'}`,
+        message: res.ok ? 'الحساب مفعّل وجاهز للاستخدام.' : 'سيُعاد المحاولة تلقائياً كل 12 ساعة، أو جرّب لاحقاً من هنا.',
+        guildId,
+    }).catch(() => {});
+    return renderRadarGuild(manager, guildId);
 }
 
 async function renderLogs(agentId = null, page = 0) {
@@ -1193,6 +1314,7 @@ async function handleDashboardInteraction(interaction, manager) {
         if (commandRoute === 'logs') return updateInteraction(interaction, await renderLogs(null, 0));
         if (commandRoute === 'stats') return updateInteraction(interaction, await renderStats(manager));
         if (commandRoute === 'system') return updateInteraction(interaction, await renderSystem(manager));
+        if (commandRoute === 'radar') return updateInteraction(interaction, await renderRadar(manager));
         return updateInteraction(interaction, await renderHome(manager, interaction));
     }
 
@@ -1737,6 +1859,16 @@ async function handleDashboardInteraction(interaction, manager) {
     if (parts[1] === 'logs') return updateInteraction(interaction, await renderLogs(null, parts[2]));
     if (parts[1] === 'stats') return updateInteraction(interaction, await renderStats(manager));
     if (parts[1] === 'system') return updateInteraction(interaction, await renderSystem(manager));
+    if (parts[1] === 'radar') return updateInteraction(interaction, await renderRadar(manager));
+    if (parts[1] === 'radar_refresh') return updateInteraction(interaction, await renderRadar(manager));
+    if (parts[1] === 'radar_guild') return updateInteraction(interaction, await renderRadarGuild(manager, parts[2]));
+    if (parts[1] === 'radar_qwen') return updateInteraction(interaction, await handleRadarQwenRetry(manager, parts[2]));
+    if (parts[1] === 'activity_notify_toggle') {
+        const guildRegistry = require('./guildRegistry');
+        const current = await guildRegistry.activityNotifyEnabled();
+        await guildRegistry.setActivityNotify(!current);
+        return updateInteraction(interaction, await renderSettings(interaction.guildId));
+    }
     if (parts[1] === 'notify_test') {
         await manager.notify({ type: 'test', agentId: 'manager', title: '🧪 اختبار الإشعارات', message: 'تم إرسال اختبار من لوحة التحكم.', guildId: interaction.guildId });
         return updateInteraction(interaction, await renderNotifications(null, interaction.guildId));

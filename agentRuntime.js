@@ -80,6 +80,13 @@ const {
     runAgent,
 } = require('./tools');
 
+// 🎭 قائمة انتظار الرسائل — واحد واحد بس: الأول يُرد ثم الثاني (v7.9)
+const { enqueueChannelTask } = require('./channelQueue');
+// 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
+const qwenAccounts = require('./qwenAccounts');
+// 🛰️ سجل السيرفرات والنشاط — العلم التام للمالك (v7.9)
+const guildRegistry = require('./guildRegistry');
+
 const {
     createDiscordClient,
     normalizeTokenType,
@@ -1250,10 +1257,10 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // إضافة تفاعل 👀
-    try {
-        await message.react('👀');
-    } catch (_) {}
+    // 🎭 قائمة انتظار القناة — «واحد واحد بس!» (طلب المالك — v7.9)
+    // لو شخصين تكلما معي بنفس الوقت: أرد على الأول كاملاً ثم أجي للثاني بالترتيب.
+    // رسالة المُنتظر تحصل على 👀 فقط — دلالة: «شفتك، إنت بالانتظار».
+    const chQueueKey = `${message.guild.id}_${message.channel.id}`;
 
     // تحديد مستوى صلاحية المرسل
     const accessLevel = getAccessLevel(message.member);
@@ -1280,142 +1287,163 @@ client.on('messageCreate', async (message) => {
         if (memCtx) botContext = `${botContext}\n\n${memCtx}`;
     } catch (_) {}
 
-    // جلسة القناة (per-channel)
-    const chKey = `${message.guild.id}_${message.channel.id}`;
-    let cs;
-    await sessionLock.acquire(async () => {
-        if (!channel_sessions.has(chKey)) {
-            const loaded = await db_load_channel_session(message.guild.id, message.channel.id, agentId);
-            if (loaded) {
-                channel_sessions.set(chKey, loaded);
-            } else {
-                channel_sessions.set(chKey, {
-                    session_id: null,
-                    parent_message_id: null,
-                    mode: 'default',
-                    thinking: false,
-                });
+    // 🎭 ما يلي (ساعة الرمل + الجلسة + runAgent + الرد) داخل قائمة القناة — بالترتيب الصارم
+    const queued = enqueueChannelTask(chQueueKey, async () => {
+        // بدأت دورتي — أزل 👀 (لو كانت علامة انتظار) وأظهر ⏳
+        try {
+            await message.reactions.cache.get('👀')?.users.remove(client.user.id).catch(() => {});
+            await message.react('⏳');
+        } catch (_) {}
+
+        // جلسة القناة (per-channel) — داخل القائمة لضمان ترتيب القراءة والكتابة
+        const chKey = `${message.guild.id}_${message.channel.id}`;
+        let cs;
+        await sessionLock.acquire(async () => {
+            if (!channel_sessions.has(chKey)) {
+                const loaded = await db_load_channel_session(message.guild.id, message.channel.id, agentId);
+                if (loaded) {
+                    channel_sessions.set(chKey, loaded);
+                } else {
+                    channel_sessions.set(chKey, {
+                        session_id: null,
+                        parent_message_id: null,
+                        mode: 'default',
+                        thinking: false,
+                    });
+                }
             }
-        }
-        cs = channel_sessions.get(chKey);
-    });
-
-    const botName = tokenType === 'user' ? humanizeDisplayName(client.user.displayName || client.user.username) : (client.user.displayName || client.user.username);
-    const mode = cs.mode || 'default';
-    // 🧠 التفكير: جلسة القناة (محادثة-جديدة تفكير:on) أولوية، وقدرة الوكيل هي الافتراضي
-    const thinking = Boolean(cs.thinking) || Boolean(runtimeSettings.capabilities?.thinking);
-
-    try {
-        await message.react('⏳');
-        await message.reactions.cache.get('👀')?.users.remove(client.user.id).catch(() => {});
-    } catch (_) {}
-
-    try {
-        // 📊 تتبع الاستخدام — رسالة مستخدم مُعالجة
-        usage.track(agentId, message.guild.id, 'message').catch(() => {});
-
-        const result = await runAgent(
-            message.guild,
-            message.channel,
-            content,
-            userInfo,
-            botContext,
-            botName,
-            cs.session_id,
-            cs.parent_message_id,
-            message.guild.id,
-            mode,
-            thinking,
-            accessLevel,
-            client,
-            runtimeSettings,
-            {
-                userId: author.id,
-                username: author.username,
-                channelId: message.channel.id,
-                images: attachedImages, // 🖼️ صور الرسالة — تُرفع OSS لـ Qwen / image_url لـ OpenAI
-            },
-        );
-
-        // تحديث الجلسة في RAM و DB
-        await sessionLock.acquire(() => {
-            const current = channel_sessions.get(chKey) || {};
-            current.session_id = result.newSid;
-            current.parent_message_id = result.newPmid;
-            channel_sessions.set(chKey, current);
+            cs = channel_sessions.get(chKey);
         });
-        if (result.newSid) {
-            await db_save_channel_session(
+
+        const botName = tokenType === 'user' ? humanizeDisplayName(client.user.displayName || client.user.username) : (client.user.displayName || client.user.username);
+        const mode = cs.mode || 'default';
+        // 🧠 التفكير: جلسة القناة (محادثة-جديدة تفكير:on) أولوية، وقدرة الوكيل هي الافتراضي
+        const thinking = Boolean(cs.thinking) || Boolean(runtimeSettings.capabilities?.thinking);
+
+        try {
+            // 📊 تتبع الاستخدام — رسالة مستخدم مُعالجة
+            usage.track(agentId, message.guild.id, 'message').catch(() => {});
+
+            const result = await runAgent(
+                message.guild,
+                message.channel,
+                content,
+                userInfo,
+                botContext,
+                botName,
+                cs.session_id,
+                cs.parent_message_id,
                 message.guild.id,
-                message.channel.id,
-                result.newSid,
-                result.newPmid,
                 mode,
                 thinking,
-                agentId,
+                accessLevel,
+                client,
+                runtimeSettings,
+                {
+                    userId: author.id,
+                    username: author.username,
+                    channelId: message.channel.id,
+                    images: attachedImages, // 🖼️ صور الرسالة — تُرفع OSS لـ Qwen / image_url لـ OpenAI
+                },
             );
-        }
 
-        const replyText = result.reply || '✅ تم.';
-        const chunks = [];
-        for (let i = 0; i < replyText.length; i += 1990) {
-            chunks.push(replyText.slice(i, i + 1990));
-        }
-
-        const files = (result.filesToSend || []).map(fp => ({ attachment: fp, name: path.basename(fp) }));
-
-        if (chunks.length > 0) {
-            // إرسال الجزء الأول مع الملفات إن وجدت
-            const firstMsgOpts = { content: chunks[0] };
-            if (files.length > 0) firstMsgOpts.files = files;
-            await message.reply(firstMsgOpts);
-
-            // باقي الأجزاء
-            for (let i = 1; i < chunks.length; i++) {
-                await message.channel.send(chunks[i]);
+            // تحديث الجلسة في RAM و DB
+            await sessionLock.acquire(() => {
+                const current = channel_sessions.get(chKey) || {};
+                current.session_id = result.newSid;
+                current.parent_message_id = result.newPmid;
+                channel_sessions.set(chKey, current);
+            });
+            if (result.newSid) {
+                await db_save_channel_session(
+                    message.guild.id,
+                    message.channel.id,
+                    result.newSid,
+                    result.newPmid,
+                    mode,
+                    thinking,
+                    agentId,
+                );
             }
-        } else if (files.length > 0) {
-            await message.reply({ files });
-        }
 
-        // تنظيف الملفات المؤقتة
-        if (result.filesToSend) {
-            for (const fp of result.filesToSend) {
-                try {
-                    fs.unlinkSync(fp);
-                } catch (_) {}
+            const replyText = result.reply || '✅ تم.';
+            const chunks = [];
+            for (let i = 0; i < replyText.length; i += 1990) {
+                chunks.push(replyText.slice(i, i + 1990));
             }
+
+            const files = (result.filesToSend || []).map(fp => ({ attachment: fp, name: path.basename(fp) }));
+
+            if (chunks.length > 0) {
+                // إرسال الجزء الأول مع الملفات إن وجدت
+                const firstMsgOpts = { content: chunks[0] };
+                if (files.length > 0) firstMsgOpts.files = files;
+                await message.reply(firstMsgOpts);
+
+                // باقي الأجزاء
+                for (let i = 1; i < chunks.length; i++) {
+                    await message.channel.send(chunks[i]);
+                }
+            } else if (files.length > 0) {
+                await message.reply({ files });
+            }
+
+            // تنظيف الملفات المؤقتة
+            if (result.filesToSend) {
+                for (const fp of result.filesToSend) {
+                    try {
+                        fs.unlinkSync(fp);
+                    } catch (_) {}
+                }
+            }
+
+            try {
+                await message.react('☑️');
+                await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
+            } catch (_) {}
+
+            // 🛰️ RAQEEB — نبضة نشاط للمالك: من/أين/متى (بلا محتوى الرسائل)
+            guildRegistry.recordActivity({
+                agentId,
+                agentName,
+                guildId    : message.guild.id,
+                guildName  : message.guild.name,
+                channelId  : message.channel.id,
+                channelName: message.channel.name,
+                userId     : author.id,
+                username   : author.username,
+            }).catch(() => {});
+
+        } catch (error) {
+            console.error('[Agent Error]', error);
+
+            // 🕶️ وجه البوكر: القناة العامة ترى اعتذاراً بشرياً فقط — بلا أي تفاصيل تقنية.
+            // التقرير الكامل (التشخيص + الأثر + الموقع) يذهب لقناة الإشعارات.
+            errorReporter.reportAgentError({
+                agentId,
+                agentName,
+                agentKind : runtimeSettings.kind,
+                client,
+                source    : 'unexpected',
+                guild     : message.guild || null,
+                channel   : message.channel || null,
+                user      : message.author ? { id: message.author.id, username: message.author.username || '' } : null,
+                error,
+            }).catch(() => {});
+
+            try {
+                await message.reply(errorReporter.randomPublicFace());
+            } catch (_) {}
+            try {
+                await message.react('❌');
+                await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
+            } catch (_) {}
         }
+    });
 
-        try {
-            await message.react('☑️');
-            await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
-        } catch (_) {}
-
-    } catch (error) {
-        console.error('[Agent Error]', error);
-
-        // 🕶️ وجه البوكر: القناة العامة ترى اعتذاراً بشرياً فقط — بلا أي تفاصيل تقنية.
-        // التقرير الكامل (التشخيص + الأثر + الموقع) يذهب لقناة الإشعارات.
-        errorReporter.reportAgentError({
-            agentId,
-            agentName,
-            agentKind : runtimeSettings.kind,
-            client,
-            source    : 'unexpected',
-            guild     : message.guild || null,
-            channel   : message.channel || null,
-            user      : message.author ? { id: message.author.id, username: message.author.username || '' } : null,
-            error,
-        }).catch(() => {});
-
-        try {
-            await message.reply(errorReporter.randomPublicFace());
-        } catch (_) {}
-        try {
-            await message.react('❌');
-            await message.reactions.cache.get('⏳')?.users.remove(client.user.id).catch(() => {});
-        } catch (_) {}
+    // علّم رسالة المُنتظر بـ 👀 فقط — لو كان في عمل قائم قبله في نفس القناة
+    if (queued.wasBusy) {
+        try { await message.react('👀'); } catch (_) {}
     }
 });
 
@@ -1423,6 +1451,33 @@ client.on('messageCreate', async (message) => {
 client.on('error', (err) => {
     console.error(`[Agent ${agentId}] Discord error:`, err);
     if (agentConfig.onError) agentConfig.onError(err);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  🛰️ RAQEEB — العلم التام للمالك (v7.9)
+//  عند إضافة البوت لسيرفر: تسجيل من أضافه ومتى + إنشاء حساب
+//  Qwen تلقائي خاص بذلك السيرفر + إشعار فوري لقناة الإشعارات.
+// ══════════════════════════════════════════════════════════════
+client.on('guildCreate', async (guild) => {
+    try {
+        await guildRegistry.recordGuildJoin(guild, client);
+    } catch (e) {
+        console.error('[Raqeeb] فشل تسجيل انضمام السيرفر:', e.message);
+    }
+    try {
+        const acc = await qwenAccounts.ensureGuildAccount(guild.id, { reason: 'guild_join' });
+        if (acc && !acc.ok) console.warn(`[QwenAccounts] حساب سيرفر ${guild.id}: ${acc.error || 'قيد التفعيل'}`);
+    } catch (e) {
+        console.error('[QwenAccounts] فشل إنشاء حساب السيرفر:', e.message);
+    }
+});
+
+client.on('guildDelete', async (guild) => {
+    try {
+        await guildRegistry.recordGuildLeave(guild);
+    } catch (e) {
+        console.error('[Raqeeb] فشل تسجيل مغادرة السيرفر:', e.message);
+    }
 });
 
 client.on('shardDisconnect', (event) => {

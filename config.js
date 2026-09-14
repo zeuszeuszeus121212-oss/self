@@ -84,6 +84,9 @@ let reminders_col = null; // ⏰ تذكيرات الوكلاء
 let knowledge_col = null; // 📚 قاعدة المعرفة (المستوى 2)
 let usage_col = null; // 📊 تتبع استخدام الوكلاء (المستوى 2)
 let providers_col = null; // 🗄️ المزودون المحفوظون (2.5 — إضافة مزود مرة واحدة واختياره عند إنشاء الوكلاء)
+let qwen_guild_accounts_col = null; // 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
+let guild_registry_col = null; // 🛰️ سجل السيرفرات التي أُضيف إليها البوت (v7.9)
+let guild_activity_col = null; // 💬 سجل من يتكلم مع البوت وأين ومتى (v7.9)
 
 /**
  * يقوم بالاتصال بـ MongoDB وتهيئة المتغيرات
@@ -103,6 +106,9 @@ async function connectMongo() {
         knowledge_col = db.collection('agent_knowledge');
         usage_col = db.collection('agent_usage');
         providers_col = db.collection('ai_providers');
+        qwen_guild_accounts_col = db.collection('qwen_guild_accounts');
+        guild_registry_col = db.collection('guild_registry');
+        guild_activity_col = db.collection('guild_activity');
         console.log('✅ MongoDB متصل بنجاح');
     } catch (err) {
         console.error('❌ فشل الاتصال بـ MongoDB:', err.message);
@@ -193,6 +199,9 @@ module.exports = {
     get knowledge_col() { return knowledge_col; },
     get usage_col() { return usage_col; },
     get providers_col() { return providers_col; },
+    get qwen_guild_accounts_col() { return qwen_guild_accounts_col; },
+    get guild_registry_col() { return guild_registry_col; },
+    get guild_activity_col() { return guild_activity_col; },
 
     // RAM Cache
     channel_sessions,
