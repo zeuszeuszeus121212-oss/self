@@ -12,11 +12,14 @@
  *     دلالة «البوت شاف رسالتك وإنت في الانتظار».
  *   • أول ما يخلص من الأول يجي للثاني، وهكذا بالترتيب.
  *
- * قائمة لكل قناة (channelKey) مستقلة — قنوات مختلفة تعمل متوازية بلا تأثير.
+ * قائمة لكل «وكيل+قناة» مستقلة — قنوات مختلفة تعمل متوازية بلا تأثير،
+ * والأهم (إصلاح v7.12): وكلاء مختلفون في نفس القناة لا ينتظران بعضهما أبداً —
+ * قائمة كل وكيل مستقلة تماماً لأن المفتاح يبدأ بهوية الوكيل (agentChannelKey).
  *
  * التصميم:
+ *   - agentChannelKey(agentId, guildId, channelId) — البانِر الوحيد للمفاتيح
  *   - enqueueChannelTask(key, task) → { promise, wasBusy }
- *     wasBusy=true يعني كان في عمل قائم في نفس القناة (المفروض نحط 👀)
+ *     wasBusy=true يعني كان في عمل قائم لنفس الوكيل في نفس القناة (المفروض نحط 👀)
  *   - المهام تسير بالترتيب الصارم؛ فشل مهمة لا يكسر القائمة أبداً
  *   - تنظيف ذاتي: آخر مهمة تخلص → يُحذف مفتاح القناة من الذاكرة
  *   - بلا تبعيات — قابل للاختبار 100% بلا Discord ولا DB
@@ -29,8 +32,18 @@ const queues = new Map(); // channelKey -> Promise (ذيل القائمة)
 const depths = new Map(); // channelKey -> عدد المهام غير المنتهية (منتظرة + المنفذة)
 
 /**
+ * مفتاح قائمة موحد: هوية الوكيل + السيرفر + القناة.
+ * ⚠️ هذا المفتاح هو الوحيد المسموح — بدونه يتشارك وكيلاان في نفس
+ * القناة قائمة واحدة ويصبح كل منهما ينتظر الآخر (خطأ v7.9 المُصلَح).
+ * @param {string} agentId معرّف الوكيل (Mongo _id)
+ */
+function agentChannelKey(agentId, guildId, channelId) {
+    return `${String(agentId || 'agent')}:${String(guildId || 'dm')}:${String(channelId || 'unknown')}`;
+}
+
+/**
  * إضافة مهمة إلى قائمة قناة — تُنفذ بعد انتهاء كل ما قبلها.
- * @param {string} channelKey مفتاح فريد للقناة (guildId_channelId مثلاً)
+ * @param {string} channelKey مفتاح فريد من agentChannelKey()
  * @param {() => Promise<any>} task دالة غير متزامنة (يجب ألا ترمي — تُبتلع الأخطاء حماية للقائمة)
  * @returns {{ promise: Promise<any>, wasBusy: boolean }} wasBusy=true → كان في انتظار (نضع 👀)
  */
@@ -92,6 +105,7 @@ function _resetQueue() {
 }
 
 module.exports = {
+    agentChannelKey,
     enqueueChannelTask,
     isChannelBusy,
     channelDepth,

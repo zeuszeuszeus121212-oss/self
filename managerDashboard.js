@@ -123,7 +123,7 @@ function dashboardCommands() {
                     )),
         new SlashCommandBuilder().setName('المزودون').setDescription('🗄️ عرض المزودين المحفوظين في قاعدة البيانات (OpenAI-Compatible والبروكسيات)'),
         new SlashCommandBuilder().setName('اضافة-مزود').setDescription('➕ معالج تفاعلي لإضافة مزود جديد (base_url + مفتاح + نماذجه) وحفظه في قاعدة البيانات'),
-        new SlashCommandBuilder().setName('الرصد').setDescription('🛰️ لوحة الرصد الكاملة: السيرفرات ومن أضاف البوت ومتى ومن يتكلم معه'),
+        new SlashCommandBuilder().setName('الرصد').setDescription('🛰️ رصد وكلائك: اختر وكيلاً وشاهد سيرفراته كاملة بترتيب بصري واضح'),
     ];
 }
 
@@ -712,9 +712,14 @@ async function renderSettings(guildId) {
 }
 
 // ═════════════════════════════════════════════════════════════
-//  🛰️ RAQEEB — لوحة الرصد الكاملة (v7.9)
-//  أي السيرفرات فيها البوت، من أضافه ومتى، من يتكلم معه الآن
-//  ومن قبل، حالة حساب Qwen التلقائي لكل سيرفر.
+//  🛰️ RAQEEB — لوحة الرصد (إعادة تصميم كاملة — v7.12 بطلب المالك)
+//  «التصميم القديم خرا — لا أفهم شيء»: كانت قائمة مختلطة بكل
+//  سيرفرات كل الوكلاء في صفحة واحدة مبعثرة.
+//  التصميم الجديد (المطلوب حرفياً):
+//   1) /الرصد → قائمة اختيار الوكيل أولاً.
+//   2) عند الاختيار → سيرفرات هذا الوكيل فقط، كل سيرفر كتلة
+//      مستقلة مفصولة بخط مرئي حقيقي (Separator من ديسكورد نفسه)
+//      وترتيب Markdown نظيف يُقرأ من أول نظرة.
 // ═════════════════════════════════════════════════════════════
 
 function qwenAccountBadge(acc) {
@@ -725,64 +730,144 @@ function qwenAccountBadge(acc) {
     return String(acc.status || '—');
 }
 
-async function renderRadar(manager, page = 0) {
+/**
+ * الشاشة الأولى للرصد: اختيار الوكيل — خطوة واحدة واضحة بلا فوضى.
+ */
+async function renderRadarHome(manager) {
+    const cfg = require('./config');
+    const agents = await cfg.agents_col.find({}).sort({ name: 1 }).limit(25).toArray();
+
+    if (!agents.length) {
+        return { ...v2Payload(embed('🛰️ الرصد — لا يوجد وكلاء', linesBlock([
+            'لا يوجد وكلاء بعد — أنشئ وكيلاً أولاً من زر «إنشاء وكيل».',
+            'بعد إنشائه وإضافته لسيرفرات، ستجد سيرفراته هنا كاملة.',
+        ]), COLORS.dark), rowsFromButtons([
+            button(`${DASH_PREFIX}:create`, 'إنشاء وكيل', ButtonStyle.Success, ICONS.add),
+            button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
+        ])) };
+    }
+
+    const emb = embed('🛰️ الرصد — اختر الوكيل', linesBlock([
+        '**اختر وكيلاً من القائمة لعرض سيرفراته كاملة.**',
+        'ستشاهد لكل سيرفر: من أضاف الوكيل ومتى، من يتكلم معه الآن،',
+        'عدد محادثاته، وحالة حساب Qwen — كل سيرفر في كتلة مستقلة مفصولة بخط واضح.',
+        '',
+        `الوكلاء المتاحون: **${agents.length}**`,
+    ]), COLORS.live);
+
+    const selectRow = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId(`${DASH_PREFIX}:radar_agent_select`)
+            .setPlaceholder('🛰️ اختر الوكيل الذي تريد رصده')
+            .addOptions(agents.map(agentOption)),
+    );
+    return { ...v2Payload(withRows(emb, [selectRow, ...rowsFromButtons([
+        button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
+    ])])) };
+}
+
+/**
+ * كتلة سيرفر واحدة — Markdown مرتب يُقرأ من أول نظرة.
+ */
+function radarGuildBlock(g) {
+    const state = g.left ? '🚪 **خرج البوت منه**' : '🟢 موجود';
+    const live = g.live ? `\n🔴 **يتكلم معه الآن:** @${g.live.username || '؟'} في #${g.live.channelName || '؟'}` : '';
+    return [
+        `### 🏰 ${g.name || 'سيرفر'} — ${state}`,
+        `> 🆔 \`${g.guild_id}\` • 👥 ${g.member_count ?? '—'} عضو`,
+        `👤 **أضافه:** ${g.added_by_tag ? `@${g.added_by_tag}` : 'غير معروف'}${g.added_by_id ? ` — \`${g.added_by_id}\`` : ''}`,
+        `📅 **انضم:** ${fmtDate(g.joined_at)}${g.left && g.left_at ? ` • 🚪 **خرج:** ${fmtDate(g.left_at)}` : ''}`,
+        `💬 **محادثاته مع هذا الوكيل:** ${g.total_chats ?? 0} • 🕒 **آخر نشاط:** ${g.last_activity ? fmtDate(g.last_activity.created_at) : 'لا شيء بعد'}`,
+        `🌐 **Qwen:** ${g.qwen_badge || '—'}`,
+        live,
+    ].filter(Boolean).join('\n');
+}
+
+/**
+ * شاشة سيرفرات وكيل واحد — كل سيرفر كتلة مفصولة بخط مرئي حقيقي.
+ */
+const RADAR_PER_PAGE = 5;
+
+async function renderRadarAgent(manager, agentId, page = 0) {
+    const cfg = require('./config');
     const guildRegistry = require('./guildRegistry');
     const qwenAccounts = require('./qwenAccounts');
-    const rows = await guildRegistry.getOverview();
+    const { ContainerBuilder } = require('discord.js');
+
+    let agent = null;
+    try { agent = await cfg.agents_col.findOne({ _id: new ObjectId(String(agentId)) }); } catch (_) {}
+    if (!agent) {
+        return { ...v2Payload(embed('❌ الوكيل غير موجود', linesBlock(['قد يكون الوكيل حُذف أو لم يعد متاحاً.']), COLORS.danger), rowsFromButtons([
+            button(`${DASH_PREFIX}:radar`, 'عودة لاختيار الوكيل', ButtonStyle.Secondary, ICONS.back),
+        ])) };
+    }
+
+    // هوية بوت ديسكورد للوكيل: المحفوظة على الوثيقة أولاً، وإلا من runtime حي إن وجد
+    let botUserId = agent.discord_bot_id || null;
+    if (!botUserId) {
+        const rt = manager?.runtimes?.get?.(String(agentId));
+        botUserId = rt?.client?.user?.id || null;
+    }
+
+    const rows = await guildRegistry.getAgentRadar(String(agent._id), botUserId, agent.name).catch(() => []);
     const activeCount = rows.filter(r => !r.left).length;
 
     if (!rows.length) {
-        const emb = embed('🛰️ لوحة الرصد', linesBlock([
-            '**لا توجد سيرفرات مسجلة بعد.**',
-            'بمجرد إضافة البوت لأي سيرفر سيُسجل هنا: من أضافه، ومتى، ومن يتكلم معه.',
-        ]), COLORS.dark);
-        return { ...v2Payload(withRows(emb, rowsFromButtons([
-            button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        return { ...v2Payload(embed(`🛰️ رصد الوكيل — ${agent.name || agentId}`, linesBlock([
+            '**لا توجد سيرفرات مسجلة لهذا الوكيل بعد.**',
+            '> أضِف البوت لأي سيرفر وسيُسجل هنا فوراً: من أضافه ومتى.',
+            '> (الوكلاء القديمون قبل هذا التحديث: شغّل الوكيل مرة واحدة ليُسجَّل تلقائياً)',
+        ]), COLORS.dark), rowsFromButtons([
+            button(`${DASH_PREFIX}:radar_agent:${agentId}:0`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+            button(`${DASH_PREFIX}:radar`, 'تغيير الوكيل', ButtonStyle.Primary, ICONS.back),
             button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
-        ]))) };
+        ])) };
     }
 
-    // 📄 ترقيم الصفحات (v7.11): 8 سيرفرات لكل صفحة — الصفحة الكاملة تبقى
-    // تحت سقف نص ديسكورد مهما كبر عدد السيرفرات المسجلة.
-    const PER_PAGE = 8;
-    const pages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
+    // 📄 ترقيم — 5 سيرفرات لكل صفحة (كل كتلة تأخذ مساحة مريحة مقروءة)
+    const pages = Math.max(1, Math.ceil(rows.length / RADAR_PER_PAGE));
     const safePage = Math.min(Math.max(Number(page) || 0, 0), pages - 1);
-    const pageRows = rows.slice(safePage * PER_PAGE, safePage * PER_PAGE + PER_PAGE);
+    const pageRows = rows.slice(safePage * RADAR_PER_PAGE, safePage * RADAR_PER_PAGE + RADAR_PER_PAGE);
 
-    // ⚡ دفعة حسابات Qwen لكل السيرفرات المعروضة باستعلام واحد
+    // ⚡ حسابات Qwen لكل السيرفرات المعروضة دفعة واحدة (بلا مهلة ديسكورد)
     const accs = await qwenAccounts.describeGuildAccounts(pageRows.map(g => g.guild_id)).catch(() => new Map());
+    for (const g of pageRows) g.qwen_badge = qwenAccountBadge(accs.get(String(g.guild_id)));
 
-    const lines = [
-        `**${ICONS.radar} العلم التام عن بوتاتك:** ${activeCount} سيرفر نشط من أصل ${rows.length} مسجل.`,
+    const liveCount = rows.filter(r => r.live).length;
+    const summary = [
+        `${ICONS.bot} **الوكيل:** ${agent.name || agentId} • ${agentKindLabel(agent)}`,
+        `🏰 **السيرفرات:** ${activeCount} نشط من أصل ${rows.length} مسجل${liveCount ? ` • 🔴 **${liveCount}** يتكلم الآن` : ''}`,
         `📄 صفحة **${safePage + 1}/${pages}**`,
-        '',
-    ];
+    ].join('\n');
 
+    // 🎨 الحاوية: ترويسة ← فاصل ← ملخص ← [خط مرئي + كتلة سيرفر] × N ← أزرار داخل الإطار
+    const c = new ContainerBuilder().setAccentColor(COLORS.live);
+    c.addTextDisplayComponents(ui.textDisplay(`## 🛰️ رصد الوكيل — ${trim(agent.name || 'وكيل', 40)}`));
+    c.addSeparatorComponents(ui.separator(true));
+    c.addTextDisplayComponents(ui.textDisplay(ui.safeBody(summary)));
     for (const g of pageRows) {
-        const state = g.left ? '🚪 خرج' : (g.live ? '🟢 يتكلم معه الآن' : '🟢 موجود');
-        lines.push(`**${g.left ? '『خرج』' : '🏰'} ${g.name}** — ${state}`);
-        lines.push(`   🆔 \`${g.guild_id}\` • 👥 ${g.member_count ?? '—'} عضو • 📅 انضم: ${fmtDate(g.joined_at)}`);
-        lines.push(`   👤 أضافه: ${g.added_by_tag ? `**@${g.added_by_tag}**` : 'غير معروف'}${g.added_by_id ? ` (\`${g.added_by_id}\`)` : ''}`);
-        lines.push(`   💬 محادثات مسجلة: **${g.total_chats ?? 0}** • آخر نشاط: ${g.last_activity ? fmtDate(g.last_activity.created_at) : 'لا شيء بعد'}${g.live ? `\n   🔴 الآن: **@${g.live.username}** في #${g.live.channelName} مع ${g.live.agentName || 'وكيل'}` : ''}`);
-        const acc = accs.get(String(g.guild_id));
-        lines.push(`   🌐 Qwen: ${qwenAccountBadge(acc)}`);
-        lines.push('');
+        c.addSeparatorComponents(ui.separator(true)); // ← الخط المرئي الفاصل بين السيرفرات
+        c.addTextDisplayComponents(ui.textDisplay(ui.safeBody(radarGuildBlock(g))));
     }
+    c.addSeparatorComponents(ui.separator(true));
+    c.addTextDisplayComponents(ui.textDisplay(`-# 🧭 ${ui.BRAND}`));
 
-    const buttons = [];
-    for (const g of pageRows.filter(r => !r.left).slice(0, 4)) {
-        buttons.push(button(`${DASH_PREFIX}:radar_guild:${g.guild_id}`, trim(g.name, 25), ButtonStyle.Secondary, '🏰'));
-    }
-    buttons.push(button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Primary, ICONS.refresh));
-    buttons.push(button(`${DASH_PREFIX}:radar_page:${safePage - 1}`, 'السابق', ButtonStyle.Secondary, '⬅️', safePage <= 0));
-    buttons.push(button(`${DASH_PREFIX}:radar_page:${safePage + 1}`, 'التالي', ButtonStyle.Secondary, '➡️', safePage >= pages - 1));
-    buttons.push(button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back));
+    // أزرار: تفاصيل كل سيرفر (صف) + تنقل وتحديث (صف)
+    const guildButtons = pageRows.filter(r => !r.left).slice(0, 5)
+        .map(g => button(`${DASH_PREFIX}:radar_guild:${agentId}:${g.guild_id}`, trim(g.name || g.guild_id, 20), ButtonStyle.Secondary, '🏰'));
+    if (guildButtons.length) c.addActionRowComponents(new ActionRowBuilder().addComponents(guildButtons));
+    c.addActionRowComponents(new ActionRowBuilder().addComponents([
+        button(`${DASH_PREFIX}:radar_agent:${agentId}:${safePage}`, 'تحديث', ButtonStyle.Primary, ICONS.refresh),
+        button(`${DASH_PREFIX}:radar_agent:${agentId}:${safePage - 1}`, 'السابق', ButtonStyle.Secondary, '⬅️', safePage <= 0),
+        button(`${DASH_PREFIX}:radar_agent:${agentId}:${safePage + 1}`, 'التالي', ButtonStyle.Secondary, '➡️', safePage >= pages - 1),
+        button(`${DASH_PREFIX}:radar`, 'تغيير الوكيل', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:home`, 'الرئيسية', ButtonStyle.Secondary, ICONS.back),
+    ]));
 
-    const emb = embed('🛰️ لوحة الرصد — العلم التام', linesBlock(lines), COLORS.live);
-    return { ...v2Payload(withRows(emb, rowsFromButtons(buttons))) };
+    return { ...v2Payload(c) };
 }
 
-async function renderRadarGuild(manager, guildId) {
+async function renderRadarGuild(manager, guildId, agentId = null) {
     const guildRegistry = require('./guildRegistry');
     const qwenAccounts = require('./qwenAccounts');
     const detail = await guildRegistry.getGuildDetail(guildId);
@@ -792,25 +877,28 @@ async function renderRadarGuild(manager, guildId) {
     const lines = [
         `**🏰 ${detail.name}** ${detail.left ? '*(خرج البوت منه)*' : ''}`,
         `🆔 \`${detail.guild_id}\` • 👥 ${detail.member_count ?? '—'} عضو • 📅 انضم: ${fmtDate(detail.joined_at)}`,
-        `👤 أضافه: ${detail.added_by_tag ? `**@${detail.added_by_tag}** (\`${detail.added_by_id}\`)` : 'غير معروف'}`,
-        `👑 مالك السيرفر: ${detail.owner_id ? `<@${detail.owner_id}>` : '—'}`,
-        `🌐 حساب Qwen: ${qwenAccountBadge(acc)}${acc ? `\n   📧 بريد الحساب: \`${acc.email}\`` : ''}`,
+        `👤 **أضافه:** ${detail.added_by_tag ? `**@${detail.added_by_tag}** (\`${detail.added_by_id}\`)` : 'غير معروف'}`,
+        `👑 **مالك السيرفر:** ${detail.owner_id ? `<@${detail.owner_id}>` : '—'}`,
+        `🌐 **حساب Qwen:** ${qwenAccountBadge(acc)}${acc ? `\n📧 بريد الحساب: \`${acc.email}\`` : ''}`,
         '',
-        '**💬 آخر من تكلم مع البوت (من/أين/متى — بلا محتوى):**',
+        '**💬 آخر من تكلم مع الوكلاء هنا (من/أين/متى — بلا محتوى):**',
     ];
 
     if (!detail.activity.length) {
-        lines.push('   لا نشاط مسجل بعد.');
+        lines.push('> لا نشاط مسجل بعد.');
     } else {
         for (const a of detail.activity.slice(0, 15)) {
-            lines.push(`   • **@${a.username || '؟'}** في #${a.channel_name || a.channel_id || '؟'} — ${fmtDate(a.created_at)} — وكيل: ${a.agent_name || '—'}`);
+            lines.push(`> • **@${a.username || '؟'}** في #${a.channel_name || a.channel_id || '؟'} — ${fmtDate(a.created_at)} — وكيل: ${a.agent_name || '—'}`);
         }
     }
 
+    // ↩️ الرجوع لقائمة سيرفرات نفس الوكيل إن عرفنا السياق، وإلا لاختيار الوكيل
+    const backId = agentId && agentId !== 'x' ? `${DASH_PREFIX}:radar_agent:${agentId}:0` : `${DASH_PREFIX}:radar`;
+    const backLabel = agentId && agentId !== 'x' ? 'سيرفرات الوكيل' : 'تغيير الوكيل';
     const buttons = [
-        button(`${DASH_PREFIX}:radar_refresh`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
-        button(`${DASH_PREFIX}:radar_qwen:${guildId}`, 'إعادة محاولة تفعيل Qwen', ButtonStyle.Secondary, '🌐'),
-        button(`${DASH_PREFIX}:radar`, 'كل السيرفرات', ButtonStyle.Secondary, ICONS.back),
+        button(`${DASH_PREFIX}:radar_guild:${agentId || 'x'}:${guildId}`, 'تحديث', ButtonStyle.Secondary, ICONS.refresh),
+        button(`${DASH_PREFIX}:radar_qwen:${agentId || 'x'}:${guildId}`, 'إعادة محاولة تفعيل Qwen', ButtonStyle.Secondary, '🌐'),
+        button(backId, backLabel, ButtonStyle.Primary, ICONS.back),
     ];
 
     const emb = embed(`🛰️ رصد سيرفر — ${detail.name}`, linesBlock(lines), COLORS.info);
@@ -821,7 +909,7 @@ function updateInteractionErrorScreen(message) {
     return { ...v2Payload(embed('ℹ️ لا يوجد سجل', linesBlock([message]), COLORS.warning)) };
 }
 
-async function handleRadarQwenRetry(manager, guildId) {
+async function handleRadarQwenRetry(manager, guildId, agentId = null) {
     const qwenAccounts = require('./qwenAccounts');
     const res = await qwenAccounts.ensureGuildAccount(guildId, { reason: 'radar_retry' });
     await manager.notify({
@@ -831,7 +919,7 @@ async function handleRadarQwenRetry(manager, guildId) {
         message: res.ok ? 'الحساب مفعّل وجاهز للاستخدام.' : 'سيُعاد المحاولة تلقائياً كل 12 ساعة، أو جرّب لاحقاً من هنا.',
         guildId,
     }).catch(() => {});
-    return renderRadarGuild(manager, guildId);
+    return renderRadarGuild(manager, guildId, agentId && agentId !== 'x' ? agentId : null);
 }
 
 async function renderLogs(agentId = null, page = 0) {
@@ -1341,7 +1429,7 @@ async function handleDashboardInteraction(interaction, manager) {
         if (commandRoute === 'logs') return updateInteraction(interaction, await renderLogs(null, 0));
         if (commandRoute === 'stats') return updateInteraction(interaction, await renderStats(manager));
         if (commandRoute === 'system') return updateInteraction(interaction, await renderSystem(manager));
-        if (commandRoute === 'radar') return updateInteraction(interaction, await renderRadar(manager));
+        if (commandRoute === 'radar') return updateInteraction(interaction, await renderRadarHome(manager));
         return updateInteraction(interaction, await renderHome(manager, interaction));
     }
 
@@ -1592,6 +1680,11 @@ async function handleDashboardInteraction(interaction, manager) {
 
     if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:agent_select`) {
         await interaction.update(await renderAgent(manager, interaction.values[0]));
+        return true;
+    }
+    // 🛰️ v7.12 — اختيار الوكيل في الرصد يفتح سيرفراته فوراً
+    if (interaction.isStringSelectMenu() && id === `${DASH_PREFIX}:radar_agent_select`) {
+        await interaction.update(await renderRadarAgent(manager, interaction.values[0], 0));
         return true;
     }
     if (interaction.isChannelSelectMenu() && id === `${DASH_PREFIX}:notify_global_channel`) {
@@ -1887,11 +1980,20 @@ async function handleDashboardInteraction(interaction, manager) {
     if (parts[1] === 'logs') return updateInteraction(interaction, await renderLogs(null, parts[2]));
     if (parts[1] === 'stats') return updateInteraction(interaction, await renderStats(manager));
     if (parts[1] === 'system') return updateInteraction(interaction, await renderSystem(manager));
-    if (parts[1] === 'radar') return updateInteraction(interaction, await renderRadar(manager));
-    if (parts[1] === 'radar_refresh') return updateInteraction(interaction, await renderRadar(manager));
-    if (parts[1] === 'radar_page') return updateInteraction(interaction, await renderRadar(manager, parseInt(parts[2], 10) || 0));
-    if (parts[1] === 'radar_guild') return updateInteraction(interaction, await renderRadarGuild(manager, parts[2]));
-    if (parts[1] === 'radar_qwen') return updateInteraction(interaction, await handleRadarQwenRetry(manager, parts[2]));
+    // 🛰️ v7.12 — مسارات الرصد الجديدة (اختيار وكيل ← سيرفراته ← تفاصيل سيرفر)
+    // توافق قديم: radar_guild/radar_qwen بصيغة وسيط واحد تعمل بلا سياق وكيل
+    if (parts[1] === 'radar') return updateInteraction(interaction, await renderRadarHome(manager));
+    if (parts[1] === 'radar_agent') return updateInteraction(interaction, await renderRadarAgent(manager, parts[2], parseInt(parts[3], 10) || 0));
+    if (parts[1] === 'radar_guild') {
+        const agentCtx = parts.length >= 4 ? parts[2] : null;
+        const gid = parts[parts.length - 1];
+        return updateInteraction(interaction, await renderRadarGuild(manager, gid, agentCtx));
+    }
+    if (parts[1] === 'radar_qwen') {
+        const agentCtx = parts.length >= 4 ? parts[2] : null;
+        const gid = parts[parts.length - 1];
+        return updateInteraction(interaction, await handleRadarQwenRetry(manager, gid, agentCtx));
+    }
     if (parts[1] === 'activity_notify_toggle') {
         const guildRegistry = require('./guildRegistry');
         const current = await guildRegistry.activityNotifyEnabled();
@@ -3219,6 +3321,10 @@ module.exports = {
     listSavedProviders,
     saveProviderToDb,
     fetchProviderModels,
+    renderRadarHome,
+    renderRadarAgent,
+    renderRadarGuild,
+    radarGuildBlock,
     COLORS,
     embed,
     linesBlock,

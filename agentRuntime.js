@@ -81,7 +81,8 @@ const {
 } = require('./tools');
 
 // 🎭 قائمة انتظار الرسائل — واحد واحد بس: الأول يُرد ثم الثاني (v7.9)
-const { enqueueChannelTask } = require('./channelQueue');
+// 🛠️ v7.12: agentChannelKey — قائمة كل وكيل مستقلة حتى لو تشارك وكيلاان نفس القناة
+const { enqueueChannelTask, agentChannelKey } = require('./channelQueue');
 // 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
 const qwenAccounts = require('./qwenAccounts');
 // 🛰️ سجل السيرفرات والنشاط — العلم التام للمالك (v7.9)
@@ -562,6 +563,19 @@ client.once('ready', async () => {
     console.log(`📡 Guilds (${client.guilds.cache.size}): ${client.guilds.cache.map(g => g.name).join(', ')}`);
 
     if (agentConfig.onReady) await agentConfig.onReady();
+
+    // 🛰️ v7.12 — هوية بوت ديسكورد لهذا الوكيل تُحفظ على وثيقة الوكيل —
+    // /الرصد يحتاجها ليعرف سيرفرات هذا الوكيل تحديداً (apps.id في سجل الرصد)
+    // حتى وهو متوقف. fire-and-forget: فشلها لا يعطل الإقلاع أبداً.
+    try {
+        const cfgMod = require('./config');
+        if (cfgMod.agents_col && client.user?.id) {
+            await cfgMod.agents_col.updateOne(
+                { _id: new ObjectId(String(agentId)) },
+                { $set: { discord_bot_id: String(client.user.id), discord_bot_name: client.user.username || '' } },
+            ).catch(() => {});
+        }
+    } catch (_) {}
 
     // 🛰️ RAQEEB — ترحيل صامت: سيرفرات هذا الوكيل الحالية تُسجل عند الإقلاع
     // (السيرفرات القديمة قبل تفعيل الرصد لم تصل منها guildCreate أبداً)
@@ -1275,7 +1289,9 @@ client.on('messageCreate', async (message) => {
     // 🎭 قائمة انتظار القناة — «واحد واحد بس!» (طلب المالك — v7.9)
     // لو شخصين تكلما معي بنفس الوقت: أرد على الأول كاملاً ثم أجي للثاني بالترتيب.
     // رسالة المُنتظر تحصل على 👀 فقط — دلالة: «شفتك، إنت بالانتظار».
-    const chQueueKey = `${message.guild.id}_${message.channel.id}`;
+    // 🛠️ v7.12: المفتاح يبدأ بهويتي أنا (الوكيل) — لو كان وكيلاان في نفس القناة
+    // فلكل منهما قائمته المستقلة، ولا ينتظر أحدهما رد الآخر أبداً.
+    const chQueueKey = agentChannelKey(agentId, message.guild.id, message.channel.id);
 
     // تحديد مستوى صلاحية المرسل
     const accessLevel = getAccessLevel(message.member);

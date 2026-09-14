@@ -8,7 +8,7 @@
 
 'use strict';
 const assert = require('assert');
-const { enqueueChannelTask, isChannelBusy, channelDepth, _resetQueue } = require('../channelQueue');
+const { enqueueChannelTask, agentChannelKey, isChannelBusy, channelDepth, _resetQueue } = require('../channelQueue');
 
 let passed = 0;
 const ok = (n) => { passed++; console.log(`✅ ${n}`); };
@@ -98,7 +98,35 @@ async function run() {
         ok('6) مفاتيح ناقصة تُعامل بأمان (بلا انهيار)');
     }
 
-    console.log(`\n🎯 channel_queue: ${passed}/6 اختبارات ناجحة`);
+    // ── 7) v7.12 — وكيلاان مختلفان في نفس القناة يعملان متوازيين ──
+    // (شكوى المالك: النظام كان يطبّق الانتظار على كل الوكلاء معاً)
+    {
+        _resetQueue();
+        const order = [];
+        const keyA = agentChannelKey('agentAAA', 'g1', 'c1');
+        const keyB = agentChannelKey('agentBBB', 'g1', 'c1');
+        assert.notEqual(keyA, keyB, 'مفتاحان مختلفان لوكيلين مختلفين رغم نفس القناة');
+        // الوكيل A يبدأ مهمة طويلة
+        const a = enqueueChannelTask(keyA, async () => { await sleep(80); order.push('A'); });
+        // الوكيل B في نفس السيرفر/القناة — يجب أن يعمل فوراً بلا انتظار
+        const b = enqueueChannelTask(keyB, async () => { order.push('B'); });
+        assert.equal(a.wasBusy, false, 'الوكيل A: قائمته حرة');
+        assert.equal(b.wasBusy, false, 'الوكيل B: قائمته حرة — لا ينتظر الوكيل A أبداً');
+        await b.promise;
+        assert.deepStrictEqual(order, ['B'], 'B انتهى قبل A — التوازي بين الوكلاء يعمل');
+        await a.promise;
+        assert.deepStrictEqual(order, ['B', 'A'], 'الترتيب النهائي سليم');
+
+        // وفي المقابل: نفس الوكيل + نفس القناة = انتظار صارم (السلوك الأصلي محفوظ)
+        const c1 = enqueueChannelTask(keyA, async () => { await sleep(50); order.push('C1'); });
+        const c2 = enqueueChannelTask(keyA, async () => { order.push('C2'); });
+        assert.equal(c1.wasBusy, false, 'نفس الوكيل: أول مهمة حرة');
+        assert.equal(c2.wasBusy, true, 'نفس الوكيل: الثانية منتظرة (👀) — واحد واحد بس');
+        await c1.promise; await c2.promise;
+        ok('7) وكيلاان بنفس القناة متوازيان تماماً + نفس الوكيل يبقى بالترتيب الصارم');
+    }
+
+    console.log(`\n🎯 channel_queue: ${passed}/7 اختبارات ناجحة`);
 }
 
 run().catch((e) => { console.error('❌ FATAL:', e); process.exit(1); });

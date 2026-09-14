@@ -121,6 +121,11 @@ async function recordGuildJoin(guild, client) {
             {
                 $set: doc,
                 $setOnInsert: { joined_at: new Date() },
+                // 🛠️ v7.12: هوية البوت الذي انضم تُسجّل فوراً — كانت تُسجل فقط
+                // عند الترحيل (backfillGuilds) فيصبح الرصد لوكيل معيّن عمياً حتى إقلاع جديد
+                $addToSet: {
+                    apps: { id: String(client?.user?.id || ''), name: client?.user?.username || 'bot' },
+                },
             },
             { upsert: true },
         );
@@ -360,6 +365,77 @@ async function getGuildDetail(guildId) {
     return { ...doc, activity, live: liveActivity.get(gid) || null };
 }
 
+// ══════════════════════════════════════════════════════════════
+//  🛰️ v7.12 — رصد وكيل محدد (طلب المالك: /الرصد يبدأ باختيار الوكيل)
+//  سيرفرات وكيل واحد فقط، ونبضات نشاطه هو فقط، وكل سيرفر كتلة مستقلة.
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * سيرفرات وكيل واحد + إحصائيات نشاطه هو فقط.
+ * المطابقة بطبقتين (تتكاملان):
+ *   1) هوية البوت في apps (تعمل حتى لو لم يتكلم الوكيل أبداً)
+ *   2) سجل النشاط agent_id (يلتقط ما فاته apps قبل إصلاح v7.12)
+ * @param {string} agentMongoId معرّف الوكيل في قاعدة البيانات (_id)
+ * @param {string|null} botUserId معرّف بوت ديسكورد للوكيل (discord_bot_id المحفوظ)
+ * @param {string|null} agentName اسم الوكيل — لفلترة النبضة الحية (لا تُقبل نبضة وكيل آخر)
+ * @returns {Promise<Array>} سيرفرات مرتبة بآخر انضمام مع { total_chats, last_activity, live }
+ */
+async function getAgentRadar(agentMongoId, botUserId, agentName = null) {
+    const col = registryCol();
+    if (!col) return [];
+    const aid = String(agentMongoId || '');
+    const bid = String(botUserId || '');
+
+    // جمع السيرفرات من المصدرين
+    const gids = new Set();
+    try {
+        if (bid) {
+            const byApp = await col.find({ 'apps.id': bid }).limit(500).toArray();
+            for (const d of byApp) gids.add(String(d.guild_id));
+        }
+    } catch (_) {}
+    const actCol = activityCol();
+    try {
+        if (aid && actCol) {
+            const distinct = await actCol.distinct('guild_id', { agent_id: aid });
+            for (const g of (distinct || [])) gids.add(String(g));
+        }
+    } catch (_) {}
+    if (!gids.size) return [];
+
+    let docs = [];
+    try {
+        docs = await col.find({ guild_id: { $in: [...gids] } }).sort({ joined_at: -1 }).limit(500).toArray();
+    } catch (_) { return []; }
+
+    // إحصائيات نشاط هذا الوكيل فقط (باستعلام تجميعي واحد — لا مهلة ديسكورد)
+    const stats = new Map(); // guild_id -> { total, last }
+    if (aid && actCol) {
+        try {
+            const agg = await actCol.aggregate([
+                { $match: { agent_id: aid } },
+                { $group: { _id: '$guild_id', total: { $sum: 1 }, last: { $max: '$created_at' } } },
+            ]).toArray();
+            for (const row of (agg || [])) stats.set(String(row._id), { total: row.total || 0, last: row.last || null });
+        } catch (_) {}
+    }
+
+    // النبضات الحية المقبولة: نبضة هذا الوكيل فقط (باسمه) وداخل آخر 5 دقائق
+    const liveByGuild = new Map();
+    for (const gid of gids) {
+        const live = liveActivity.get(gid);
+        if (!live || (Date.now() - live.at >= 5 * 60 * 1000)) continue;
+        if (agentName && String(live.agentName || '') !== String(agentName)) continue;
+        liveByGuild.set(gid, live);
+    }
+
+    return docs.map(d => {
+        const s = stats.get(String(d.guild_id)) || { total: 0, last: null };
+        const live = liveByGuild.get(String(d.guild_id)) || null;
+        return { ...d, total_chats: s.total, last_activity: s.last ? { created_at: s.last } : null, live };
+    });
+}
+
 /** قصّ سجل النشاط — يُستدعى دورياً */
 async function trimActivity() {
     const col = activityCol();
@@ -407,6 +483,7 @@ module.exports = {
     backfillGuilds,
     getOverview,
     getGuildDetail,
+    getAgentRadar,
     setActivityNotify,
     activityNotifyEnabled,
     startRegistryTimers,
