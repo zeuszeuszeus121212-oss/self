@@ -167,17 +167,32 @@ function toolListAllGuilds(client) {
  * @returns {Promise<object>}
  */
 async function toolGetMessages(channel, limit = 100, memberId = null) {
-    const msgs    = [];
-    const fetched = await channel.messages.fetch({ limit: Math.min(limit, 500) });
-    for (const msg of fetched.values()) {
-        if (memberId && msg.author.id !== String(memberId)) continue;
-        msgs.push({
-            id        : msg.id,
-            author    : msg.author.displayName || msg.author.username,
-            author_id : msg.author.id,
-            content   : msg.content.slice(0, 500),
-            time      : msg.createdAt.toISOString().slice(0, 16).replace('T', ' '),
-        });
+    const msgs   = [];
+    // 🔁 ترقيم صفحات حقيقي: ديسكورد يمنح 100 رسالة كحد أقصى للطلب الواحد —
+    // نجمع بجولات متتالية (مؤشر before) حتى الوصول للحد المطلوب (سقف 500).
+    const wanted = Math.max(1, Math.min(Number(limit) || 100, 500));
+    let before   = undefined;
+    while (msgs.length < wanted) {
+        const batchLimit = Math.min(100, wanted - msgs.length);
+        let batch;
+        try {
+            batch = await channel.messages.fetch({ limit: batchLimit, ...(before ? { before } : {}) });
+        } catch (e) {
+            break; // انقطاع الجلب — نعيد ما حصلنا عليه
+        }
+        if (!batch || !batch.size) break;
+        for (const msg of batch.values()) {
+            if (memberId && msg.author.id !== String(memberId)) continue;
+            msgs.push({
+                id        : msg.id,
+                author    : msg.author.displayName || msg.author.username,
+                author_id : msg.author.id,
+                content   : msg.content.slice(0, 500),
+                time      : msg.createdAt.toISOString().slice(0, 16).replace('T', ' '),
+            });
+        }
+        before = batch.last()?.id;
+        if (!before || batch.size < batchLimit) break; // لا مزيد من الرسائل
     }
     return { messages: msgs, count: msgs.length };
 }

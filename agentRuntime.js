@@ -85,7 +85,9 @@ const {
     isTextChannel,
 } = require('./discordAdapter');
 
-const { dashboardCommands, isDashboardCommand } = require('./managerDashboard');
+// 🔒 ملاحظة العزل: managerDashboard يُستورد هنا فقط لـ isDashboardCommand
+// (لكشف بقايا أوامر اللوحة ورفضها محايداً) — لا يُسجّل أي أمر لوحة على بوت الوكيل.
+const { isDashboardCommand } = require('./managerDashboard');
 // 🎨 نظام التصميم الموحد — رسائل الوكيل أيضاً حاويات V2 لا إيمبدات
 const { v2Payload, V2_EPHEMERAL_FLAGS } = require('./ui');
 const { getAccountSettings, updateAccountSettings, forwardMessage, handleAccountInteraction, handleControlReply, trackGameMessage, startEvent, runEventSeries, rememberActivity, maybeAutoEvent, maybeScheduledEvent, humanizeDisplayName } = require('./accountAgent');
@@ -185,6 +187,10 @@ function buildHelpEmbeds(botName, extra = {}) {
 }
 
 function agentRuntimeCommands() {
+    // 🔒 غير مُسجّلة على بوتات الوكلاء (عزل أمني v7.7.0) — تبقى التعريفات
+    // فقط كتوثيق للأسماء التي قد ترد من بقايا تسجيل قديم على مستوى سيرفر،
+    // ومعالجاتها في interactionCreate محصورة بأدمن الوكيل نفسه.
+    // التسجيل الفعلي: agentBotCommands() — أمر /شرح فقط.
     const channelOption = (option) => option
         .setName('قناة')
         .setDescription('اكتب أو اختر قناة نصية')
@@ -338,6 +344,44 @@ function uniqueCommands(commands) {
         seen.add(name);
         return true;
     });
+}
+
+// ══════════════════════════════════════════════════════════════
+//  🔒 عزل بوتات الوكلاء — أمر واحد فقط: /شرح
+//  بوت الوكيل لا يستورد أي أوامر إطلاقاً (لا لوحة المدير، لا أوامر
+//  الوكيل). لوحة إدارة الوكلاء تعمل من بوت المدير الرئيسي حصراً —
+//  من يملك توكن بوت وكيل لا يستطيع رؤية أي شيء إداري أصلاً.
+// ══════════════════════════════════════════════════════════════
+function agentBotCommands() {
+    return [
+        new SlashCommandBuilder()
+            .setName('شرح')
+            .setDescription('من أنا؟ — بطاقة تعريفية بهذا البوت'),
+    ];
+}
+
+/**
+ * 🪪 بطاقة /شرح — Components V2 احترافية
+ * تعريف البوت: ذكاء اصطناعي مصمم للتفاعل مع أعضاء السيرفر وترفيههم،
+ * مطوّر بواسطة زيوس. تُعرض على كل بوت وكيل منشأ.
+ * @param {string} botName اسم البوت الظاهر
+ */
+function buildIntroPayload(botName) {
+    const ui = require('./ui');
+    const name = String(botName || 'هذا البوت');
+    const card = ui.container({
+        accent: ui.ACCENTS.primary,
+        title: `✨ ${name}`,
+        body: [
+            '**ذكاء اصطناعي مصمم للتفاعل مع أعضاء السيرفر** — يحاور، يساعد، يسلي، ويضيف روحاً حقيقية للمجتمع.',
+            '',
+            'تحدث معه بشكل طبيعي: منشنه في أي قناة أو راسله خاصاً، وسيرد عليك بذكاء وبشخصيته الخاصة.',
+            '',
+            `> 🛠️ مطوّر بواسطة **زيوس** <@656783724662226963>`,
+        ].join('\n'),
+        footer: 'تطوير زيوس — Disor',
+    });
+    return v2Payload(card);
 }
 
 // ℹ️ مؤشر «يكتب...» (Typing) أُزيل بناءً على طلب المالك — الوكيل يرد مباشرة
@@ -521,21 +565,20 @@ client.once('ready', async () => {
     if (tokenType !== 'bot') return;
 
     try {
-        // Bot Agent يسجل نقطة دخول Dashboard كواجهة فقط؛ التنفيذ الحقيقي يبقى في Manager Runtime.
-        // أمر مزود-باو (POW) خاص بمزود DeepSeek فقط — لا يُسجل لوكلاء Qwen / OpenAI
-        const commands = uniqueCommands([
-            ...dashboardCommands(),
-            ...agentRuntimeCommands().filter(cmd => providerId === 'deepseek' || cmd.name !== 'مزود-باو'),
-        ]);
+        // 🔒 عزل أمني صارم: بوت الوكيل يسجل أمراً واحداً فقط (/شرح).
+        // لا لوحة المدير ولا أوامر الوكيل — استبدال القائمة كاملة يمسح حتى
+        // الأوامر القديمة المسجلة سابقاً على هذا التطبيق. الإدارة كاملة
+        // تُدار من بوت المدير الرئيسي فقط (bot.js).
+        const commands = uniqueCommands(agentBotCommands());
 
         const rest = new REST({ version: '10' }).setToken(discordToken);
 
-        console.log('⏳ جاري تسجيل واجهة Dashboard للوكيل...');
+        console.log('⏳ جاري تسجيل أمر /شرح لبوت الوكيل...');
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands.map(cmd => cmd.toJSON()) },
         );
-        console.log('✅ Agent dashboard UI synced');
+        console.log('✅ Agent bot isolated — only /شرح registered');
     } catch (err) {
         console.error('❌ فشل تسجيل أوامر السلاش:', err);
     }
@@ -565,16 +608,23 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    // ── Dashboard UI delegation ──
-    // Agent Runtime لا ينفذ أي إدارة محليًا. Bot Agent مجرد واجهة ترسل الطلب إلى Manager.
+    // ── 🔒 بقايا لوحة المدير — رفض محايد ──
+    // بوت الوكيل لا يعرض لوحة المدير إطلاقاً. لو وصل تفاعل dash: (بقايا
+    // أوامر قديمة مسجلة على مستوى سيرفر مثلاً) يُرفض برسالة محايدة —
+    // ولا يُمرر أي شيء إلى نظام إدارة الوكلاء مهما كان.
     if ((interaction.isChatInputCommand() && isDashboardCommand(interaction.commandName))
-        || (interaction.customId && interaction.customId.startsWith('dash:'))
-        || (interaction.isModalSubmit && interaction.isModalSubmit() && interaction.customId && interaction.customId.startsWith('dash:'))) {
-        if (typeof agentConfig.handleManagementInteraction === 'function') {
-            await agentConfig.handleManagementInteraction(interaction);
-        } else if (!interaction.replied && !interaction.deferred) {
-            await interaction.reply({ content: '⚠️ Manager Runtime غير متاح لمعالجة لوحة التحكم.' });
-        }
+        || (interaction.customId && interaction.customId.startsWith('dash:'))) {
+        const neutralPayload = v2Payload((() => {
+            const ui = require('./ui');
+            return ui.container({
+                accent: ui.ACCENTS.warning,
+                title: 'غير متاح هنا',
+                body: 'هذا البوت رفيق محادثة فقط — الإدارة تتم من بوت المدير الرئيسي.',
+            });
+        })());
+        const ephemeral = { ...neutralPayload, flags: V2_EPHEMERAL_FLAGS };
+        if (interaction.replied || interaction.deferred) await interaction.followUp(ephemeral).catch(() => {});
+        else await interaction.reply(ephemeral).catch(() => {});
         return;
     }
 
@@ -602,6 +652,13 @@ client.on('interactionCreate', async (interaction) => {
     try {
 
         // أوامر إدارة الوكلاء نُقلت بالكامل إلى Manager Dashboard.
+
+        // 🪪 أمر الوكيل الوحيد المسجل: /شرح — بطاقة تعريفية V2
+        if (commandName === 'شرح') {
+            const botName = client.user.displayName || client.user.username;
+            await interaction.reply(buildIntroPayload(botName)).catch(() => {});
+            return;
+        }
 
         if (commandName === 'اوامر' || commandName === 'مساعدة') {
             const botName = client.user.displayName || client.user.username;
@@ -1376,4 +1433,5 @@ client.on('invalidated', () => {
     };
 }
 
-module.exports = { startAgentRuntime };
+// 🔒 تصدير أغراض الاختبار: قائمة أوامر بوت الوكيل المعزولة + بطاقة /شرح
+module.exports = { startAgentRuntime, agentBotCommands, buildIntroPayload };

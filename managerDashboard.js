@@ -338,7 +338,7 @@ async function renderAgent(manager, agentId) {
     const providerReady = providerObj.validate(extractProviderConfig(agentPlain)).ok;
     const emb = embed(`${agentIcon(agent)} ${agent.name || 'Agent'}`, linesBlock([
         `📌 **النوع:** ${tokenTypeLabel(agent)}`,
-        `🧠 **الوضع:** ${agentKindLabel(agent)}${agentKindOf(agent) === 'chat' ? ' — حوار خالص بلا أي أدوات' : ''}`,
+        `🧠 **الوضع:** ${agentKindLabel(agent)}${agentKindOf(agent) === 'chat' ? ' — حوار بأدوات أساسية صامتة' : ''}`,
         `${providerObj.emoji} **المزود:** ${providerObj.label} — ${providerReady ? 'جاهز ✅' : 'ناقص ❌'}`,
         `↳ ${providerObj.describe(extractProviderConfig(agentPlain))}`,
         // 🧩 وكيل أُنشئ ببيانات مزود ناقصة (سيُرسل المالك القيم لاحقاً كملف/نافذة)
@@ -360,7 +360,7 @@ async function renderAgent(manager, agentId) {
     // POW خاص بمزود DeepSeek فقط (تحدي إثبات عمل لـ chat.deepseek.com)
     // وكلاء Qwen / OpenAI لا يستخدمون POW — لا داعي لإظهار الزر لهم
     const isDeepSeekAgent = providerObj.id === 'deepseek';
-    // 💬 وكيل «محادثة»: لا أدوات إطلاقاً — أدوات المعرفة RAG لا معنى لها له، فلا زر لها
+    // 💬 وكيل «محادثة»: أدواته الأساسية الصامتة فقط (ذاكرة/تذكيرات/قراءة) — المعرفة RAG ليست ضمنها فلا زر لها
     const isChatKind = agentKindOf(agent) === 'chat';
     const actions = [
         button(`${DASH_PREFIX}:agent:${id}:start`, 'تشغيل', ButtonStyle.Success, '▶️', isRunning || isBusy),
@@ -385,9 +385,9 @@ async function renderAgent(manager, agentId) {
     return { ...v2Payload(withRows(emb, rowsFromButtons(actions))) };
 }
 
-// ── 💬🤖 تسميات نوع الوكيل التشغيلي (محادثة خالصة / وكيل بأدوات) ──
+// ── 💬🤖 تسميات نوع الوكيل التشغيلي (محادثة بأدوات أساسية / وكيل بأدوات كاملة) ──
 function agentKindLabel(agent) {
-    return agentKindOf(agent) === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
+    return agentKindOf(agent) === 'chat' ? '💬 محادثة (حوار بأدوات أساسية صامتة)' : '🤖 وكيل (أدوات كاملة)';
 }
 function agentKindOf(agent) {
     return String(agent?.kind || 'agent').toLowerCase() === 'chat' ? 'chat' : 'agent';
@@ -397,7 +397,7 @@ function createKindView() {
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
         '**الخطوة 1 من 4: اختر طبيعة الوكيل.**',
         `${ICONS.bot} **وكيل** — العقل المنفّذ الكامل: أدوات قراءة وتنفيذ، إنشاء ملفات، توليد صور، ذاكرة، تذكيرات، قاعدة معرفة. يدير ويعمل.`,
-        `${ICONS.user} **محادثة** — رفيق حوار خالص: يتكلم ويجيب من عقله فقط، لا يملك أي أدوات ولا يعلم بوجودها أصلاً. أبسط وأخف وأسرع.`,
+        `${ICONS.user} **محادثة** — رفيق حوار طبيعي: يتكلم ويتذكر ويتابع أجواء السيرفر بحواسّه الخفية (ذاكرة/تذكيرات/قراءة) ويستخدمها بصمت دون أن يذكرها أبداً. لا إدارة ولا تنفيذ.`,
         '',
         '**الخطوة التالية:** نوع الحساب (Bot Token / User Account) ثم مزود الذكاء الاصطناعي.',
     ]), COLORS.success);
@@ -407,17 +407,17 @@ function createKindView() {
             .setPlaceholder('اختر طبيعة الوكيل')
             .addOptions([
                 { label: 'وكيل — أدوات كاملة', value: 'agent', description: 'ينفذ ويدير: أدوات، ملفات، صور، ذاكرة، تذكيرات', emoji: '🤖' },
-                { label: 'محادثة — حوار خالص', value: 'chat', description: 'يتكلم فقط — لا أدوات ولا يعلم بها إطلاقاً', emoji: '💬' },
+                { label: 'محادثة — حوار طبيعي', value: 'chat', description: 'حوار بأدوات أساسية صامتة (ذاكرة/تذكيرات/قراءة) — بلا إدارة', emoji: '💬' },
             ]),
     );
     return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])])) };
 }
 
 function createTypeView(kind = 'agent') {
-    const kindText = kind === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
+    const kindText = kind === 'chat' ? '💬 محادثة (حوار بأدوات أساسية صامتة)' : '🤖 وكيل (أدوات كاملة)';
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
         '**الخطوة 2 من 4: اختر نوع الحساب.**',
-        `${ICONS.bot} Bot Token: يمكنه عرض واجهة Dashboard كواجهة فقط، والتنفيذ يبقى في Manager.`,
+        `${ICONS.bot} Bot Token: بوت مستقل بأمر واحد فقط /شرح (بطاقة تعريفية) — بلا أي أوامر إدارية، والعزل أمني كامل.`,
         `${ICONS.user} User Account: Runtime فقط بدون Slash/Application Commands.`,
         '',
         `**طبيعة الوكيل المختارة:** ${kindText}`,
@@ -428,7 +428,7 @@ function createTypeView(kind = 'agent') {
             .setCustomId(`${DASH_PREFIX}:create_type:${kind}`)
             .setPlaceholder('اختر نوع الحساب')
             .addOptions([
-                { label: 'Bot Token', value: 'bot', description: 'واجهة UI اختيارية + Runtime AI', emoji: ICONS.bot },
+                { label: 'Bot Token', value: 'bot', description: 'بوت مستقل — أمر /شرح فقط (عزل كامل)', emoji: ICONS.bot },
                 { label: 'User Account', value: 'user', description: 'Runtime فقط بدون Commands', emoji: ICONS.user },
             ]),
     );
@@ -443,7 +443,7 @@ function createTypeView(kind = 'agent') {
  * كل مزود له واجهة وإعدادات مختلفة تماماً في الخطوة التالية.
  */
 function createProviderView(type, kind = 'agent') {
-    const kindText = kind === 'chat' ? '💬 محادثة (حوار خالص بلا أدوات)' : '🤖 وكيل (أدوات كاملة)';
+    const kindText = kind === 'chat' ? '💬 محادثة (حوار بأدوات أساسية صامتة)' : '🤖 وكيل (أدوات كاملة)';
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
         '**الخطوة 3 من 4: اختر مزود الذكاء الاصطناعي.**',
         '',
@@ -1856,7 +1856,7 @@ async function handleDashboardInteraction(interaction, manager) {
             return interaction.update(page);
         }
         if (interaction.isStringSelectMenu() && action === 'kind_set') {
-            // 🧠💬 تبديل وضع الوكيل: وكيل (أدوات كاملة) ⇄ محادثة (حوار خالص بلا أدوات)
+            // 🧠💬 تبديل وضع الوكيل: وكيل (أدوات كاملة) ⇄ محادثة (أدوات أساسية صامتة)
             // يُطبق فوراً على الـ runtime الحي — النظام يبني البرومبت المناسب لكل رسالة
             const newKind = String(interaction.values[0]) === 'chat' ? 'chat' : 'agent';
             const agentNow = await cfg.agents_col.findOne({ _id: new ObjectId(agentId) });
@@ -1869,7 +1869,7 @@ async function handleDashboardInteraction(interaction, manager) {
                 const liveRuntime = manager?.runtimes?.get?.(String(agentId));
                 if (liveRuntime?.runtimeSettings) liveRuntime.runtimeSettings.kind = newKind;
                 await manager.logAgent(agentId, 'kind_update', newKind === 'chat'
-                    ? 'تم تحويل الوكيل إلى وضع «محادثة» — حوار خالص بلا أدوات'
+                    ? 'تم تحويل الوكيل إلى وضع «محادثة» — حوار بأدوات أساسية صامتة (ذاكرة/تذكيرات/قراءة) دون ذكرها أبداً'
                     : 'تم تحويل الوكيل إلى وضع «وكيل» — أدوات كاملة', { kind: newKind });
             }
             return interaction.update(await renderAgentSettings(agentId, interaction.guildId));
@@ -2450,7 +2450,7 @@ async function renderAgentSettings(agentId, guildId) {
         .slice(0, 5);
 
     const components = [];
-    // 🧠 مبدّل وضع الوكيل: وكيل (أدوات) ⇄ محادثة (حوار خالص) — يُطبق حياً بدون إعادة تشغيل
+    // 🧠 مبدّل وضع الوكيل: وكيل (أدوات) ⇄ محادثة (أدوات أساسية صامتة) — يُطبق حياً بدون إعادة تشغيل
     components.push(new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
             .setCustomId(`${DASH_PREFIX}:agent:${agentId}:kind_set`)
@@ -2463,9 +2463,9 @@ async function renderAgentSettings(agentId, guildId) {
                     emoji: '🤖',
                 },
                 {
-                    label: agentKindOf(agent) === 'chat' ? 'محادثة — الحالي' : 'محادثة — حوار خالص',
+                    label: agentKindOf(agent) === 'chat' ? 'محادثة — الحالي' : 'محادثة — حوار طبيعي',
                     value: 'chat',
-                    description: 'يتكلم فقط — لا أدوات ولا يعلم بها إطلاقاً',
+                    description: 'حوار بأدوات أساسية صامتة — بلا إدارة ولا تنفيذ',
                     emoji: '💬',
                 },
             ]),

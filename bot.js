@@ -33,6 +33,36 @@ const runtimes = new Map();
 const reconnectTimers = new Map();
 let managerClient = null;
 
+// ══════════════════════════════════════════════════════════════
+//  🔒 حارس لوحة المدير — القاعدة الذهبية للعزل الأمني
+//  لوحة إدارة الوكلاء تعمل من بوت المدير الرئيسي حصراً. أي تفاعل
+//  قادم من عميل آخر (بوت وكيل مثلاً) يُرفض برسالة محايدة — حتى لو
+//  سُجلت أوامر اللوحة على تطبيقه بطريقة ما (بقايا تسجيل قديم مثلاً).
+//  @param {object} opts { managerUserId: ()=>string|null, delegate: async (interaction)=>void }
+// ══════════════════════════════════════════════════════════════
+function makeManagementProxy({ managerUserId, delegate }) {
+    return async function handleManagementInteraction(interaction) {
+        const expectedId = typeof managerUserId === 'function' ? managerUserId() : managerUserId;
+        const senderId = interaction?.client?.user?.id;
+        if (!expectedId || !senderId || String(senderId) !== String(expectedId)) {
+            const ui = require('./ui');
+            const payload = {
+                flags: ui.V2_EPHEMERAL_FLAGS,
+                components: [ui.container({
+                    accent: ui.ACCENTS.warning,
+                    title: 'غير متاح هنا',
+                    body: 'هذا البوت رفيق محادثة فقط — الإدارة تتم من بوت المدير الرئيسي.',
+                })],
+            };
+            if (interaction.replied || interaction.deferred) await interaction.followUp(payload).catch(() => {});
+            else await interaction.reply(payload).catch(() => {});
+            return false; // مرفوض — لم تُنفذ أي إدارة
+        }
+        await delegate(interaction);
+        return true;
+    };
+}
+
 function createManagerClient() {
     return new Client({
         intents: [
@@ -160,7 +190,10 @@ async function startAgent(agent) {
                 await logAgent(id, 'disconnect', reason || 'انقطع اتصال الوكيل', { reason });
                 await scheduleReconnect(id, reason);
             },
-            handleManagementInteraction: async (interaction) => handleDashboardInteraction(interaction, module.exports),
+            handleManagementInteraction: makeManagementProxy({
+                managerUserId: () => managerClient?.user?.id,
+                delegate: async (interaction) => handleDashboardInteraction(interaction, module.exports),
+            }),
         });
         runtimes.set(id, runtime);
         return runtime;
@@ -359,6 +392,7 @@ module.exports = {
     logAgent,
     notify,
     bootAgents,
+    makeManagementProxy,
     get managerClient() { return managerClient; },
 };
 

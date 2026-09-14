@@ -192,6 +192,23 @@ async function _downloadToTmp(url) {
 const MAX_STEPS = 24;
 const MAX_FALSE_SUCCESS_ATTEMPTS = 1; // محاولة تصحيح واحدة فقط
 
+// ══════════════════════════════════════════════════════════════
+//  💬 أدوات وضع «المحادثة» — الأدوات الأساسية الممتعة فقط
+//  ذاكرة + تذكيرات + قراءة (معلومات السيرفر/العضو/الرسائل).
+//  كل ما عداه محجوب في هذا الوضع — ولا أدوات إدارة/تنفيذ/ويب إطلاقاً،
+//  والبرومبت يمنع النموذج من ذكر وجود أدوات أصلاً (استخدام صامت).
+// ══════════════════════════════════════════════════════════════
+const CHAT_MODE_TOOLS = Object.freeze([
+    // 🧠 الذاكرة (محصورة بمستخدم الطلب)
+    'remember', 'recall', 'forget_memory',
+    // ⏰ التذكيرات (محصورة بمستخدم الطلب)
+    'set_reminder', 'list_reminders', 'cancel_reminder',
+    // 👀 قراءة السيرفر والناس والرسائل — أدوات القراءة فقط
+    'server_info', 'get_member_info',
+    'get_messages', 'search_messages', 'get_pinned_messages',
+    'get_channels',
+]);
+
 async function runAgent(
     guild, channel, userMsg, userInfo, botContext, botName,
     sessionId, parentMessageId, guildId,
@@ -234,56 +251,12 @@ async function runAgent(
     
     let falseSuccessCount = 0; // عداد لكسر الحلقة اللانهائية
 
+    // 💬 وضع المحادثة: نفس حلقة الوكيل لكن بأدوات أساسية مقيدة فقط
+    // (CHAT_MODE_TOOLS) — لا تنفيذ إداري ولا ويب ولا ملفات ولا معرفة.
+    const chatMode = agentKind === 'chat';
+
     // 📁 ملفات الإرسال المتراكمة عبر كل خطوات الحلقة (صور مولدة، ملفات نصية...)
     const filesToSend = [];
-
-    // ════════════════════════════════════════════════════════════
-    //  💬 النوع «محادثة» — حوار خالص: استدعاء واحد للنموذج بلا أدوات
-    //  لا حلقة، لا تنفيذ أدوات، لا ملفات — رد النموذج هو الرد النهائي.
-    //  سلسلة Fallback تعمل كما هي عند فشل المزود.
-    // ════════════════════════════════════════════════════════════
-    if (agentKind === 'chat') {
-        const chatPrompt = `${system}\n\n${botContext}\n\n${userInfo}\n\nUser: ${userMsg}`;
-        for (let attempt = 0; attempt < chain.length; attempt++) {
-            const active = chain[attempt];
-            console.log(`[Chat] provider=${active.id}${attempt > 0 ? ' (fallback)' : ''} kind=chat thinking=${effThinking}`);
-            try {
-                const aiResult = await active.obj.chat({
-                    prompt          : chatPrompt,
-                    guildId,
-                    sessionId       : curSid,
-                    parentMessageId : curPmid,
-                    mode,
-                    thinking        : effThinking,
-                    search          : nativeSearch,
-                    images          : Array.isArray(requester.images) ? requester.images : [],
-                    config          : active.config,
-                    agentId         : runtime.agentId || 'default',
-                });
-                track('provider', { provider: active.id });
-                return {
-                    reply      : String(aiResult.fullText || '').trim() || '…',
-                    newSid     : aiResult.sessionId,
-                    newPmid    : aiResult.newParentMessageId,
-                    filesToSend: [],
-                };
-            } catch (e) {
-                if (attempt < chain.length - 1) {
-                    console.warn(`⚠️ [Chat Fallback] فشل ${active.obj.label} (${String(e.message).slice(0, 120)}) — التحويل إلى ${chain[attempt + 1].obj.label}`);
-                    track('fallback', { from: active.id, to: chain[attempt + 1].id });
-                    curSid = null; curPmid = null; // جلسة كل مزود مستقلة
-                    continue;
-                }
-                track('error', { provider: active.id });
-                return {
-                    reply      : `⚠️ خطأ في الاتصال بالنموذج (${active.obj.label}): ${e.message}`,
-                    newSid     : curSid,
-                    newPmid    : curPmid,
-                    filesToSend: [],
-                };
-            }
-        }
-    }
 
     for (let step = 0; step < MAX_STEPS; step++) {
         const activeProvider = chain[chainIdx];
@@ -385,6 +358,12 @@ async function runAgent(
             if (tool === 'execute') {
                 const actionName = obj.action || '';
                 track('tool', { tool: actionName });
+                // 💬 وضع المحادثة: لا تنفيذ إطلاقاً — حجب محايد بلا ذكر أدوات/نظام
+                if (chatMode) {
+                    const result = _err('هذا النوع من الإجراءات غير متاح هنا — أكمل بالحوار فقط.');
+                    allResults.push(`[TOOL_RESULT: ${actionName}]\n${JSON.stringify(result, null, 2)}`);
+                    continue;
+                }
                 const { allowed, reason } = executeAllowedForAccess(actionName, accessLevel, params);
                 let result;
                 if (!allowed) {
@@ -426,6 +405,12 @@ async function runAgent(
             ];
 
             if (readTools.includes(tool)) {
+                // 💬 وضع المحادثة: القائمة البيضاء فقط — كل ما عداها محجوب محايد
+                if (chatMode && !CHAT_MODE_TOOLS.includes(tool)) {
+                    const result = _err('هذه الأداة غير متاحة في هذا الوكيل — أكمل بالحوار فقط.');
+                    allResults.push(`[TOOL_RESULT: ${tool}]\n${JSON.stringify(result)}`);
+                    continue;
+                }
                 if (!toolAllowedForAccess(tool, accessLevel)) {
                     // رسالة محايدة للنموذج — لا ذكر للصلاحيات أو المستويات
                     const result = _err('هذه الأداة غير متاحة في المحادثة العادية.');
@@ -785,10 +770,12 @@ async function runAgent(
             // Guard ذكي: يتحقق من سياق الطلب قبل تفعيل كشف الكذب
             if (shouldTriggerFalseSuccessGuard(raw, userMsg) && falseSuccessCount <= MAX_FALSE_SUCCESS_ATTEMPTS) {
                 falseSuccessCount++;
-                curPrompt =
-                    `لاحظت أنك كتبت رداً يوحي بتنفيذ إجراء إداري (تغيير/حذف/إنشاء) لكنك لم تستدعِ أي أداة فعلياً. ` +
-                    `أنت لا تملك أي قدرة على تنفيذ أي شيء إداري بدون استدعاء أداة execute أو أداة قراءة أولاً. ` +
-                    `أعد المحاولة الآن: استدعِ الأداة المناسبة عبر \`\`\`json فوراً. لا ترد نصياً بأنك نفذت شيئاً لم تنفذه.`;
+                curPrompt = chatMode
+                    ? `لاحظت أنك كتبت رداً يوحي بأنك فعلت شيئاً أو حصلت على معلومة، لكنك لم تستدعِ أي أداة فعلياً. ` +
+                      `إذا كنت تحتاج معلومة فاستدعِ الأداة المناسبة فوراً عبر \`\`\`json، وإلا فأجب نصاً بحوار طبيعي. لا تدّعِ شيئاً لم يحدث.`
+                    : `لاحظت أنك كتبت رداً يوحي بتنفيذ إجراء إداري (تغيير/حذف/إنشاء) لكنك لم تستدعِ أي أداة فعلياً. ` +
+                      `أنت لا تملك أي قدرة على تنفيذ أي شيء إداري بدون استدعاء أداة execute أو أداة قراءة أولاً. ` +
+                      `أعد المحاولة الآن: استدعِ الأداة المناسبة عبر \`\`\`json فوراً. لا ترد نصياً بأنك نفذت شيئاً لم تنفذه.`;
                 continue;
             }
 
@@ -815,4 +802,5 @@ async function runAgent(
 module.exports = {
     extractJsonObjects,
     runAgent,
+    CHAT_MODE_TOOLS,
 };

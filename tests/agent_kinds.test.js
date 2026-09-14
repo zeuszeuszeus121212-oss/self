@@ -2,16 +2,16 @@
  * tests/agent_kinds.test.js — اختبارات نوعي الوكيل + التبديل الحر للمزود
  * ═══════════════════════════════════════════════════════════════════════
  * يغطي:
- *   1) نوع «محادثة»: برومبت بلا أي ذكر للأدوات + استدعاء واحد للنموذج
- *      بلا حلقة ولا تنفيذ أدوات (لو هلوس النموذج بـ JSON أدوات يبقى نصاً).
- *   2) نوع «وكيل»: يبقى كما هو تماماً — حلقة الأدوات تعمل (regression).
- *   3) Fallback يعمل في مسار المحادثة.
- *   4) createAgent يخزن kind (توافق قديم: بلا kind = agent).
- *   5) معالج الإنشاء 4 خطوات: الطبيعة ← الحساب ← المزود ← النافذة،
- *      والنافذة تحمل kind، والصيغ القديمة تعمل (agent).
- *   6) 🔓 تبديل المزود حر دائماً: ناقص توكن لا يحجب — يُبدّل + يعلم ناقصاً
- *      + يعرض أزرار الإكمال (نافذة بيانات المزود / ملف السر).
- *   7) مبدّل الوضع kind_set من صفحة الإعدادات: قاعدة بيانات + runtime حي.
+ *   1) نوع «محادثة»: برومبت بأدوات أساسية صامتة فقط (ذاكرة/تذكيرات/قراءة)
+ *      بلا أي ذكر لأدوات الإدارة/التنفيذ + قاعدة الصمت المطلق عن الآلية.
+ *   2) نوع «محادثة» في الحلقة: أدواته الأساسية تعمل، وكل هلوسة إدارية
+ *      (execute أو أداة خارج القائمة) تُحجب محايداً بلا تنفيذ.
+ *   3) نوع «وكيل»: يبقى كما هو تماماً — حلقة الأدوات تعمل (regression).
+ *   4) Fallback يعمل في مسار المحادثة.
+ *   5) createAgent يخزن kind (توافق قديم: بلا kind = agent).
+ *   6) معالج الإنشاء 4 خطوات والصيغ القديمة.
+ *   7) 🔓 تبديل المزود حر دائماً.
+ *   8) مبدّل الوضع kind_set: قاعدة بيانات + runtime حي.
  * ═══════════════════════════════════════════════════════════════════════
  */
 
@@ -68,6 +68,7 @@ require.cache[cfgPath] = { id: cfgPath, filename: cfgPath, loaded: true, exports
 const { ObjectId } = require('mongodb');
 const providers = require('../providers');
 const { runAgent } = require('../tools');
+const { CHAT_MODE_TOOLS } = require('../tools/agent');
 const { buildSystem } = require('../tools/systemPrompt');
 const { createAgent } = require('../bot');
 const {
@@ -177,44 +178,97 @@ async function run() {
     providers.PROVIDERS[fakeBackupProvider.id] = fakeBackupProvider;
 
     // ══════════════════════════════════════════════════════════
-    // 1) برومبت النوع «محادثة» بلا أي ذكر للأدوات
+    // 1) برومبت «محادثة»: أدوات أساسية صامتة فقط + قاعدة الصمت
     // ══════════════════════════════════════════════════════════
     {
         const chat = buildSystem('TestBot', 'default', false, 'member', '', {}, {}, 'chat');
         const agent = buildSystem('TestBot', 'default', false, 'owner', '', {}, {}, 'agent');
-        const toolNames = ['read_url', 'generate_image', 'create_file', 'remember', 'recall', 'forget_memory',
-            'set_reminder', 'list_reminders', 'cancel_reminder', 'search_knowledge', 'list_knowledge',
-            'execute', 'TOOL_RESULT', 'get_channels', 'أدواتك', 'أداة'];
-        const leaked = toolNames.filter(n => chat.includes(n));
-        assert.deepStrictEqual(leaked, [], `برومبت المحادثة يجب ألا يذكر أي أداة — تسرب: ${leaked}`);
+        // ممنوع في برومبت المحادثة: أي أداة إدارة/تنفيذ/ويب/معرفة أو آلية الحلقة
+        const banned = ['execute', 'read_url', 'generate_image', 'create_file', 'search_knowledge',
+            'list_knowledge', 'clone_server', 'kick_member', 'delete_channel', 'TOOL_RESULT', 'executeAction'];
+        const leaked = banned.filter(n => chat.includes(n));
+        assert.deepStrictEqual(leaked, [], `برومبت المحادثة يجب ألا يذكر أدوات الإدارة/التنفيذ — تسرب: ${leaked}`);
+        // كل أداة من القائمة الأساسية موثقة في البرومبت
+        const missing = CHAT_MODE_TOOLS.filter(t => !chat.includes(t));
+        assert.deepStrictEqual(missing, [], `كل أدوات المحادثة الأساسية يجب أن تكون موثقة — ناقص: ${missing}`);
+        // قاعدة الصمت المطلق موجودة
+        assert.ok(chat.includes('القاعدة الذهبية'), 'قاعدة الصمت المطلق موجودة');
+        assert.ok(chat.includes('ممنوع منعاً باتاً أن تقول إن لديك أدوات'), 'منع الإفصاح عن الأدوات نصاً صريحاً');
+        // تدفق اكتشاف الذات: ذاكرة ← 500 رسالة ← قنوات أخرى
+        assert.ok(chat.includes('اكتشاف ذاتك'), 'قسم اكتشاف الذات موجود');
+        assert.ok(chat.includes('500'), 'جلب 500 رسالة موثق في تدفق اكتشاف الذات');
         assert.ok(chat.includes('TestBot'), 'برومبت المحادثة يحمل اسم الوكيل');
-        assert.ok(chat.includes('رفيق محادثة'), 'برومبت المحادثة يعرّف نفسه رفيق حوار');
-        assert.ok(agent.includes('read_url') && agent.includes('execute'), 'برومبت الوكيل يحتفظ بأدواته');
-        ok('1) برومبت «محادثة» صفر ذكر للأدوات — برومبت «وكيل» كما هو');
+        assert.ok(agent.includes('read_url') && agent.includes('execute'), 'برومبت الوكيل يحتفظ بأدواته كاملة');
+        ok('1) برومبت «محادثة»: أدوات أساسية موثقة + صمت مطلق + اكتشاف ذات — «وكيل» كما هو');
     }
 
     // ══════════════════════════════════════════════════════════
-    // 2) مسار المحادثة: استدعاء واحد، JSON أدوات هلوسة يبقى نصاً
+    // 2) محادثة في الحلقة: هلوسة إدارية تُحجب محايداً + أداة أساسية تعمل
     // ══════════════════════════════════════════════════════════
     {
         providerCalls = [];
-        fakeChatProvider.script = '{"tool":"get_channels","params":{}}'; // هلوسة أدوات
+        let call = 0;
+        fakeChatProvider.script = () => {
+            call++;
+            return call === 1
+                ? '{"tool":"execute","action":"delete_channel","params":{"name":"العام"}}'
+                : '{"reply":"خلنا نتكلم عن شيء أفضل"}';
+        };
         const result = await runAgent(
-            {}, null, 'مرحبا', 'user info', 'bot context', 'TestBot',
+            {}, null, 'احذف قناة العام', 'user info', 'bot context', 'TestBot',
             'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
             {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
-            { userId: 'u1', username: 'u' },
+            { userId: 'u1', username: 'u', channelId: 'c1' },
         );
-        assert.strictEqual(providerCalls.length, 1, `المحادثة = استدعاء واحد للنموذج — وجدنا ${providerCalls.length}`);
-        assert.ok(result.reply.includes('get_channels'), 'هلوسة JSON تُعاد نصاً كما هي (لا تنفيذ)');
-        assert.ok(!result.reply.includes('[TOOL_RESULT]'), 'لا تنفيذ أدوات في مسار المحادثة');
-        assert.strictEqual(result.newSid, 'fake_sid_1', 'الجلسة تُحدّث من مزود المحادثة');
-        assert.deepStrictEqual(result.filesToSend, [], 'لا ملفات في مسار المحادثة');
-        ok('2) مسار المحادثة: استدعاء واحد + هلوسة الأدوات تبقى نصاً بلا تنفيذ');
+        assert.strictEqual(providerCalls.length, 2, `المحادثة: خطوة الحجب ثم الرد النهائي — وجدنا ${providerCalls.length}`);
+        assert.ok(result.reply.includes('خلنا نتكلم'), 'المحادثة تكمل حوارها بعد الحجب');
+        assert.ok(providerCalls[1].includes('غير متاح هنا'), 'رسالة الحجب المحايد وصلت للنموذج (بلا أسماء صلاحيات)');
+        assert.ok(!result.reply.includes('[TOOL_RESULT]'), 'لا تسريب للآلية في الرد النهائي');
+        ok('2) محادثة: هلوسة execute إدارية تُحجب محايداً والحوار يكمل');
+    }
+    {
+        providerCalls = [];
+        let call = 0;
+        fakeChatProvider.script = () => {
+            call++;
+            return call === 1
+                ? '{"tool":"get_roles","params":{}}' // خارج قائمة المحادثة
+                : '{"reply":"أهلاً بك مجدداً"}';
+        };
+        const result = await runAgent(
+            {}, null, 'من رتب في السيرفر؟', 'user info', 'bot context', 'TestBot',
+            'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
+            {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
+            { userId: 'u1', username: 'u', channelId: 'c1' },
+        );
+        assert.strictEqual(providerCalls.length, 2, 'المحادثة: الأداة الخارجية تحجب ثم يرد النموذج');
+        assert.ok(providerCalls[1].includes('غير متاحة في هذا الوكيل'), 'أداة خارج قائمة المحادثة محجوبة محايداً');
+        assert.strictEqual(result.reply, 'أهلاً بك مجدداً', 'الرد النهائي حوار طبيعي');
+        ok('2-ب) محادثة: أداة قراءة خارج القائمة البيضاء محجوبة (لا تنفيذ)');
+    }
+    {
+        providerCalls = [];
+        let call = 0;
+        fakeChatProvider.script = () => {
+            call++;
+            return call === 1
+                ? '{"tool":"recall","params":{}}' // داخل قائمة المحادثة — يعمل
+                : '{"reply":"تذكرت الآن قصتنا"}';
+        };
+        const result = await runAgent(
+            {}, null, 'هل تذكرني؟', 'user info', 'bot context', 'TestBot',
+            'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
+            {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
+            { userId: 'u1', username: 'u', channelId: 'c1' },
+        );
+        assert.strictEqual(providerCalls.length, 2, 'المحادثة: أداة أساسية (recall) تنفذ ثم رد نهائي');
+        assert.ok(providerCalls[1].includes('TOOL_RESULT'), 'نتيجة الأداة الأساسية وصلت للنموذج');
+        assert.strictEqual(result.reply, 'تذكرت الآن قصتنا', 'الحوار يكمل بعد الاستدعاء الصامت');
+        ok('2-ج) محادثة: الأدوات الأساسية (recall) تعمل فعلاً داخل الحلقة');
     }
 
     // ══════════════════════════════════════════════════════════
-    // 3) مسار المحادثة: Fallback يعمل عند فشل الأساسي
+    // 3) مسار المحادثة: Fallback يعمل عند فشل الأساسي (داخل الحلقة)
     // ══════════════════════════════════════════════════════════
     {
         const failProvider = { ...fakeChatProvider, id: 'fake_kind_fail', label: 'فاشل', async chat() { throw new Error('انفجار'); } };
@@ -379,7 +433,7 @@ async function run() {
         const page = await renderAgentSettings(FAKE_AGENT_ID, '111111111111111111');
         const text = payloadText(page);
         assert.ok(text.includes('محادثة'), 'الوضع «محادثة» ظاهر في صفحة الإعدادات');
-        assert.ok(text.includes('بلا أدوات') || text.includes('لا أدوات') || text.includes('حوار خالص'), 'وصف الوضوح للوضع');
+        assert.ok(text.includes('صامتة') || text.includes('حوار طبيعي'), 'وصف الوضوح للوضع الجديد (أدوات أساسية صامتة)');
         ok('11) صفحة الإعدادات تعرض وضع الوكيل بوضوح');
     }
 
