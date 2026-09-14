@@ -103,6 +103,7 @@ ${searchNote}
 • الاستيقاظ على ما يجري في السيرفر: معلوماته، أهله، ومواضيعهم.
 • معرفة ما دار في محادثات السيرفر حول أي موضوع.
 • الالتزام بمواعيد تستيقظ فيها لتذكير من تحدثه.
+• استحضار ما تعلمته من مستندات مرفوعة لك (أدلة فريقك، مصطلحاته، قواعده، بياناته) كأنها من علمك الخاص.
 
 عندما تحتاج أياً من هذا — استخدمه فوراً وبصمت، ثم تابع الحوار كأنك عرفت ذلك من نفسك.
 
@@ -135,6 +136,14 @@ ${searchNote}
   مثال: {"tool":"get_messages","params":{"limit":500}}
 - search_messages: [channel, query, limit] — البحث في رسائل قناة عن كلمة أو موضوع.
 - get_pinned_messages: [channel] — الرسائل المثبتة في قناة.
+
+【 حاسّة المعرفة — علمك من المستندات المرفوعة لك 】
+ما يرفعه المالك من ملفات (أدلة، مصطلحات، قواعد، بيانات فريق، جداول ترجمة…) يصبح من علمك الداخلي:
+- search_knowledge: [query, q] + [limit, source] — يستحضر ما تعرفه من مستنداتك حسب الموضوع.
+  مثال: {"tool":"search_knowledge","params":{"query":"مصطلحات الترجمة المعتمدة","limit":4}}
+  مثال بمصدر محدد: {"tool":"search_knowledge","params":{"query":"أسماء الشخصيات","source":"glossary.txt"}}
+- list_knowledge: (لا معاملات) — مصادر علمك المتاحة (أسماء المستندات).
+متى تستشيره؟ عندما يتعلق السؤال بمجال تخصصك أو مصطلحات أو قواعد أو بيانات قد تكون في مستنداتك — استشره قبل أن تجيب من افتراضك، حتى يكون جوابك دقيقاً أميناً لما تعلمت.
 
 ══════════════════════════════════════════════
 اكتشاف ذاتك — من أنت وما قصتك
@@ -246,8 +255,8 @@ ${secrecySection}`
             ? '2. 🌐 **قراءة الروابط**: تقرأ أي صفحة ويب يرسلها المستخدم.'
             : '2. قراءة الروابط معطّلة على هذا الوكيل من إعداداته — لا تستدعِ read_url.';
         const memberToolsLine = readUrlEnabled
-            ? 'أدواتك الشخصية: read_url وgenerate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder.'
-            : 'أدواتك الشخصية: generate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder.';
+            ? 'أدواتك الشخصية: read_url وgenerate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder وsearch_knowledge وlist_knowledge.'
+            : 'أدواتك الشخصية: generate_image وcreate_file وremember وrecall وforget_memory وset_reminder وlist_reminders وcancel_reminder وsearch_knowledge وlist_knowledge.';
 
         return (
 `${finalPersonality}
@@ -273,6 +282,7 @@ ${memberWebCapability}
 4. 📁 **إنشاء ملفات حقيقية وإرفاقها** (create_file) — تقارير، أكواد، JSON، أي ملف نصي يصل كمرفق مع ردك.
 5. 🧠 **ذاكرة شخصية دائمة** (remember/recall/forget_memory) — تحفظ حقائق عن هذا المستخدم وتستدعيها، وتُحقن أهمها تلقائياً في سياقك.
 6. ⏰ **تذكيرات حقيقية** (set_reminder/list_reminders/cancel_reminder) — مواعيد تصله فعلاً في وقتها.
+7. 📚 **قاعدة معرفة الوكيل** (search_knowledge/list_knowledge) — مستندات رفعها مالك الوكيل (أدلة، مصطلحات، قواعد، بيانات) تبحث فيها لتجيب بدقة.
 
 هذا كل شيء. ${memberToolsLine}
 كل شيء محصور بذكرياته وتذكيراته هو — لا تلمس بيانات مستخدم آخر ولا بيانات السيرفر.
@@ -296,6 +306,12 @@ ${imageGenSection}
 ${fileCreationSection}
 ${memoryToolsSection}
 ${reminderToolsSection}
+【 قاعدة معرفة الوكيل — مستندات المالك 】
+- search_knowledge: [query, q] + [limit, source] — يبحث في مستندات مرفوعة من مالك هذا الوكيل ويرجع أفضل القطع صلة.
+  مثال: {"tool":"search_knowledge","params":{"query":"سياسة الاسترجاع","limit":4}}
+- list_knowledge: (لا معاملات) — يعرض مصادر المعرفة المتاحة (أسماء الملفات + عدد القطع).
+استخدمها عندما يتعلق السؤال بمجال تخصص الوكيل أو قواعده أو بياناته المرفوعة — ابحث قبل أن تفترض الجواب.
+
 ${noLieSection}
 
 ${discordFormatSection}

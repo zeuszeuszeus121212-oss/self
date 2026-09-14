@@ -81,12 +81,15 @@ async function getNotificationChannel(agentId, guildId = null) {
         ? await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }).catch(() => null)
         : null;
     if (agent?.notification_channel_id) return agent.notification_channel_id;
+    // 🌍 العالمية أولاً — قناة واحدة تستقبل كل شيء من كل السيرفرات (طلب المالك:
+    // «أريد إشعار كلما تحدث شخص مع البوت في أي سيرفر» — ليست إعداد سيرفر واحد فقط)
+    const globalSettings = await cfg.settings_col.findOne({ scope: 'manager', guild_id: 'global' }).catch(() => null);
+    if (globalSettings?.notification_channel_id) return globalSettings.notification_channel_id;
+    // إعداد السيرفر المحدد — تراث التوافق القديم فقط (اختياري لكل سيرفر)
     const settings = guildId
         ? await cfg.settings_col.findOne({ scope: 'manager', guild_id: String(guildId) }).catch(() => null)
         : null;
-    if (settings?.notification_channel_id) return settings.notification_channel_id;
-    const globalSettings = await cfg.settings_col.findOne({ scope: 'manager', guild_id: 'global' }).catch(() => null);
-    return globalSettings?.notification_channel_id || null;
+    return settings?.notification_channel_id || null;
 }
 
 async function notify({ type = 'runtime', agentId = null, title = 'Runtime Event', message = '', level = 'info', guildId = null, extra = {} }) {
@@ -332,6 +335,8 @@ async function startManagerBot() {
     managerClient.once('ready', async () => {
         console.log(`✅ Manager Bot ready as ${managerClient.user.tag}`);
         await registerDashboardCommands(managerClient, DISCORD_TOKEN).catch((error) => console.error('❌ فشل تسجيل أوامر Dashboard:', error));
+        // 🛰️ RAQEEB — ترحيل صامت لسيرفرات المدير الحالية (القديمة قبل تفعيل الرصد)
+        await require('./guildRegistry').backfillGuilds(managerClient).catch((e) => console.error('[Raqeeb] فشل الترحيل:', e.message));
     });
     managerClient.on('interactionCreate', async (interaction) => {
         try {
@@ -404,6 +409,7 @@ module.exports = {
     setAgentStatus,
     logAgent,
     notify,
+    getNotificationChannel,
     bootAgents,
     makeManagementProxy,
     get managerClient() { return managerClient; },

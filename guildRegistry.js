@@ -148,6 +148,60 @@ async function recordGuildJoin(guild, client) {
     return { ok: true, addedBy };
 }
 
+// ══════════════════════════════════════════════════════════════
+//  🔄 ترحيل السيرفرات الحالية عند الإقلاع (Backfill)
+//  الرصد سُجّل من حدث guildCreate فقط — أي أن السيرفرات التي كان
+//  البوت فيها قبل تفعيل الرصد لم تُسجّل أبداً ولوحة /الرصد تراها فارغة.
+//  عند إقلاع كل عميل (المدير + الوكلاء) نسجّل سيرفراته الحالية بصمت:
+//  بلا إشعارات (وإلا غُرق المالك بإشعارات انضمام وهمية كل إقلاع)،
+//  مع محاولة استخراج المُضيف من سجل التدقيق إن لم يُعرف بعد.
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * تسجيل سيرفرات عميل قائمة فعلاً في السجل — يُستدعى من ready لكل عميل.
+ * صامت تماماً: لا إشعارات، لا أخطاء مرمية.
+ * @param {object} client عميل Discord (مدير أو وكيل)
+ * @returns {Promise<{ok: boolean, registered: number, apps: number}>}
+ */
+async function backfillGuilds(client) {
+    const col = registryCol();
+    if (!col || !client?.guilds?.cache) return { ok: false, registered: 0 };
+    let count = 0;
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            const gid = String(guild.id);
+            if (!gid) continue;
+            const existing = await col.findOne({ guild_id: gid }).catch(() => null);
+            // المُضيف: نبحث عنه فقط إن لم نعرفه بعد (بحث سجل التدقيق مكلف)
+            const addedBy = (!existing || !existing.added_by_id) ? await findBotAdder(guild, client) : null;
+            await col.updateOne(
+                { guild_id: gid },
+                {
+                    $set: {
+                        name: guild.name || 'سيرفر',
+                        icon_url: guild.iconURL?.() || null,
+                        member_count: guild.memberCount || null,
+                        owner_id: guild.ownerId || null,
+                        ...(addedBy ? { added_by_id: addedBy.id, added_by_tag: addedBy.tag } : {}),
+                        left: false,
+                        last_seen_at: new Date(),
+                    },
+                    $setOnInsert: { joined_at: new Date(), backfilled: true },
+                    $addToSet: {
+                        apps: { id: String(client.user?.id || ''), name: client.user?.username || 'bot' },
+                    },
+                },
+                { upsert: true },
+            );
+            count++;
+        } catch (e) {
+            console.error('[Raqeeb] فشل ترحيل سيرفر:', e.message);
+        }
+    }
+    if (count) console.log(`[Raqeeb] 🔄 ترحيل صامت: ${count} سيرفر حالي مسجل من عميل ${client.user?.username || '؟'}`);
+    return { ok: true, registered: count };
+}
+
 /** تسجيل مغادرة سيرفر (طرد البوت/حذف السيرفر) */
 async function recordGuildLeave(guild) {
     const col = registryCol();
@@ -333,6 +387,7 @@ module.exports = {
     recordGuildJoin,
     recordGuildLeave,
     recordActivity,
+    backfillGuilds,
     getOverview,
     getGuildDetail,
     setActivityNotify,

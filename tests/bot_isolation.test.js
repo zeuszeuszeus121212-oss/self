@@ -155,21 +155,22 @@ async function run() {
     }
 
     // ══════════════════════════════════════════════════════════
-    // 4) اتساق: أدوات المحادثة الأساسية قراءة/شخصية فقط — لا إدارة
+    // 4) اتساق: أدوات المحادثة الأساسية قراءة/شخصية/معرفة فقط — لا إدارة
+    //    (المعرفة حاسّة صامتة معتمدة منذ v7.10 — ليست إدارة ولا تنفيذ)
     // ══════════════════════════════════════════════════════════
     {
         const managementTools = ['execute', 'read_url', 'generate_image', 'create_file',
-            'search_knowledge', 'list_knowledge', 'get_audit_log', 'get_bans', 'get_webhooks',
+            'get_audit_log', 'get_bans', 'get_webhooks',
             'moderation_overview', 'list_all_guilds', 'agent_config_audit'];
         const contaminated = CHAT_MODE_TOOLS.filter(t => managementTools.includes(t));
         assert.deepStrictEqual(contaminated, [], `قائمة المحادثة خالية من أدوات الإدارة — تلوث: ${contaminated}`);
-        // الذاكرة والتذكيرات والقراءة كلها موجودة
+        // الذاكرة والتذكيرات والقراءة والمعرفة كلها موجودة
         for (const t of ['remember', 'recall', 'forget_memory', 'set_reminder', 'list_reminders',
             'cancel_reminder', 'server_info', 'get_member_info', 'get_messages', 'search_messages',
-            'get_pinned_messages', 'get_channels']) {
+            'get_pinned_messages', 'get_channels', 'search_knowledge', 'list_knowledge']) {
             assert.ok(CHAT_MODE_TOOLS.includes(t), `أداة أساسية موجودة: ${t}`);
         }
-        ok('4) قائمة أدوات المحادثة: ذاكرة + تذكيرات + قراءة فقط — صفر إدارة');
+        ok('4) قائمة أدوات المحادثة: ذاكرة + تذكيرات + قراءة + معرفة — صفر إدارة');
     }
 
     console.log(`\n🎉 bot_isolation: ${passed}/${passed} اختباراً ناجحاً`);

@@ -105,25 +105,26 @@ async function run() {
         ok('3) قائمة أدوات member في الـ prompt تعكس التعطيل');
     }
 
-    // ── 4) أدوات المعرفة: للأدمن/المالك فقط في الـ prompt ──
+    // ── 4) أدوات المعرفة: لكل المستويات (v7.10 — معرفة الوكيل محتوى المالك للجميع) ──
     {
         const admin = buildSystem('Bot', 'default', false, 'admin', '', {});
         assert.ok(admin.includes('search_knowledge'));
         assert.ok(admin.includes('list_knowledge'));
         const member = buildSystem('Bot', 'default', false, 'member', '', {});
-        assert.ok(!member.includes('search_knowledge'), 'member لا يرى أدوات المعرفة');
-        ok('4) أدوات المعرفة في الـ prompt للأدمن فقط');
+        assert.ok(member.includes('search_knowledge'), 'member يرى أدوات المعرفة (v7.10)');
+        assert.ok(member.includes('قاعدة معرفة الوكيل'), 'قسم معرفة الوكيل موجود في برومبت member');
+        ok('4) أدوات المعرفة في الـ prompt لكل المستويات (v7.10)');
     }
 
-    // ── 5) القراءة/الصور أدوات member آمنة؛ المعرفة ليست كذلك؛ web_search محذوفة ──
+    // ── 5) القراءة/الصور أدوات member آمنة؛ المعرفة أصبحت آمنة (v7.10)؛ web_search محذوفة ──
     {
         assert.strictEqual(utils.toolAllowedForAccess('web_search', 'member'), false, 'web_search لم تعد أداة معتمدة');
         assert.strictEqual(utils.toolAllowedForAccess('read_url', 'member'), true);
         assert.strictEqual(utils.toolAllowedForAccess('generate_image', 'member'), true);
-        assert.strictEqual(utils.toolAllowedForAccess('search_knowledge', 'member'), false);
-        assert.strictEqual(utils.toolAllowedForAccess('list_knowledge', 'member'), false);
+        assert.strictEqual(utils.toolAllowedForAccess('search_knowledge', 'member'), true, 'المعرفة متاحة للأعضاء — محتوى المالك للجميع');
+        assert.strictEqual(utils.toolAllowedForAccess('list_knowledge', 'member'), true);
         assert.strictEqual(utils.toolAllowedForAccess('search_knowledge', 'admin'), true);
-        ok('5) MEMBER_SAFE_TOOLS: read_url/generate_image داخلها، web_search محذوفة، المعرفة ليست');
+        ok('5) MEMBER_SAFE_TOOLS: read_url/generate_image/المعرفة داخلها، web_search محذوفة');
     }
 
     // ── 6) parsePersonalityCommand: الأشكال المقبولة والمرفوضة ──

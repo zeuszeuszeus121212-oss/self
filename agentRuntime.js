@@ -561,6 +561,14 @@ client.once('ready', async () => {
 
     if (agentConfig.onReady) await agentConfig.onReady();
 
+    // 🛰️ RAQEEB — ترحيل صامت: سيرفرات هذا الوكيل الحالية تُسجل عند الإقلاع
+    // (السيرفرات القديمة قبل تفعيل الرصد لم تصل منها guildCreate أبداً)
+    try {
+        await guildRegistry.backfillGuilds(client);
+    } catch (e) {
+        console.error('[Raqeeb] فشل ترحيل سيرفرات الوكيل:', e.message);
+    }
+
     // ⏰ محرك تذكيرات هذا الوكيل — يرسل عبر عميل الوكيل نفسه
     try {
         const reminderEngine = startReminderEngine({ agentId, client });

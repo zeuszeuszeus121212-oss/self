@@ -260,13 +260,15 @@ async function overview(manager) {
 async function renderHome(manager, interaction) {
     const data = await overview(manager);
     const settings = interaction.guildId ? await managerSettings(interaction.guildId).catch(() => null) : null;
+    // 🌍 القناة العالمية تُقرأ من global — قناة واحدة لكل السيرفرات
+    const globalSettings = await managerSettings('global').catch(() => null);
     const emb = embed(`${ICONS.panel} Disor AI Agents Control Center`, linesBlock([
         '**منصة SaaS داخل Discord لإدارة وكلاء الذكاء الاصطناعي.**',
         '',
         `${ICONS.agents} **الوكلاء:** ${data.counts.total} | ${ICONS.running} يعمل: ${data.counts.running} | ${ICONS.stopped} متوقف: ${data.counts.stopped} | ${ICONS.failed} فشل: ${data.counts.failed}`,
         `${ICONS.bot} **Bot Tokens:** ${data.counts.bots}  •  ${ICONS.user} **User Accounts:** ${data.counts.users}`,
         `${ICONS.system} **Runtimes نشطة:** ${data.activeRuntimeCount}`,
-        `${ICONS.notifications} **قناة الإشعارات:** ${settings?.notification_channel_id ? `<#${settings.notification_channel_id}>` : 'غير محددة'}`,
+        `${ICONS.notifications} **قناة الإشعارات العالمية:** ${globalSettings?.notification_channel_id ? `<#${globalSettings.notification_channel_id}>` : 'غير محددة'}`,
         `${ICONS.settings} **رتبة الإدارة:** ${settings?.admin_role_id ? `<@&${settings.admin_role_id}>` : 'المالك فقط'}`,
         '',
         '**اختر قسمًا من الأسفل. كل شاشة تعمل كصفحة داخل تطبيق، لا كأمر نصي.**',
@@ -362,8 +364,8 @@ async function renderAgent(manager, agentId) {
     // POW خاص بمزود DeepSeek فقط (تحدي إثبات عمل لـ chat.deepseek.com)
     // وكلاء Qwen / OpenAI لا يستخدمون POW — لا داعي لإظهار الزر لهم
     const isDeepSeekAgent = providerObj.id === 'deepseek';
-    // 💬 وكيل «محادثة»: أدواته الأساسية الصامتة فقط (ذاكرة/تذكيرات/قراءة) — المعرفة RAG ليست ضمنها فلا زر لها
-    const isChatKind = agentKindOf(agent) === 'chat';
+    // 💬🤖 المعرفة لكل الأنواع (v7.10): المحادثة تستخدمها بحاسّتها الصامتة
+    // (رفع بيانات الفريق/الأدلة/المصطلحات — الوكيل يستشيرها دون أن يذكر أدوات)
     const actions = [
         button(`${DASH_PREFIX}:agent:${id}:start`, 'تشغيل', ButtonStyle.Success, '▶️', isRunning || isBusy),
         button(`${DASH_PREFIX}:agent:${id}:stop`, 'إيقاف', ButtonStyle.Danger, '⏹️', !isRunning || isBusy),
@@ -373,7 +375,7 @@ async function renderAgent(manager, agentId) {
         button(`${DASH_PREFIX}:agent:${id}:aiprovider`, 'المزود', ButtonStyle.Secondary, '🧠'),
         button(`${DASH_PREFIX}:agent:${id}:channels`, 'القنوات', ButtonStyle.Secondary, '📡'),
         button(`${DASH_PREFIX}:agent:${id}:conversations`, 'المحادثات', ButtonStyle.Secondary, '💬'),
-        ...(isChatKind ? [] : [button(`${DASH_PREFIX}:agent:${id}:knowledge`, 'المعرفة', ButtonStyle.Secondary, '📚')]),
+        button(`${DASH_PREFIX}:agent:${id}:knowledge`, 'المعرفة', ButtonStyle.Secondary, '📚'),
         button(`${DASH_PREFIX}:agent:${id}:usage:7`, 'الإحصائيات', ButtonStyle.Secondary, '📊'),
         button(`${DASH_PREFIX}:agent:${id}:proactive`, 'الاستباقية', ButtonStyle.Secondary, '🎯'),
         ...(isDeepSeekAgent ? [button(`${DASH_PREFIX}:agent:${id}:provider`, 'مزود POW', ButtonStyle.Secondary, '⚡')] : []),
@@ -399,7 +401,7 @@ function createKindView() {
     const emb = embed('➕ إنشاء وكيل — Wizard', linesBlock([
         '**الخطوة 1 من 4: اختر طبيعة الوكيل.**',
         `${ICONS.bot} **وكيل** — العقل المنفّذ الكامل: أدوات قراءة وتنفيذ، إنشاء ملفات، توليد صور، ذاكرة، تذكيرات، قاعدة معرفة. يدير ويعمل.`,
-        `${ICONS.user} **محادثة** — رفيق حوار طبيعي: يتكلم ويتذكر ويتابع أجواء السيرفر بحواسّه الخفية (ذاكرة/تذكيرات/قراءة) ويستخدمها بصمت دون أن يذكرها أبداً. لا إدارة ولا تنفيذ.`,
+        `${ICONS.user} **محادثة** — رفيق حوار طبيعي: يتكلم ويتذكر ويتابع أجواء السيرفر ويستشير معرفته المرفوعة (ذاكرة/تذكيرات/قراءة/معرفة) بحواسّه الخفية بصمت دون أن يذكرها أبداً. لا إدارة ولا تنفيذ.`,
         '',
         '**الخطوة التالية:** نوع الحساب (Bot Token / User Account) ثم مزود الذكاء الاصطناعي.',
     ]), COLORS.success);
@@ -409,7 +411,7 @@ function createKindView() {
             .setPlaceholder('اختر طبيعة الوكيل')
             .addOptions([
                 { label: 'وكيل — أدوات كاملة', value: 'agent', description: 'ينفذ ويدير: أدوات، ملفات، صور، ذاكرة، تذكيرات', emoji: '🤖' },
-                { label: 'محادثة — حوار طبيعي', value: 'chat', description: 'حوار بأدوات أساسية صامتة (ذاكرة/تذكيرات/قراءة) — بلا إدارة', emoji: '💬' },
+                { label: 'محادثة — حوار طبيعي', value: 'chat', description: 'حوار بحواس صامتة (ذاكرة/تذكيرات/قراءة/معرفة) — بلا إدارة', emoji: '💬' },
             ]),
     );
     return { ...v2Payload(withRows(emb, [row, ...rowsFromButtons([button(`${DASH_PREFIX}:home`, 'إلغاء والعودة', ButtonStyle.Secondary, ICONS.back)])])) };
@@ -658,25 +660,23 @@ function editAgentModal(agent) {
 
 async function renderNotifications(agentId = null, guildId = null) {
     const cfg = require('./config');
-    const settings = guildId ? await managerSettings(guildId).catch(() => null) : null;
+    // 🌍 القناة العالمية تُقرأ من إعدادات global — قناة واحدة لكل السيرفرات
+    const globalSettings = await managerSettings('global').catch(() => null);
     const agent = agentId ? await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }) : null;
     const emb = embed('🔔 الإشعارات', linesBlock([
         '**إدارة مسارات الإشعارات المهمة.**',
-        `📡 القناة العامة: ${settings?.notification_channel_id ? `<#${settings.notification_channel_id}>` : 'غير محددة'}`,
+        `🌍 **القناة العالمية (كل السيرفرات):** ${globalSettings?.notification_channel_id ? `<#${globalSettings.notification_channel_id}>` : 'غير محددة'}`,
         agent ? `🤖 الوكيل: **${agent.name}**` : null,
         agent ? `🔔 قناة الوكيل: ${agent.notification_channel_id ? `<#${agent.notification_channel_id}>` : 'غير محددة'}` : null,
         '',
         'الأحداث: تشغيل، توقف، Restart، فشل، Disconnect، Reconnect، أخطاء Runtime، وتعديلات إدارية.',
-        '🚨 **أخطاء الوكلاء الحقيقية تصل هنا أيضاً:** تفاصيل المزود والتشخيص الكامل وأين حدث الخطأ.',
-        '🕶️ في قنوات المحادثة العامة يرى الناس رداً بشرياً محايداً فقط — بلا أي تفاصيل تقنية أو أسماء مزودين.',
-        '🛰️ **إشعارات الرصد تصل هنا أيضاً:** إضافة البوت لسيرفر جديد (ومن أضافه) + كل محادثة جديدة (من/أين/متى) — تتحكم بها من الإعدادات.',
-        '🌐 **حسابات Qwen التلقائية:** إنشاء/تفعيل حساب خاص لكل سيرفر — الحالة في /الرصد.',
+        '🌍 **القناة العالمية تستقبل كل شيء من كل السيرفرات:** نشاط المحادثات، انضمام البوت لسيرفر جديد، أخطاء الوكلاء الكاملة، وحسابات Qwen — بغض النظر عن السيرفر الذي حدث فيه الحدث.',
     ]), COLORS.info);
     const components = [
         new ActionRowBuilder().addComponents(
             new ChannelSelectMenuBuilder()
                 .setCustomId(agent ? `${DASH_PREFIX}:agent:${agentId}:notify_channel` : `${DASH_PREFIX}:notify_global_channel`)
-                .setPlaceholder(agent ? 'اختر قناة إشعارات لهذا الوكيل' : 'اختر قناة الإشعارات العامة')
+                .setPlaceholder(agent ? 'اختر قناة إشعارات خاصة بهذا الوكيل (اختياري — تتجاوز العالمية)' : '🌍 اختر القناة العالمية — ستستقبل إشعارات كل السيرفرات')
                 .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
         ),
         ...rowsFromButtons([
@@ -689,12 +689,14 @@ async function renderNotifications(agentId = null, guildId = null) {
 
 async function renderSettings(guildId) {
     const settings = guildId ? await managerSettings(guildId).catch(() => null) : null;
+    // 🌍 قناة الإشعارات تُعرض من إعدادات global — قناة واحدة لكل السيرفرات
+    const globalSettings = await managerSettings('global').catch(() => null);
     const guildRegistry = require('./guildRegistry');
     const activityNotify = await guildRegistry.activityNotifyEnabled();
     const emb = embed('⚙️ إعدادات المنصة', linesBlock([
         '**إعدادات Dashboard وRuntime من مكان واحد.**',
         `🛡️ رتبة الإدارة: ${settings?.admin_role_id ? `<@&${settings.admin_role_id}>` : 'المالك فقط'}`,
-        `🔔 قناة الإشعارات العامة: ${settings?.notification_channel_id ? `<#${settings.notification_channel_id}>` : 'غير محددة'}`,
+        `🌍 قناة الإشعارات العالمية (كل السيرفرات): ${globalSettings?.notification_channel_id ? `<#${globalSettings.notification_channel_id}>` : 'غير محددة'}`,
         `🛰️ إشعارات الرصد (انضمام سيرفر/محادثات): ${activityNotify ? '**مفعّلة** ✅' : '**مطفأة** ⛔'}`,
         `🔁 إعادة الاتصال: مفعلة عبر Manager Lifecycle`,
         `🧾 التسجيل: مفعّل في agent_logs`,
@@ -1568,7 +1570,8 @@ async function handleDashboardInteraction(interaction, manager) {
         return true;
     }
     if (interaction.isChannelSelectMenu() && id === `${DASH_PREFIX}:notify_global_channel`) {
-        await updateManagerSettings(interaction.guildId, { notification_channel_id: interaction.values[0] });
+        // 🌍 القناة العالمية — تُحفظ global وتستقبل إشعارات كل السيرفرات والوكلاء
+        await updateManagerSettings('global', { notification_channel_id: interaction.values[0] });
         await interaction.update(await renderNotifications(null, interaction.guildId));
         return true;
     }
@@ -2695,7 +2698,9 @@ async function renderAgentKnowledge(agentId, guildId, notice = null) {
         notice ? `\n⚠️ ${notice}` : null,
         '',
         '**كيف يرفع؟** اضغط «إضافة ملفات» ثم أرسل الملفات (.txt/.md/.json/أكواد…) في هذه القناة خلال 3 دقائق (كل ملف ≤ 1MB).',
-        '**كيف يستخدمها الوكيل؟** تلقائياً عبر أداتي search_knowledge وlist_knowledge (للأدمن/المالك).',
+        agentKindOf(agent) === 'chat'
+            ? '**كيف يستخدمها وكيل المحادثة؟** بصمت تام — يستشيرها كحاسّة معرفة داخلية عند الحاجة ولا يذكر أبداً أنه يبحث في مستندات.'
+            : '**كيف يستخدمها الوكيل؟** تلقائياً — يبحث فيها عبر search_knowledge عند الحاجة، ومتاحة لكل من يتكلم معه (مالك/أدمن/أعضاء).',
     ]), COLORS.info);
 
     const components = [];

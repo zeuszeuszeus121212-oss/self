@@ -209,6 +209,9 @@ const CHAT_MODE_TOOLS = Object.freeze([
     'server_info', 'get_member_info',
     'get_messages', 'search_messages', 'get_pinned_messages',
     'get_channels',
+    // 📚 المعرفة المرفوعة (v7.10) — حاسّة صامتة: ما يرفعه المالك من
+    // مستندات/أدلة/مصطلحات يستشيره الوكيل عند الحاجة ولا يذكر وجودها أبداً
+    'search_knowledge', 'list_knowledge',
 ]);
 
 async function runAgent(
@@ -271,8 +274,9 @@ async function runAgent(
     const chainErrors = [];
     let silentRetryDone = false; // محاولة صامتة واحدة عند غياب البدائل — للأخطاء العابرة (رد فارغ/مهلة)
 
-    // 💬 وضع المحادثة: نفس حلقة الوكيل لكن بأدوات أساسية مقيدة فقط
-    // (CHAT_MODE_TOOLS) — لا تنفيذ إداري ولا ويب ولا ملفات ولا معرفة.
+    // 💬 وضع المحادثة: نفس حلقة الوكيل لكن بحوّاسه الصامتة المقيّدة فقط
+    // (CHAT_MODE_TOOLS) — لا تنفيذ إداري ولا ويب ولا ملفات؛ المعرفة المرفوعة
+    // صامتة ومتاحة (v7.10): يستشيرها كعلم داخلي ولا يذكر وجودها أبداً.
     const chatMode = agentKind === 'chat';
 
     // 📁 ملفات الإرسال المتراكمة عبر كل خطوات الحلقة (صور مولدة، ملفات نصية...)
@@ -453,7 +457,8 @@ async function runAgent(
                 'remember', 'recall', 'forget_memory',
                 // ⏰ التذكيرات (مخصصة لمستخدم الطلب فقط)
                 'set_reminder', 'list_reminders', 'cancel_reminder',
-                // 📚 قاعدة المعرفة RAG (أدمن/مالك فقط)
+                // 📚 قاعدة المعرفة RAG — معرفة الوكيل المرفوعة من المالك:
+                // محتوى آمن (يرفعه المالك بنفسه) متاح لكل من يتكلم مع الوكيل (v7.10)
                 'search_knowledge', 'list_knowledge',
             ];
 
@@ -661,7 +666,8 @@ async function runAgent(
 
                         // ═══════════════════════════════════════════
                         //  📚 قاعدة المعرفة RAG — مستندات الوكيل الخاصة
-                        //  للأدمن/المالك فقط (ليست في MEMBER_SAFE_TOOLS)
+                        //  محتوى يرفعه المالك — متاح لكل من يتكلم مع
+                        //  الوكيل (v7.10)، وضمن حواس المحادثة الصامتة
                         // ═══════════════════════════════════════════
                         case 'search_knowledge': {
                             const q = String(params.query || params.q || '').trim();

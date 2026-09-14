@@ -38,6 +38,13 @@ function makeCol() {
             if (isNew) { doc = { _id: ++seq }; for (const [k, v] of Object.entries(filter)) doc[k] = v; docs.set(doc._id, doc); }
             Object.assign(doc, patch.$set || {});
             if (patch.$setOnInsert && isNew) for (const [k, v] of Object.entries(patch.$setOnInsert)) if (!(k in doc)) doc[k] = v;
+            if (patch.$addToSet) {
+                for (const [k, v] of Object.entries(patch.$addToSet)) {
+                    const arr = Array.isArray(doc[k]) ? doc[k] : [];
+                    if (!arr.some(x => JSON.stringify(x) === JSON.stringify(v))) arr.push(v);
+                    doc[k] = arr;
+                }
+            }
             return { matched: isNew ? 0 : 1 };
         },
         async insertOne(d) { const id = ++seq; docs.set(id, JSON.parse(JSON.stringify(d))); return { insertedId: id }; },
@@ -222,7 +229,46 @@ async function run() {
         ok('8) قناة إشعارات معطوبة لا تعطل الرصد أبداً');
     }
 
-    console.log(`\n🎯 guild_registry: ${passed}/8 اختبارات ناجحة`);
+    // ── 9) 🔄 ترحيل السيرفرات الحالية عند الإقلاع (v7.10) — صامت وشامل ──
+    {
+        notifications.length = 0;
+        // g1 موجودة لكن left=true (من اختبار 6) — الترحيل يعيدها للنشاط
+        // g10 جديدة تماماً — سيرفر قديم قبل تفعيل الرصد (لم يصل منها guildCreate)
+        const cache = new Map([
+            ['g1', makeGuild('g1', 'سيرفر الأول')],
+            ['g10', makeGuild('g10', 'سيرفر قديم')],
+        ]);
+        const fakeClient = { user: { id: 'bot-999', username: 'TestBot' }, guilds: { cache } };
+        const res = await guildRegistry.backfillGuilds(fakeClient);
+        assert.equal(res.ok, true);
+        assert.equal(res.registered, 2, 'سيرفران مُرحّلان');
+        assert.equal(notifications.length, 0, 'الترحيل صامت — صفر إشعارات وهمية');
+        const g10 = await registryCol.findOne({ guild_id: 'g10' });
+        assert.ok(g10, 'السيرفر القديم مُسجل الآن — لوحة /الرصد تراه');
+        assert.equal(g10.name, 'سيرفر قديم');
+        assert.equal(g10.left, false);
+        assert.ok(g10.joined_at, 'وقت الانضمام (تقديري عند الترحيل)');
+        assert.ok(Array.isArray(g10.apps) && g10.apps.some(a => a.id === 'bot-999'), 'بوتاتنا الحاضرة في السيرفر مُوثقة');
+        assert.ok(g10.added_by_id === 'adder-777', 'المُضيف مستخرج من سجل التدقيق عند الترحيل');
+        const g1back = await registryCol.findOne({ guild_id: 'g1' });
+        assert.equal(g1back.left, false, 'السيرفر المُغادر سابقاً يعود نشطاً إن كان البوت فيه فعلاً');
+        ok('9) ترحيل الإقلاع: السيرفرات القديمة تُسجل بصمت — /الرصد لا تعرض فراغاً أبداً');
+    }
+
+    // ── 10) الترحيل idempotent — بلا تكرار بوتات ولا إشعارات عند الإقلاع التالي ──
+    {
+        notifications.length = 0;
+        const cache = new Map([['g10', makeGuild('g10', 'سيرفر قديم')]]);
+        const fakeClient = { user: { id: 'bot-999', username: 'TestBot' }, guilds: { cache } };
+        const res = await guildRegistry.backfillGuilds(fakeClient);
+        assert.equal(res.registered, 1);
+        assert.equal(notifications.length, 0);
+        const g10 = await registryCol.findOne({ guild_id: 'g10' });
+        assert.equal(g10.apps.filter(a => a.id === 'bot-999').length, 1, 'بلا تكرار في قائمة البوتات');
+        ok('10) الترحيل idempotent: إقلاع متكرر بلا تكرار ولا إزعاج');
+    }
+
+    console.log(`\n🎯 guild_registry: ${passed}/10 اختبارات ناجحة`);
 }
 
 run().catch((e) => { console.error('❌ FATAL:', e); process.exit(1); });

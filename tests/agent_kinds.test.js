@@ -183,9 +183,10 @@ async function run() {
     {
         const chat = buildSystem('TestBot', 'default', false, 'member', '', {}, {}, 'chat');
         const agent = buildSystem('TestBot', 'default', false, 'owner', '', {}, {}, 'agent');
-        // ممنوع في برومبت المحادثة: أي أداة إدارة/تنفيذ/ويب/معرفة أو آلية الحلقة
-        const banned = ['execute', 'read_url', 'generate_image', 'create_file', 'search_knowledge',
-            'list_knowledge', 'clone_server', 'kick_member', 'delete_channel', 'TOOL_RESULT', 'executeAction'];
+        // ممنوع في برومبت المحادثة: أي أداة إدارة/تنفيذ/ويب أو آلية الحلقة
+        // (المعرفة أصبحت حاسّة صامتة معتمدة في المحادثة منذ v7.10 — ليست محظورة)
+        const banned = ['execute', 'read_url', 'generate_image', 'create_file',
+            'clone_server', 'kick_member', 'delete_channel', 'TOOL_RESULT', 'executeAction'];
         const leaked = banned.filter(n => chat.includes(n));
         assert.deepStrictEqual(leaked, [], `برومبت المحادثة يجب ألا يذكر أدوات الإدارة/التنفيذ — تسرب: ${leaked}`);
         // كل أداة من القائمة الأساسية موثقة في البرومبت
@@ -265,6 +266,49 @@ async function run() {
         assert.ok(providerCalls[1].includes('TOOL_RESULT'), 'نتيجة الأداة الأساسية وصلت للنموذج');
         assert.strictEqual(result.reply, 'تذكرت الآن قصتنا', 'الحوار يكمل بعد الاستدعاء الصامت');
         ok('2-ج) محادثة: الأدوات الأساسية (recall) تعمل فعلاً داخل الحلقة');
+    }
+    // ══════════════════════════════════════════════════════════
+    // 2-د) 📚 محادثة: حاسّة المعرفة الصامتة — search_knowledge تعمل
+    //      للعضو العادي (v7.10: بيانات الفريق المرفوعة لعلم الوكيل)
+    // ══════════════════════════════════════════════════════════
+    {
+        // 📚 معرفة وهمية: مستند مصطلحات ترجمة مانهوا (حالة استخدام المالك)
+        const fakeKnowledgeCol = {
+            find: () => ({
+                limit: () => ({
+                    toArray: async () => [{
+                        agent_id: 'x', source: 'glossary.txt', chunk_index: 0,
+                        content: 'مصطلحات الترجمة المعتمدة: مانها = رجل صالح، غيلد = نقابة المغامرين.',
+                        tokens: ['مصطلحات', 'الترجمه', 'مانها', 'غيلد', 'نقابه'], size: 80,
+                    }],
+                }),
+            }),
+        };
+        const knowledge = require('../knowledge');
+        fakeConfig.knowledge_col = fakeKnowledgeCol; // حقن مؤقت — knowledge.js يقرأه حياً
+        try {
+            providerCalls = [];
+            let call = 0;
+            fakeChatProvider.script = () => {
+                call++;
+                return call === 1
+                    ? '{"tool":"search_knowledge","params":{"query":"مصطلحات الترجمة","limit":4}}' // ضمن حواس المحادثة — تعمل
+                    : '{"reply":"حسب مصطلحاتنا المعتمدة، غيلد تعني نقابة المغامرين"}';
+            };
+            const result = await runAgent(
+                {}, null, 'كيف نترجم كلمة غيلد؟', 'user info', 'bot context', 'TestBot',
+                'sid1', 'pm1', '111111111111111111', 'default', false, 'member',
+                {}, { kind: 'chat', agentId: 'x', provider: 'fake_kind', providerConfig: {} },
+                { userId: 'u1', username: 'u', channelId: 'c1' },
+            );
+            assert.strictEqual(providerCalls.length, 2, 'المحادثة: استدعاء المعرفة ثم الرد النهائي');
+            assert.ok(providerCalls[1].includes('TOOL_RESULT'), 'نتيجة البحث في المعرفة وصلت للنموذج');
+            assert.ok(providerCalls[1].includes('نقابة المغامرين'), 'محتوى المعرفة المرفوعة وصل فعلاً (مصطلحات الترجمة)');
+            assert.strictEqual(result.reply, 'حسب مصطلحاتنا المعتمدة، غيلد تعني نقابة المغامرين', 'الحوار يكمل بمعرفة المستندات');
+            ok('2-د) محادثة: حاسّة المعرفة الصامتة تعمل — بيانات الفريق المرفوعة تصبح علمه (v7.10)');
+        } finally {
+            fakeConfig.knowledge_col = null;
+        }
     }
 
     // ══════════════════════════════════════════════════════════

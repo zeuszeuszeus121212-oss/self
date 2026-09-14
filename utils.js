@@ -603,6 +603,7 @@ const MEMBER_SAFE_TOOLS = Object.freeze([
     'create_file',                                   // 📁 إنشاء ملف وإرفاقه في القناة
     'remember', 'recall', 'forget_memory',           // 🧠 ذاكرته هو فقط
     'set_reminder', 'list_reminders', 'cancel_reminder', // ⏰ تذكيراته هو فقط
+    'search_knowledge', 'list_knowledge',            // 📚 معرفة الوكيل — ما يرفعه المالك للجميع (v7.10)
 ]);
 
 function toolAllowedForAccess(tool, accessLevel) {
