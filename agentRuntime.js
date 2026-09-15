@@ -98,6 +98,8 @@ const qwenAccounts = require('./qwenAccounts');
 const guildRegistry = require('./guildRegistry');
 // 🧷 ذاكرة القناة الدائمة — تنجو من تبديل المزود/المفتاح (v7.11)
 const channelHistory = require('./channelHistory');
+// 🎮 محرك لعب الوكلاء — نقل نظام Auto كاملاً (v7.14 — معطل افتراضياً صفر كسر)
+const gamesPlayer = require('./games/player');
 
 const {
     createDiscordClient,
@@ -609,6 +611,18 @@ client.once('ready', async () => {
     } catch (e) {
         console.error(`❌ فشل بدء محرك التذكيرات لـ ${agentId}:`, e.message);
     }
+
+    // 🎮 محرك الألعاب — تسجيل الوكيل وإطلاق حلقات زر المفعّلة (v7.14)
+    // fire-and-forget: فشلها لا يعطل الإقلاع أبداً — والافتراضي معطل كلياً
+    try {
+        await gamesPlayer.agentReady({
+            client,
+            agentId,
+            agentName: botName,
+            tokenType,
+            kind: runtimeSettings.kind,
+        }).catch((e) => console.error('[GamePlayer] agentReady:', e.message));
+    } catch (_) {}
 
     // تسجيل أوامر السلاش للبوتات فقط؛ حسابات user لا تدعم application commands
     if (tokenType !== 'bot') return;
@@ -1210,6 +1224,15 @@ client.on('messageCreate', async (message) => {
     await maybeAutoEvent(client, message, runtimeContext).catch(() => false);
     await maybeScheduledEvent(client, message, runtimeContext).catch(() => false);
 
+    // 🎮 محرك الألعاب (v7.14) — يعمل قبل منطق المنشن تماماً:
+    // رسائل الألعاب تأتي من بوتات اللعبة وليست منشنات، والافتراضي معطل
+    // فيرجع false فوراً بلا أي تغيير على السلوك. يرجع true فقط عندما
+    // فعّل المالك «كتم الذكاء» وتمت معالجة رسالة لعبة فعلاً.
+    const gameSwallow = await gamesPlayer.handleMessage({
+        client, message, agentId, runtimeSettings,
+    }).catch((e) => { console.error('[GamePlayer] handleMessage:', e?.message); return false; });
+    if (gameSwallow) return;
+
     // التحقق من منشن البوت أو الرد على رسالته.
     const isMention = message.mentions.has(client.user.id) && !message.mentions.everyone;
     const isReplyToBot = message.reference
@@ -1658,6 +1681,19 @@ client.on('messageCreate', async (message) => {
     }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  🎮 أحداث اللعب تعتمد على messageUpdate (v7.14):
+//  زر الأخضر في زر/كراسي يظهر بتحديث رسالة البوت وليس بإنشائها —
+//  نفس ما يعتمده مستودع Auto بالضبط. بلا تأثير على مسار المحادثة.
+// ══════════════════════════════════════════════════════════════
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+    try {
+        const message = newMessage && typeof newMessage === 'object' ? newMessage : null;
+        if (!message || !message.guild) return;
+        await gamesPlayer.handleMessageUpdate({ client, message, agentId, runtimeSettings });
+    } catch (_) {}
+});
+
 
 client.on('error', (err) => {
     console.error(`[Agent ${agentId}] Discord error:`, err);
@@ -1721,6 +1757,7 @@ client.on('invalidated', () => {
         stop: () => {
             intentionalStop = true;
             try { client.__reminderEngine?.stop?.(); } catch (_) {} // ⏰ إيقاف محرك التذكيرات
+            try { gamesPlayer.agentStop(agentId); } catch (_) {} // 🎮 تنظيف محرك الألعاب (v7.14)
             channel_sessions.clear();
             allowed_channels_cache.clear();
             client.removeAllListeners();

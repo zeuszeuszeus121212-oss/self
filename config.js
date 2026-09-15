@@ -87,7 +87,9 @@ let providers_col = null; // 🗄️ المزودون المحفوظون (2.5 �
 let qwen_guild_accounts_col = null; // 🌐 حسابات Qwen التلقائية لكل سيرفر (v7.9)
 let guild_registry_col = null; // 🛰️ سجل السيرفرات التي أُضيف إليها البوت (v7.9)
 let guild_activity_col = null; // 💬 سجل من يتكلم مع البوت وأين ومتى (v7.9)
-let channel_history_col = null; // 🧷 ذاكرة القنوات الدائمة — تنجو من تبديل المزود/المفتاح (v7.11)
+let channel_history_col = null;
+let game_players_col = null; // 🎮 إعدادات لعب الوكلاء للألعاب (v7.14)
+let game_policy_col = null;  // 🎮 سياسة الألعاب العامة (v7.14)
 
 /**
  * يقوم بالاتصال بـ MongoDB وتهيئة المتغيرات
@@ -111,6 +113,8 @@ async function connectMongo() {
         guild_registry_col = db.collection('guild_registry');
         guild_activity_col = db.collection('guild_activity');
         channel_history_col = db.collection('channel_history');
+        game_players_col = db.collection('game_players');      // 🎮 إعدادات لعب الوكلاء للألعاب (v7.14)
+        game_policy_col = db.collection('game_policy');        // 🎮 سياسة الألعاب العامة (v7.14)
         console.log('✅ MongoDB متصل بنجاح');
     } catch (err) {
         console.error('❌ فشل الاتصال بـ MongoDB:', err.message);
@@ -205,6 +209,8 @@ module.exports = {
     get guild_registry_col() { return guild_registry_col; },
     get guild_activity_col() { return guild_activity_col; },
     get channel_history_col() { return channel_history_col; },
+    get game_players_col() { return game_players_col; },
+    get game_policy_col() { return game_policy_col; },
 
     // RAM Cache
     channel_sessions,

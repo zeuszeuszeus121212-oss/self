@@ -117,6 +117,8 @@ require('./errorReporter').setManagerNotifier(notify);
 // 🛰️ RAQEEB + 🌐 حسابات Qwen — إشعارات المالك عبر نفس قناة الإشعارات (v7.9)
 require('./guildRegistry').setNotifier(notify);
 require('./qwenAccounts').setNotifier(notify);
+// 🎮 محرك الألعاب — إشعارات الانضمام/الحركات/النتائج عبر نفس القناة (v7.14)
+require('./games/player').setNotifier(notify);
 
 async function logAgent(agentId, type, message, extra = {}) {
     const cfg = require('./config');
@@ -322,8 +324,10 @@ async function deleteAgent(agentId) {
 async function registerDashboardCommands(client, token) {
     if (!token || !client.user?.id) return;
     const rest = new REST({ version: '10' }).setToken(token);
-    await rest.put(Routes.applicationCommands(client.user.id), { body: dashboardCommands().map(cmd => cmd.toJSON()) });
-    console.log('✅ Manager dashboard commands synced');
+    // 🎮 /الألعاب — لوحة لعب الوكلاء (v7.14) تُسجل مع أوامر اللوحة على بوت المدير حصراً
+    const gamesCommand = require('./games/panel').gamesCommand();
+    await rest.put(Routes.applicationCommands(client.user.id), { body: [...dashboardCommands().map(cmd => cmd.toJSON()), gamesCommand.toJSON()] });
+    console.log('✅ Manager dashboard commands synced (بما فيها /الألعاب)');
 }
 
 async function startManagerBot() {
@@ -340,6 +344,10 @@ async function startManagerBot() {
     });
     managerClient.on('interactionCreate', async (interaction) => {
         try {
+            // 🎮 لوحة الألعاب (v7.14) — توجيه قبل لوحة المدير؛ الموجّه يترك ما لا يعرفه
+            const handledGames = await require('./games/panel').handleGamesInteraction(interaction, module.exports)
+                .catch((error) => { console.error('[Games Panel]', error); return true; });
+            if (handledGames) return;
             await handleDashboardInteraction(interaction, module.exports);
         } catch (error) {
             console.error('[Dashboard Error]', error);
