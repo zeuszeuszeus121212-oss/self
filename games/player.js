@@ -63,6 +63,7 @@ function setNotifier(fn) { notifier = typeof fn === 'function' ? fn : null; }
 
 async function notifyGameEvent(event) {
     if (!notifier) return false;
+    const agent = agents.get(String(event.agentId || ''));
     try {
         return await notifier({
             type: 'game_player',
@@ -71,7 +72,15 @@ async function notifyGameEvent(event) {
             message: event.message || '',
             level: event.level || 'info',
             guildId: event.guildId || null,
-            extra: event.extra || {},
+            extra: {
+                ...(event.extra || {}),
+                // 🧾 v7.18: تفاصيل كاملة — «اريد الشات والسيرفر واسم الوكيل وليس
+                // معرفه ومتى وماهي اللعبة بمعنى تفاصيل كاملة»
+                agent_name: event.agentName || agent?.agentName || null,
+                channel_id: event.channelId || null,
+                game: event.gameName || null,
+                guild_name: event.guildName || null,
+            },
         });
     } catch (_) { return false; }
 }
@@ -159,7 +168,7 @@ async function maybeStartZarLoop(agentId, client, guildId, { announce = false } 
         await store.pushRecentEvent(agentId, { kind: 'zar', text: `🎰 أُرسل أمر الدورة «${command}» في <#${settings.channel_id}>` });
         await store.logGameEvent(agentId, guildId, { type: 'game_join', gameName: 'زر', result: 'loop_start', channel_id: settings.channel_id, command });
         if (announce) {
-            await notifyGameEvent({ agentId, guildId, title: '🎰 حلقة زر بدأت', message: `أُرسل «${command}» في <#${settings.channel_id}>`, level: 'info' });
+            await notifyGameEvent({ agentId, guildId, title: '🎰 حلقة زر بدأت', message: `أُرسل «${command}» في <#${settings.channel_id}>`, level: 'info', channelId: settings.channel_id, gameName: 'زر', agentName: (agents.get(String(agentId)) || {}).agentName });
         }
     };
 
@@ -394,6 +403,8 @@ async function processOutcome({ agentId, client, message, settings }) {
         agentId,
         agentName,
         guildId,
+        guildName: message.guild.name,
+        channelId: message.channel.id,
         title: outcome.result === 'win' ? '🏆 فوز الوكيل نفسه' : outcome.kind === 'killed' ? '💀 قُتل الوكيل في المافيا' : outcome.kind === 'kick' ? '💀 طُرد الوكيل من اللعبة' : '💀 خسارة الوكيل',
         message: `**«${agentName}»** — ${outcome.reason}`,
         level: outcome.result === 'win' ? 'success' : 'warning',
@@ -442,6 +453,7 @@ async function handleDmMessage({ client, message, agentId, runtimeSettings }) {
             });
             await notifyGameEvent({
                 agentId, guildId: found.guildId,
+                gameName: 'مافيا',
                 title: '🕵️ حركة سرية في المافيا (الخاص)',
                 message: `**${result.message || ''}**`,
                 level: 'info',
@@ -491,6 +503,24 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
         }
 
         const guildId = message.guild.id;
+
+        // 📥 الصندوق الحي (v7.18 — بلاغ المالك: «انا طلبت بأنه اي رساله من اللعبة
+        // يتم إرسالها للوكيل») — أي رسالة بوت اللعبة نفسه في قناة الجلسة الحية
+        // تُنسخ حرفياً لعقل الوكيل قبل أي شيء — لا ملخصات ولا تضييع
+        try {
+            const liveSession = sessions.getSession(agentId, guildId);
+            if (liveSession && message.author.bot
+                && String(liveSession.botId || '') === String(message.author.id)
+                && String(liveSession.channelId || '') === String(message.channel.id)) {
+                const rawInboxText = eventsMod.textFromMessage(message);
+                if (rawInboxText) {
+                    sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: rawInboxText });
+                } else {
+                    sessions.touchSession(agentId, guildId);
+                }
+            }
+        } catch (_) {}
+
         let handledAny = false;
 
         // 1) إعادة إرسال زر عند فوز (حلقة zar)
@@ -554,7 +584,9 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                         gameName: event.gameName,
                         guildName: message.guild.name,
                     });
-                    // 🕵️ لاعبو لوبي المافيا — «يعرف من يلعب معه بالضبط وكذلك العدد»
+                    // 🧠 v7.18: هوية الوكيل في اللعبة — «أنا اللاعب X» (كان يحسب نفسه بوتاً آخر)
+                    sessions.setMe(agentId, guildId, { id: client.user?.id, name: agent.agentName });
+                    // 🕵️ لاعبو لوبي المافيا — «يعرف من يلعب معه بالضبط وكذلك العدد» بأسمائهم
                     if (Array.isArray(result.details?.players) && result.details.players.length) {
                         sessions.mafiaSetPlayers(agentId, guildId, result.details.players);
                     }
@@ -562,10 +594,29 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                     if (result.details?.lobbyText) {
                         sessions.setLobbyText(agentId, guildId, result.details.lobbyText);
                     }
+                    // 🧠 v7.18: معرف رسالة اللوبي — نتبع تعديلها حين ينضم باقي اللاعبين
+                    if (result.details?.lobbyMessageId) {
+                        sessions.setLobbyMessage(agentId, guildId, result.details.lobbyMessageId);
+                    }
                     const lobbyPlayers = Array.isArray(result.details?.players) ? result.details.players.length : 0;
                     sessions.pushEvent(agentId, guildId, lobbyPlayers
-                        ? `دخلنا اللوبي — اللاعبون معي: ${lobbyPlayers}`
+                        ? `دخلنا اللوبي — اللاعبون معي (${lobbyPlayers}): ${result.details.players.map(p => p.name).slice(0, 10).join('، ')}`
                         : 'دخلنا اللوبي');
+                    // 🛰️ v7.18: «يستطيع أن يعمل رد على رسالة اللوبي ام لا» —
+                    // رد على رسالة اللوبي نفسها (بميزة الرد في ديسكورد) في الوضع الاجتماعي
+                    try {
+                        if (result.details?.lobbyMessageId
+                            && social.speechGate(settings, sessions.getSession(agentId, guildId), 'lobby_react')) {
+                            void social.speak({
+                                client, channel: message.channel, agentId, guildId,
+                                kind: 'lobby_react',
+                                eventLine: `انضممت للتو إلى لوبي ${event.gameName} — رد على رسالة اللوبي نفسها بسطر قصير`,
+                                runtimeSettings, agentName: agent.agentName,
+                                session: sessions.getSession(agentId, guildId),
+                                replyToMessageId: String(result.details.lobbyMessageId),
+                            });
+                        }
+                    } catch (_) {}
                 } else {
                     sessions.touchSession(agentId, guildId);
                 }
@@ -580,6 +631,9 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                     });
                     await notifyGameEvent({
                         agentId, guildId,
+                        channelId: message.channel.id,
+                        gameName: event.gameName,
+                        guildName: message.guild.name,
                         title: result.type === 'game_join' ? '🎮 انضمام للعبة' : '🎮 حركة لعب',
                         message: `**${result.gameName}** — ${result.message || ''}`,
                         level: 'info',
@@ -630,6 +684,19 @@ async function handleMessageUpdate({ client, message, agentId, runtimeSettings }
         if (!settings.enabled) return false;
 
         const guildId = message.guild.id;
+
+        // 📥 الصندوق الحي — تحديثات رسائل اللعبة (عدّاد التصويت/اللوبي) تُنسخ
+        // أيضاً؛ inboxIds يمنع تكرار نفس الرسالة التي نُسخت عند إنشائها
+        try {
+            const liveSession = sessions.getSession(agentId, guildId);
+            if (liveSession && String(liveSession.botId || '') === String(message.author.id)
+                && String(liveSession.channelId || '') === String(message.channel.id)) {
+                const rawUpd = eventsMod.textFromMessage(message);
+                if (rawUpd) sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: rawUpd });
+                else sessions.touchSession(agentId, guildId);
+            }
+        } catch (_) {}
+
         let handledAny = false;
 
         const activeEvents = eventsMod.eventsForTrigger('messageUpdate');

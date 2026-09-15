@@ -1,5 +1,5 @@
 /**
- * games/sessions.js — جلسات اللعب الحية (v7.15)
+ * games/sessions.js — جلسات اللعب الحية (v7.18)
  * ═══════════════════════════════════════════════════════════
  * ذاكرة قصيرة العمر لكل (وكيل × سيرفر) وهو داخل لعبة فعلياً:
  *   - تبدأ عند انضمام ناجح (roulette/karasi/replka...)
@@ -18,10 +18,14 @@
 
 'use strict';
 
-const TTL_MS = 15 * 60 * 1000;      // جولة عالقة تنتهي وحدها بعد 15 دقيقة صمت
+const TTL_MS = 45 * 60 * 1000;      // 🐞 v7.18: كانت 15 دقيقة — مراحل الليل (رسائل خاصة) صمت قناتي
+                                    // طويل فتموت الجلسة ويفقد الوكيل كل وعيه («فقط أول مرة يعرف») — 45 دقيقة
 const CHAT_RING_MAX = 12;           // آخر كلام القناة الذي يراه الذكاء
 const EVENTS_MAX = 8;               // آخر أحداث اللعبة التي يراها الذكاء
-const LOBBY_TEXT_MAX = 400;         // نص اللوبي المخزّن
+const LOBBY_TEXT_MAX = 900;         // 🧠 v7.18: كانت 400 — نص اللوبي بأسماء اللاعبين يحتاج حيّزاً أكبر
+const INBOX_MAX = 14;               // 📥 الصندوق الحي (v7.18): آخر رسائل اللعبة الحقيقية حرفياً
+const INBOX_TEXT_MAX = 500;         // نص كل رسالة في الصندوق
+const INBOX_IDS_MAX = 80;           // منع نسخ نفس الرسالة مرتين (تعديلات/منشور مرتين)
 const sessions = new Map();         // `${agentId}:${guildId}` → session
 
 function key(agentId, guildId) {
@@ -50,7 +54,13 @@ function newSession(data = {}) {
         talkCounts: new Map(),   // userId → كم رسالة كتبها في الشات خلال الجلسة
         // 🧠 الوعي (v7.17 — بلاغ المالك: «رسالة اللوبي نفسها تُرسل للوكيل»)
         lobbyText : null,        // نص رسالة اللوبي كما وصلت — يقرأه الذكاء
+        lobbyMessageId : null,   // 🧠 v7.18: معرف رسالة اللوبي — لتتبع تعديلها (لاعبون ينضمون بعدها)
+        me : { id: null, name: null }, // 🧠 v7.18: هوية الوكيل نفسه في اللعبة — «أنا مين»
         events    : [],          // سجل ما يحصل في اللعبة (آخر 8) — «لا يعرف ماذا يحصل بها»
+        // 📥 الصندوق الحي (v7.18 — بلاغ المالك: «اي رساله من اللعبة يتم إرسالها للوكيل»)
+        // كل رسالة بوت لعبة (قناة أو خاص) تُنسخ حرفياً هنا ويقرأها عقله في كل قرار وكلام
+        inbox     : [],          // [{ at, kind, text }]
+        inboxIds  : new Set(),   // معرفات الرسائل المنسوخة — لا تكرار
         mafia     : {
             role  : null,        // 'mafia' | 'doctor' | 'detective' | 'citizen' | null
             phase : 'lobby',     // lobby | roles | night_kill | night_save | day | day_discuss | day_vote | ended
@@ -112,6 +122,7 @@ function pushChatLine(agentId, guildId, { name, text }) {
     if (!clean) return session;
     session.chatRing.push({ name: String(name || 'لاعب').slice(0, 40), text: clean, at: Date.now() });
     if (session.chatRing.length > CHAT_RING_MAX) session.chatRing.shift();
+    session.lastSeenAt = Date.now(); // 🐞 v7.18: كل حركة تُجدد عمر الجلسة
     return session;
 }
 
@@ -139,7 +150,26 @@ function addFriend(agentId, guildId, userId) {
 function setLobbyText(agentId, guildId, text) {
     const session = getSession(agentId, guildId);
     const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, LOBBY_TEXT_MAX);
-    if (session && clean) session.lobbyText = clean;
+    if (session && clean) {
+        session.lobbyText = clean;
+        session.lastSeenAt = Date.now(); // 🐞 v7.18
+    }
+    return session;
+}
+
+/** 🧠 v7.18: خزّن معرف رسالة اللوبي — نتبع تعديلها حين ينضم باقي اللاعبين */
+function setLobbyMessage(agentId, guildId, messageId) {
+    const session = getSession(agentId, guildId);
+    if (session && messageId) session.lobbyMessageId = String(messageId);
+    return session;
+}
+
+/** 🧠 v7.18: هوية الوكيل نفسه في اللعبة — «أنا مين» (منشن لي = أنا) */
+function setMe(agentId, guildId, { id, name } = {}) {
+    const session = getSession(agentId, guildId);
+    if (!session) return null;
+    if (id) session.me.id = String(id);
+    if (name) session.me.name = String(name).slice(0, 60);
     return session;
 }
 
@@ -150,6 +180,31 @@ function pushEvent(agentId, guildId, text) {
     if (!session || !clean) return session;
     session.events.push({ at: Date.now(), text: clean });
     if (session.events.length > EVENTS_MAX) session.events.shift();
+    session.lastSeenAt = Date.now(); // 🐞 v7.18
+    return session;
+}
+
+/**
+ * 📥 الصندوق الحي (v7.18 — جوهر بلاغ المالك: «انا طلبت بأنه اي رساله من
+ * اللعبة يتم إرسالها للوكيل») — نسخة حرفية من رسالة بوت اللعبة (قناة أو خاص)
+ * تُقرأ في كل قرار وكلام وسياق محادثة. لا ملخصات ولا تخمين — النص كما وصل.
+ */
+function pushInbox(agentId, guildId, { id = null, kind = 'game_msg', text = '' } = {}) {
+    const session = getSession(agentId, guildId);
+    const clean = String(text || '').replace(/[\t\r]+/g, ' ').trim().slice(0, INBOX_TEXT_MAX);
+    if (!session || !clean) return session;
+    if (id) {
+        const key = String(id);
+        if (session.inboxIds.has(key)) return session; // نفس الرسالة لا تُنسخ مرتين
+        session.inboxIds.add(key);
+        if (session.inboxIds.size > INBOX_IDS_MAX) {
+            const oldest = session.inboxIds.values().next().value;
+            session.inboxIds.delete(oldest);
+        }
+    }
+    session.inbox.push({ at: Date.now(), kind: String(kind || 'game_msg').slice(0, 20), text: clean });
+    if (session.inbox.length > INBOX_MAX) session.inbox.shift();
+    session.lastSeenAt = Date.now();
     return session;
 }
 
@@ -172,18 +227,25 @@ function bumpTalk(agentId, guildId, userId) {
     session.talkCounts.set(id, (session.talkCounts.get(id) || 0) + 1);
     const player = session.mafia.players.get(id);
     if (player) player.talks = session.talkCounts.get(id);
+    session.lastSeenAt = Date.now(); // 🐞 v7.18
     return session;
 }
 
 function mafiaSetRole(agentId, guildId, role) {
     const session = getSession(agentId, guildId);
-    if (session && role) session.mafia.role = String(role);
+    if (session && role) {
+        session.mafia.role = String(role);
+        session.lastSeenAt = Date.now(); // 🐞 v7.18
+    }
     return session;
 }
 
 function mafiaSetPhase(agentId, guildId, phase) {
     const session = getSession(agentId, guildId);
-    if (session && phase) session.mafia.phase = String(phase);
+    if (session && phase) {
+        session.mafia.phase = String(phase);
+        session.lastSeenAt = Date.now(); // 🐞 v7.18
+    }
     return session;
 }
 
@@ -200,6 +262,7 @@ function mafiaSetPlayers(agentId, guildId, entries = []) {
         });
         session.players.add(String(entry.id));
     }
+    if (entries.length) session.lastSeenAt = Date.now(); // 🐞 v7.18
     return session;
 }
 
@@ -210,6 +273,7 @@ function mafiaMarkDead(agentId, guildId, userId) {
         const player = session.mafia.players.get(id);
         if (player) player.alive = false;
         session.mafia.lastVictim = { id, name: player ? player.name : null, role: null };
+        session.lastSeenAt = Date.now(); // 🐞 v7.18
     }
     return session;
 }
@@ -241,10 +305,19 @@ function contextSummary(session) {
     if (!session) return '';
     const lines = [];
     lines.push(`- اللعبة: ${session.gameName || 'غير معروفة'}`);
+    if (session.me?.name) lines.push(`- أنت اللاعب «${session.me.name}»${session.me.id ? ` (معرفك <@${session.me.id}>)` : ''} — أي منشن لك في اللعبة يعني أنت`);
     if (session.lobbyText) lines.push(`- رسالة اللوبي كما وصلت: «${session.lobbyText}»`);
     if (session.kicked.size) lines.push(`- المطرودون: ${[...session.kicked].length} لاعب`);
     if (session.players.size) lines.push(`- لاعبون مرئيون: ${session.players.size}`);
     if (session.friends.size) lines.push(`- تحدث معك: ${session.friends.size} لاعب`);
+    // 📥 الصندوق الحي — الرسائل الحقيقية كما وصلت (بلاغ المالك v7.18:
+    // «لا اريده يحاكي انه يعرف ما يجري بل فعلا يعرف»)
+    if (session.inbox.length) {
+        lines.push('- رسائل اللعبة الأخيرة كما وصلت حرفياً (الأحدث أولاً):');
+        for (const item of session.inbox.slice(-6).reverse()) {
+            lines.push(`  • ${item.text}`);
+        }
+    }
     if (session.events.length) {
         lines.push('- ما يحصل في اللعبة (الأحدث أولاً):');
         for (const ev of session.events.slice(-4).reverse()) {
@@ -258,6 +331,8 @@ function contextSummary(session) {
         if (session.mafia.players.size) {
             const alive = [...session.mafia.players.entries()].filter(([, p]) => p.alive);
             lines.push(`- اللاعبون الأحياء (${alive.length}): ${alive.map(([, p]) => p.name).join('، ') || '—'}`);
+            const dead = [...session.mafia.players.entries()].filter(([, p]) => !p.alive).map(([, p]) => p.name);
+            if (dead.length) lines.push(`- الموتى: ${dead.join('، ')}`);
             const silent = alive.filter(([, p]) => (p.talks || 0) === 0).map(([, p]) => p.name);
             if (silent.length) lines.push(`- صامتون طوال الجولة (مشتبه بهم): ${silent.join('، ')}`);
             const friends = alive.filter(([id]) => session.friends.has(id)).map(([, p]) => p.name);
@@ -286,21 +361,39 @@ function buildLiveGameContext({ agentId, guildId, now = Date.now } = {}) {
     const minutes = Math.max(0, Math.round(((now() || Date.now()) - session.joinedAt) / 60000));
     const lines = [];
     lines.push('[🎮 أنت داخل لعبة جارية الآن — لا تذكر أنك ذكاء اصطناعي]');
+    // 🧠 v7.18: الهوية — «يحسب انه البوت الذي فاز وليس هو» + «يقول مواطن وهو مافيا»
+    if (session.me?.name) {
+        lines.push(`- أنت اللاعب «${session.me.name}»${session.me.id ? ` ومعرفك <@${session.me.id}>` : ''} — كل منشن أو اسم يظهر في رسائل اللعبة ويقصدك = أنت نفسك، وليس بوتاً آخر`);
+    }
     lines.push(`- اللعبة: ${session.gameName || 'غير معروفة'} — بدأت قبل ~${minutes} دقيقة في قناة هذه المحادثة أو جارتها`);
     if (session.lobbyText) lines.push(`- رسالة اللوبي التي انضممت بعدها: «${session.lobbyText}»`);
+    // 🧠 v7.18: اللاعبون بأسمائهم الحقيقية وحالتهم — «من في اللعبه او بمن تشك»
     if (session.mafia.players.size) {
-        const alive = [...session.mafia.players.values()].filter(p => p.alive);
-        lines.push(`- اللاعبون معك (${alive.length}): ${alive.map(p => p.name).join('، ') || '—'}`);
+        const entries = [...session.mafia.players.values()];
+        const alive = entries.filter(p => p.alive).map(p => p.name);
+        const dead = entries.filter(p => !p.alive).map(p => p.name);
+        lines.push(`- لاعبو الجولة (${entries.length}): ${entries.map(p => `${p.name} (${p.alive ? 'حي' : 'ميت'})`).join('، ') || '—'}`);
+        if (alive.length) lines.push(`- الأحياء (${alive.length}): ${alive.join('، ')}`);
+        if (dead.length) lines.push(`- الموتى (${dead.length}): ${dead.join('، ')}`);
     }
     if (session.engineId === 'mafia' || session.mafia.role) {
         lines.push(`- دورك في المافيا: ${session.mafia.role || 'غير معروف بعد'} — المرحلة: ${session.mafia.phase}`);
+        if (session.mafia.role === 'mafia') lines.push('- أنت مافيا: حاول ألا تكشف نفسك، وتعاون مع المافيا الآخرين إن وجدوا');
         if (session.mafia.lastVictim) lines.push(`- آخر قتيل: ${session.mafia.lastVictim.name || session.mafia.lastVictim.id}`);
+    }
+    // 📥 الصندوق الحي — الرسائل الحقيقية (بلاغ المالك v7.18: «اي رساله من
+    // اللعبة يتم إرسالها للوكيل» — لا ملخصات ناقصة)
+    if (session.inbox.length) {
+        lines.push('- رسائل اللعبة الأخيرة كما وصلت حرفياً (الأحدث أولاً):');
+        for (const item of session.inbox.slice(-8).reverse()) {
+            lines.push(`  • ${item.text}`);
+        }
     }
     if (session.events.length) {
         lines.push('- آخر ما حدث (الأحدث أولاً):');
         for (const ev of session.events.slice(-5).reverse()) lines.push(`  • ${ev.text}`);
     }
-    lines.push('- إن سألك أحد عن اللعبة فأجب كلاعب يعرف ما يجري حوله تماماً.');
+    lines.push('- إن سألك أحد «من في اللعبة؟» أو «بمن تشك؟» أو عن أي شيء في الجولة فأجب كلاعب يعرف ما يجري حوله تماماً من المعلومات أعلاه — لا تخمّن ولا تقول لا أعرف.');
     return lines.join('\n');
 }
 
@@ -332,5 +425,11 @@ module.exports = {
     setLobbyText,
     pushEvent,
     buildLiveGameContext,
+    // 📥 الصندوق الحي + الهوية + معرف اللوبي (v7.18)
+    pushInbox,
+    setLobbyMessage,
+    setMe,
+    INBOX_MAX,
+    INBOX_TEXT_MAX,
     __reset,
 };

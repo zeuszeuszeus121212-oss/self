@@ -207,9 +207,10 @@ async function renderGamesPage(agentId, guildId, manager) {
             : '';
         const delay = Number(es.delay || 0) ? ` • تأخير ${es.delay}ث` : '';
         // 🧠 وضع القرار — مافيا وروليت فقط (v7.16 بلاغ المالك:
-        // «واحد يتحكم فيه الوكيل... والآخر يكون تلقائي»)
+        // «واحد يتحكم فيه الوكيل... والآخر يكون تلقائي» — v7.18: الوكيل يقرر
+        // بعقله في الوضعين؛ الفرق: الاجتماعي يتكلم كاملاً والتلقائي يلعب بصمت
         const mode = engine.id === 'mafia' || engine.id === 'roulette'
-            ? ` • الوضع: ${es.mode === 'ai' ? '🧠 ذكي (الذكاء يختار)' : '⚙️ تلقائي (عشوائي)'}`
+            ? ` • الوضع: ${es.mode === 'social' || es.mode === 'ai' ? '🫧 اجتماعي (يلعب ويتفاعل بالكلام)' : '🤫 تلقائي (يلعب ويقرر بصمت)'}`
             : '';
         return `- ${engine.icon} **${engine.displayName}** — ${state}${premium}${delay}${mode}\n  > ${engine.description}`;
     });
@@ -296,14 +297,15 @@ async function renderGamesPage(agentId, guildId, manager) {
             .setStyle(settings.engines.replka?.premium_join ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('⚡'),
     );
 
-    // صف 2.6: وضع القرار (v7.16) — ذكي = الذكاء يختار الضحية/الحماية/التصويت/الطرد
+    // صف 2.6: وضع اللعب (v7.18) — الوكيل يقرر بعقله في الوضعين؛
+    // الاجتماعي يتفاعل بالكلام كاملاً والتلقائي يلعب بصمت (ردود موقعه فقط)
     const modeRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`${PREFIX}:mode:mafia:${agentId}:${guildId}`)
-            .setLabel(`وضع المافيا: ${settings.engines.mafia?.mode === 'ai' ? '🧠 ذكي' : '⚙️ تلقائي'}`)
-            .setStyle(settings.engines.mafia?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🕵️'),
+            .setLabel(`وضع المافيا: ${settings.engines.mafia?.mode === 'social' || settings.engines.mafia?.mode === 'ai' ? '🫧 اجتماعي' : '🤫 تلقائي'}`)
+            .setStyle(settings.engines.mafia?.mode === 'social' || settings.engines.mafia?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🕵️'),
         new ButtonBuilder().setCustomId(`${PREFIX}:mode:roulette:${agentId}:${guildId}`)
-            .setLabel(`وضع الروليت: ${settings.engines.roulette?.mode === 'ai' ? '🧠 ذكي' : '⚙️ تلقائي'}`)
-            .setStyle(settings.engines.roulette?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🎡'),
+            .setLabel(`وضع الروليت: ${settings.engines.roulette?.mode === 'social' || settings.engines.roulette?.mode === 'ai' ? '🫧 اجتماعي' : '🤫 تلقائي'}`)
+            .setStyle(settings.engines.roulette?.mode === 'social' || settings.engines.roulette?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🎡'),
     );
 
     // قناة حلقة زر — ChannelSelect
@@ -662,9 +664,12 @@ async function handleGamesInteraction(interaction, manager) {
             const guildId = parts[4];
             if (!['mafia', 'roulette'].includes(engineId)) return true;
             const settings = await store.getGameSettings(agentId, guildId);
-            const next = settings.engines[engineId]?.mode === 'ai' ? 'auto' : 'ai';
+            // 🧠 v7.18: اجتماعي ↔ تلقائي — القرار بعقل الوكيل في الوضعين،
+            // والفرق الكلام: اجتماعي كامل / تلقائي ردود موقعه فقط
+            const isSocial = settings.engines[engineId]?.mode === 'social' || settings.engines[engineId]?.mode === 'ai';
+            const next = isSocial ? 'auto' : 'social';
             await store.updateGameSettings(agentId, guildId, { engines: { [engineId]: { mode: next } } });
-            await store.pushRecentEvent(agentId, { kind: 'engine', text: next === 'ai' ? `🧠 فُعّل الوضع الذكي (${engineId === 'mafia' ? 'مافيا' : 'روليت'})` : `⚙️ عاد الوضع التلقائي (${engineId === 'mafia' ? 'مافيا' : 'روليت'})` });
+            await store.pushRecentEvent(agentId, { kind: 'engine', text: next === 'social' ? `🫧 فُعّل الوضع الاجتماعي (${engineId === 'mafia' ? 'مافيا' : 'روليت'}) — يلعب ويتفاعل بالكلام` : `🤫 عاد الوضع التلقائي (${engineId === 'mafia' ? 'مافيا' : 'روليت'}) — يلعب ويقرر بصمت` });
             await update(interaction, await renderGamesPage(agentId, guildId, manager));
             return true;
         }

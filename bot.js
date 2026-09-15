@@ -75,11 +75,11 @@ function createManagerClient() {
     });
 }
 
-async function getNotificationChannel(agentId, guildId = null) {
+async function getNotificationChannel(agentId, guildId = null, agentDoc = null) {
     const cfg = require('./config');
-    const agent = agentId && ObjectId.isValid(String(agentId))
+    const agent = agentDoc || (agentId && ObjectId.isValid(String(agentId))
         ? await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }).catch(() => null)
-        : null;
+        : null);
     if (agent?.notification_channel_id) return agent.notification_channel_id;
     // 🌍 العالمية أولاً — قناة واحدة تستقبل كل شيء من كل السيرفرات (طلب المالك:
     // «أريد إشعار كلما تحدث شخص مع البوت في أي سيرفر» — ليست إعداد سيرفر واحد فقط)
@@ -92,17 +92,53 @@ async function getNotificationChannel(agentId, guildId = null) {
     return settings?.notification_channel_id || null;
 }
 
+/**
+ * 🎮 قناة إشعارات الألعاب المنفصلة (v7.18 — بلاغ المالك: «اريد إمكانية وضع
+ * لكل وكيل اشعارات للألعاب منفصلة عن الاشعارات العامة») — إعداد مستقل لكل
+ * وكيل، وإن غاب يسقط للمسار العادي (قناة الوكيل → العالمية → السيرفر).
+ */
+async function getGameNotificationChannel(agentId, agentDoc = null) {
+    const cfg = require('./config');
+    const agent = agentDoc || (agentId && ObjectId.isValid(String(agentId))
+        ? await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }).catch(() => null)
+        : null);
+    return agent?.game_notification_channel_id || null;
+}
+
 async function notify({ type = 'runtime', agentId = null, title = 'Runtime Event', message = '', level = 'info', guildId = null, extra = {} }) {
     if (!managerClient) return false;
-    const channelId = await getNotificationChannel(agentId, guildId);
+    const cfg = require('./config');
+    // 🧾 v7.18: بيانات الوكيل تُجلب مرة واحدة — الاسم الحقيقي لا المعرف
+    // (بلاغ المالك: «اريد اسم الوكيل وليس معرفه»)
+    const agentDoc = agentId && ObjectId.isValid(String(agentId))
+        ? await cfg.agents_col.findOne({ _id: new ObjectId(agentId) }).catch(() => null)
+        : null;
+    const agentName = agentDoc?.name || extra.agent_name || null;
+
+    // 🎮 قناة ألعاب الوكيل المنفصلة أولاً (v7.18) — ثم المسار العادي
+    let channelId = null;
+    if (type === 'game_player' && agentDoc?.game_notification_channel_id) {
+        channelId = agentDoc.game_notification_channel_id;
+    }
+    if (!channelId) channelId = await getNotificationChannel(agentId, guildId, agentDoc);
     if (!channelId) return false;
     const channel = await managerClient.channels.fetch(channelId).catch(() => null);
     if (!channel || typeof channel.send !== 'function') return false;
     const color = level === 'error' ? COLORS.danger : level === 'warning' ? COLORS.warning : level === 'success' ? COLORS.success : COLORS.info;
+
+    // 🧾 v7.18: تفاصيل كاملة بكل إشعار — السيرفر بالاسم، الشات بمنشنه،
+    // الوكيل باسمه، اللعبة، والوقت — «بمعنى تفاصيل كاملة»
+    const guildName = (guildId && managerClient.guilds.cache.get(String(guildId))?.name) || extra.guild_name || null;
+    const isGame = type === 'game_player';
+    const timeText = new Date().toLocaleString('ar', { hour12: false });
     const payload = embed(title, linesBlock([
         message,
-        agentId ? `الوكيل: **${agentId}**` : null,
-        `النوع: **${type}**`,
+        agentName ? `🤖 الوكيل: **${agentName}**` : (agentId ? `الوكيل: **${agentId}**` : null),
+        guildName ? `🌐 السيرفر: **${guildName}**` : null,
+        extra.channel_id ? `💬 الشات: <#${extra.channel_id}>` : null,
+        isGame && extra.game ? `🎮 اللعبة: **${extra.game}**` : null,
+        `🕒 الوقت: ${timeText}`,
+        !isGame ? `النوع: **${type}**` : null,
         extra.reason ? `السبب: ${extra.reason}` : null,
     ]), color);
     // 🎨 الإشعارات أيضاً على Components V2 — لا إيمبدات في المنصة كلها
@@ -436,6 +472,7 @@ module.exports = {
     logAgent,
     notify,
     getNotificationChannel,
+    getGameNotificationChannel,
     bootAgents,
     makeManagementProxy,
     get managerClient() { return managerClient; },

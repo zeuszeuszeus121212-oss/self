@@ -668,6 +668,8 @@ async function renderNotifications(agentId = null, guildId = null) {
         `🌍 **القناة العالمية (كل السيرفرات):** ${globalSettings?.notification_channel_id ? `<#${globalSettings.notification_channel_id}>` : 'غير محددة'}`,
         agent ? `🤖 الوكيل: **${agent.name}**` : null,
         agent ? `🔔 قناة الوكيل: ${agent.notification_channel_id ? `<#${agent.notification_channel_id}>` : 'غير محددة'}` : null,
+        // 🎮 v7.18: قناة ألعاب منفصلة عن العامة — بلاغ المالك
+        agent ? `🎮 قناة إشعارات الألعاب (منفصلة): ${agent.game_notification_channel_id ? `<#${agent.game_notification_channel_id}>` : 'غير محددة (تسقط للإشعارات العامة)'}` : null,
         '',
         'الأحداث: تشغيل، توقف، Restart، فشل، Disconnect، Reconnect، أخطاء Runtime، وتعديلات إدارية.',
         '🌍 **القناة العالمية تستقبل كل شيء من كل السيرفرات:** نشاط المحادثات، انضمام البوت لسيرفر جديد، أخطاء الوكلاء الكاملة، وحسابات Qwen — بغض النظر عن السيرفر الذي حدث فيه الحدث.',
@@ -679,6 +681,13 @@ async function renderNotifications(agentId = null, guildId = null) {
                 .setPlaceholder(agent ? 'اختر قناة إشعارات خاصة بهذا الوكيل (اختياري — تتجاوز العالمية)' : '🌍 اختر القناة العالمية — ستستقبل إشعارات كل السيرفرات')
                 .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
         ),
+        // 🎮 v7.18: قناة إشعارات الألعاب المنفصلة لكل وكيل
+        ...(agent ? [new ActionRowBuilder().addComponents(
+            new ChannelSelectMenuBuilder()
+                .setCustomId(`${DASH_PREFIX}:agent:${agentId}:game_notify_channel`)
+                .setPlaceholder('🎮 اختر قناة إشعارات الألعاب لهذا الوكيل (منفصلة عن العامة)')
+                .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement),
+        )] : []),
         ...rowsFromButtons([
             button(agent ? `${DASH_PREFIX}:agent:${agentId}:view` : `${DASH_PREFIX}:home`, 'عودة', ButtonStyle.Secondary, ICONS.back),
             button(`${DASH_PREFIX}:notify_test`, 'إرسال اختبار', ButtonStyle.Primary, '🧪'),
@@ -2031,6 +2040,12 @@ async function handleDashboardInteraction(interaction, manager) {
         if (interaction.isChannelSelectMenu() && action === 'notify_channel') {
             await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set: { notification_channel_id: interaction.values[0], updated_at: new Date() } });
             await manager.logAgent(agentId, 'notification_channel', 'تم تحديث قناة إشعارات الوكيل');
+            return interaction.update(await renderNotifications(agentId, interaction.guildId));
+        }
+        // 🎮 v7.18: قناة إشعارات الألعاب المنفصلة لكل وكيل
+        if (interaction.isChannelSelectMenu() && action === 'game_notify_channel') {
+            await cfg.agents_col.updateOne({ _id: new ObjectId(agentId) }, { $set: { game_notification_channel_id: interaction.values[0], updated_at: new Date() } });
+            await manager.logAgent(agentId, 'game_notification_channel', 'تم تحديث قناة إشعارات الألعاب المنفصلة للوكيل');
             return interaction.update(await renderNotifications(agentId, interaction.guildId));
         }
         if (interaction.isChannelSelectMenu() && action === 'channel_add') {

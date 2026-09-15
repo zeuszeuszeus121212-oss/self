@@ -59,9 +59,10 @@ function normalize(doc) {
             ...Object.fromEntries(Object.entries(saved).filter(([, v]) => v !== undefined && v !== null)),
             enabled: Boolean(saved.enabled),
         };
-        // 🧠 وضع القرار (v7.16): 'ai' = الذكاء يختار (قتل/حماية/تصويت/طرد)
-        //                      'auto' = العشوائي التلقائي — الافتراضي (السلوك الحالي صفر كسر)
-        merged.engines[engine.id].mode = saved.mode === 'ai' ? 'ai' : 'auto';
+        // 🧠 وضع اللعب (v7.18): 'social' = اجتماعي (يلعب ويتفاعل بالكلام كاملاً)
+        //                    'auto'  = تلقائي (يلعب ويقرر بعقله لكن كلامه محدود بموقعه)
+        //                    'ai' توافق قديم → يُقرأ اجتماعي (الذكاء يقرر في الوضعين الآن)
+        merged.engines[engine.id].mode = (saved.mode === 'ai' || saved.mode === 'social') ? 'social' : 'auto';
     }
     return merged;
 }
@@ -107,9 +108,10 @@ async function updateGameSettings(agentId, guildId, patch = {}) {
                 $set[`engines.${engineId}.enabled`] = value;
             } else if (value && typeof value === 'object') {
                 for (const [k, v] of Object.entries(value)) {
-                    // الوضع يقبل قيمتين فقط — أي شيء آخر يبقى تلقائي (آمن)
+                    // الوضع يقبل قيمتين فقط — 'ai' القديم يُحوّل اجتماعي، وأي شيء آخر تلقائي (آمن)
                     if (k === 'mode') {
-                        if (v === 'ai' || v === 'auto') $set[`engines.${engineId}.mode`] = v;
+                        if (v === 'social' || v === 'ai') $set[`engines.${engineId}.mode`] = 'social';
+                        else if (v === 'auto') $set[`engines.${engineId}.mode`] = 'auto';
                         continue;
                     }
                     $set[`engines.${engineId}.${k}`] = v;

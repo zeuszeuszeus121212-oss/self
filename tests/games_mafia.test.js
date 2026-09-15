@@ -350,11 +350,12 @@ async function run() {
         console.log('✅ 8) التصويت الذكي: ضغط «خالد» — لا نفسه ولا حقيبتي ولا عشوائي');
     }
 
-    // ═══ 9) التصويت التلقائي (الافتراضي) — عشوائي كما كان ═══
+    // ═══ 9) التصويت التلقائي (الافتراضي) — قرار الذكاء نفسه (v7.18) ═══
     {
         const client = makeClient();
         withMafia('auto');
         prompts.length = 0;
+        aiReply = 'سالم';
         freshMafiaSession(client);
         const vote = makeMessage(client, {
             content: `لديكم **15 ثانية** لاختيار شخص لطرده من اللعبة`,
@@ -363,9 +364,9 @@ async function run() {
         await player.handleMessage({ client, message: vote, agentId: AGENT, runtimeSettings });
         await settle(2200);
         assert.strictEqual(client.__clicks.length, 1, 'ضغطة واحدة');
-        assert.ok(['btn_khaled', 'btn_salem'].includes(client.__clicks[0]), 'عشوائي بين اللاعبين بلا نفسه');
-        assert.strictEqual(prompts.length, 0, 'التلقائي لا يستشير الذكاء');
-        console.log('✅ 9) التصويت التلقائي: عشوائي بلا ذكاء (النظام الحالي)');
+        assert.deepStrictEqual(client.__clicks, ['btn_salem'], 'الوكيل اختار هو نفسه حتى في التلقائي — لا عشوائي');
+        assert.ok(prompts.length >= 1 && prompts[0].includes('تصوت'), 'التلقائي يستشير عقله أيضاً (v7.18: لا يختار عشوائياً بعد اليوم)');
+        console.log('✅ 9) التصويت التلقائي: قرار الوكيل نفسه بعقله — العشوائي احتياط فشل فقط');
     }
 
     // ═══ 10) لا تصويت مزدوج عند تعديل رسالة العداد ═══
@@ -409,9 +410,14 @@ async function run() {
         assert.deepStrictEqual(client.__clicks, ['btn_salem'], 'ضغط الضحية التي اختارها الذكاء');
         const session = sessions.getSession(AGENT, GUILD);
         assert.strictEqual(session.mafia.role, 'mafia', 'الدور سُجل من الرسالة السرية');
-        assert.ok(prompts[0].includes('مافيا'), 'الذكاء استُشير بدوره');
-        assert.strictEqual(store.statsFor(AGENT, GUILD).plays, 1, 'حركة سرية محسوبة');
-        console.log('✅ 11) الخاص (مافيا): ضغط الضحية + الدور سُجل + إشعار بالحركة');
+        assert.ok(prompts.some(p => p.includes('مافيا')), 'الذكاء استُشير بدوره');
+        // v7.18: رد الفعل على بطاقة الدور يخضع لقاعدة صمت المافيا ×0.12 —
+        // المافيا لا تعلن دورها. نجعله صفراً حتمياً هنا ونقيس حركة القتل وحدها
+        const savedRoleReact = hooks.CHANCES.role_react;
+        hooks.CHANCES.role_react = 0;
+        assert.strictEqual(store.statsFor(AGENT, GUILD).plays, 1, 'حركة القتل السرية محسوبة');
+        hooks.CHANCES.role_react = savedRoleReact;
+        console.log('✅ 11) الخاص (مافيا): ضغط الضحية + الدور سُجل + صمت المافيا على البطاقة');
     }
 
     // ═══ 12) رسالة سرية على الخاص — حماية الطبيب ═══
@@ -495,20 +501,23 @@ async function run() {
         console.log('✅ 15) محاكمة الصمت: الصامت ظهر للذكاء كمشتبه به واختاره');
     }
 
-    // ═══ 16) تخزين الوضع — ai يُحفظ، القيم الغريبة تُرفض ═══
+    // ═══ 16) تخزين الوضع — social/ai يُحفظان اجتماعي، القيم الغريبة تُرفض ═══
     {
         const STORE_AGENT = 'd4000000000000000000000dd';
         const col = require.cache[cfgPath].exports.game_players_col;
         updateCaptures.length = 0;
-        await store.updateGameSettings(STORE_AGENT, GUILD, { engines: { mafia: { mode: 'ai' } } });
+        await store.updateGameSettings(STORE_AGENT, GUILD, { engines: { mafia: { mode: 'social' } } });
         let last = updateCaptures[updateCaptures.length - 1];
-        assert.strictEqual(last.$set['engines.mafia.mode'], 'ai', 'وضع ذكي يُحفظ');
+        assert.strictEqual(last.$set['engines.mafia.mode'], 'social', 'وضع اجتماعي يُحفظ');
+        await store.updateGameSettings(STORE_AGENT, GUILD, { engines: { mafia: { mode: 'ai' } } });
+        last = updateCaptures[updateCaptures.length - 1];
+        assert.strictEqual(last.$set['engines.mafia.mode'], 'social', 'توافق قديم: ai يُقرأ اجتماعي');
         await store.updateGameSettings(STORE_AGENT, GUILD, { engines: { mafia: { mode: 'bogus' } } });
         last = updateCaptures[updateCaptures.length - 1];
         assert.strictEqual(last.$set['engines.mafia.mode'], undefined, 'القيمة الغريبة تُرفض');
         const normalized = store.defaultSettings();
-        assert.strictEqual(normalized.engines.mafia.mode, 'auto', 'الافتراضي تلقائي (صفر كسر)');
-        console.log('✅ 16) التخزين: ai/auto فقط — والافتراضي تلقائي');
+        assert.strictEqual(normalized.engines.mafia.mode, 'auto', 'الافتراضي تلقائي');
+        console.log('✅ 16) التخزين: social/ai → اجتماعي — والافتراضي تلقائي');
     }
 
     // ═══ 17) قاعدة صمت المافيا — كلامه يتقلص عندما يصير مافيا ═══
@@ -547,12 +556,13 @@ async function run() {
         console.log('✅ 18) الروليت الذكية: الذكاء هو من يختار من يُطرد');
     }
 
-    // ═══ 18.ب) الروليت التلقائية — بلا ذكاء (النظام الحالي) ═══
+    // ═══ 18.ب) الروليت التلقائية — قرار الوكيل بعقله (v7.18) ═══
     {
         const client = makeClient();
         const base = withMafia('auto');
         base.engines.roulette = { enabled: true, mode: 'auto', delay: 0, roundTimeout: 60 };
         prompts.length = 0;
+        aiReply = 'خالد';
         sessions.__reset();
         sessions.startSession(AGENT, GUILD, {
             engineId: 'roulette', channelId: CHANNEL, botId: BOT_ID,
@@ -564,9 +574,9 @@ async function run() {
         });
         await player.handleMessage({ client, message: turn, agentId: AGENT, runtimeSettings });
         await settle(200);
-        assert.strictEqual(client.__clicks.length, 1, 'ضغطة عشوائية واحدة');
-        assert.strictEqual(prompts.length, 0, 'التلقائي بلا استشارة');
-        console.log('✅ 18.ب) الروليت التلقائية: عشوائي كما كان (صفر استشارات)');
+        assert.deepStrictEqual(client.__clicks, ['btn_khaled'], 'الوكيل اختار هو نفسه حتى في التلقائي');
+        assert.ok(prompts.length >= 1, 'التلقائي يستشير عقله (لا عشوائي صامت بعد اليوم)');
+        console.log('✅ 18.ب) الروليت التلقائية: قرار الوكيل بعقله — لا عشوائي');
     }
 
     console.log('\n🏆 games_mafia: كل المجموعات خضراء');

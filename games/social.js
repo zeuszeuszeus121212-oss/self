@@ -1,5 +1,5 @@
 /**
- * games/social.js — التفاعل الاجتماعي أثناء اللعب (v7.15)
+ * games/social.js — التفاعل الاجتماعي أثناء اللعب (v7.18)
  * ═══════════════════════════════════════════════════════════
  * «يكون شخص حقيقي يلعب» — بطلب المالك:
  *   - يراقب الشات: لو تكلموا عنه (ذكر اسمه بلا منشن) يرد
@@ -40,7 +40,13 @@ const CHANCES = {
     beg          : 0.55, // ليل القتل — يرجى ألا يُقتل
     ask_protect  : 0.50, // دور الطبيب — «احميني»
     suspect      : 0.45, // نقاش النهار — رأي في المشتبه به
+    // 🛰️ اللوبي (v7.18 — بلاغ المالك: «يستطيع أن يعمل رد على رسالة اللوبي ام لا»)
+    lobby_react  : 0.60, // بعد الانضمام — يرد على رسالة اللوبي نفسها أحياناً
 };
+
+// 🤫 الوضع التلقائي (v7.18): يلعب ويقرر بعقله لكن كلامه محدود بردود فعل
+// موقعه هو فقط (دوره/موته/فوزه/خسارته/طرده) — الفرق الحقيقي عن الاجتماعي
+const AUTO_MINIMAL_KINDS = new Set(['role_react', 'kicked', 'killed', 'win', 'loss']);
 
 // ⏳ التبريد والسقوف — بلا إزعاج
 const SESSION_MAX_SOCIAL = 6;        // أقصى كلام في الجلسة الواحدة
@@ -139,6 +145,13 @@ const CANNED = {
         'أنا والله مو فاهم ليش أنا، لا تقتلوني 🥲',
         'الله لا يقتلني الليلة، عندي أصدقاء أحبهم',
     ],
+    // 🛰️ اللوبي (v7.18)
+    lobby_react: [
+        'حلو، كنت بالانتظار 😎',
+        'جاهزين؟ أنا معكم',
+        'دخلت، لا تطردوني أول واحد 😅',
+        'هذي الجولة لي، انتبهوا',
+    ],
     ask_protect: [
         'دكتور احميني والله محتاجك 💊',
         'يا طبيب لا تنساني الليلة، احميني',
@@ -185,17 +198,40 @@ function socialEnabled(settings) {
 }
 
 /**
- * 🧠 بوابة الكلام الحقيقية (v7.17 — بلاغ المالك: «ووضع التلقائي او الاجتماعي
- * لا يوجد اختلاف بيهم — الاثنان لا يتفاعلون»): الوضع الذكي (mode === 'ai')
- * يعني أن الوكيل يلعب بوعي — الكلام جزء من لعبه حتى لو كان زر التفاعل
- * الاجتماعي معطلاً. التلقائي يبقى كما هو: صمت إلا إذا فُعّل زر 🫧.
+ * 🧠 بوابة الكلام الحقيقية (v7.18 — بلاغ المالك: «وضع التلقائي او الاجتماعي
+ * لا يوجد اختلاف بيهم»): الفرق صار حقيقياً —
+ *   • الاجتماعي (mode 'social' أو 'ai' القديم): يلعب ويتفاعل بالكلام كاملاً
+ *   • التلقائي (mode 'auto'): يلعب ويقرر بعقله نفسه لكن كلامه محدود بردود
+ *     فعل موقعه هو فقط (دوره/موته/فوزه/طرده) — صمت على الشات والتعليقات
+ *   • زر 🫧 التفاعل الاجتماعي يفعّل الكلام الكامل بغض النظر عن الوضع
  */
-function speechAllowed(settings, session) {
-    if (!settings || !settings.enabled) return false;
-    if (settings.social && settings.social.enabled) return true;
+function speechMode(settings, session) {
+    if (!settings || !settings.enabled) return 'none';
+    if (settings.social && settings.social.enabled) return 'full';
     const engineId = session && session.engineId;
-    if (engineId && settings.engines && settings.engines[engineId] && settings.engines[engineId].mode === 'ai') return true;
+    const mode = engineId && settings.engines && settings.engines[engineId]
+        ? settings.engines[engineId].mode : null;
+    if (mode === 'social' || mode === 'ai') return 'full';   // 'ai' توافق قديم
+    if (mode === 'auto') return 'minimal';
+    return 'none';
+}
+
+/** هل يُسمح له بنوع كلام معيّن؟ — التلقائي يكتم الشات ويرد فقط على موقعه
+ *  (ردود الدور role_* مسموحة في التلقائي أيضاً — رد الفعل على بطاقة الدور
+ *  جزء من اللعب نفسه كما طلب المالك: «يبدي رد فعل اولا بكيفه») */
+function speechGate(settings, session, kind) {
+    const mode = speechMode(settings, session);
+    if (mode === 'full') return true;
+    if (mode === 'minimal') {
+        const k = String(kind || '');
+        return AUTO_MINIMAL_KINDS.has(k) || k.startsWith('role_');
+    }
     return false;
+}
+
+/** توافق قديم (v7.17) — زر 🫧 أو وضع اجتماعي/ذكي */
+function speechAllowed(settings, session) {
+    return speechMode(settings, session) !== 'none';
 }
 
 function canSpeak(session, { userId = null } = {}) {
@@ -260,8 +296,9 @@ async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
     }
 }
 
-/** الإرسال الفعلي — fire-and-forget بلا أي تأثير على خط الأنابيب */
-async function speak({ client, channel, agentId, guildId, kind, eventLine, runtimeSettings, agentName, session, mentionLabel = null }) {
+/** الإرسال الفعلي — fire-and-forget بلا أي تأثير على خط الأنابيب
+ *  🛰️ v7.18: replyToMessageId — يرد على رسالة اللوبي نفسها لا رسالة جديدة */
+async function speak({ client, channel, agentId, guildId, kind, eventLine, runtimeSettings, agentName, session, mentionLabel = null, replyToMessageId = null }) {
     let text = await aiComment(runtimeSettings, {
         agentName,
         eventLine: mentionLabel ? `${eventLine} (${mentionLabel})` : eventLine,
@@ -272,9 +309,13 @@ async function speak({ client, channel, agentId, guildId, kind, eventLine, runti
     // تأخير بشري صغير قبل الكلام — لا ردود خاطفة آلية
     await new Promise(r => setTimeout(r, TIMING.minDelay + Math.floor(Math.random() * (TIMING.maxDelay - TIMING.minDelay))));
     try {
-        await channel.send(text.slice(0, MAX_LEN));
+        if (replyToMessageId) {
+            await channel.send({ content: text.slice(0, MAX_LEN), reply: { messageReference: replyToMessageId } });
+        } else {
+            await channel.send(text.slice(0, MAX_LEN));
+        }
     } catch (_) {
-        return false;
+        try { await channel.send(text.slice(0, MAX_LEN)); } catch (_) { return false; }
     }
     store.incrementStats(agentId, guildId, 'plays');
     await store.pushRecentEvent(agentId, { kind: 'social', text: `🫧 تعليق اجتماعي (${kind}): ${text.slice(0, 60)}` });
@@ -286,10 +327,11 @@ async function speak({ client, channel, agentId, guildId, kind, eventLine, runti
  *  probability تُمرَّر عبر effectiveChance من الاستدعاءات — هنا لا تلمس */
 function maybeSpeak(ctx) {
     const { settings, session, kind, userId = null, probability } = ctx;
-    if (!speechAllowed(settings, session)) return false;
-    if (!canSpeak(session, { userId })) return false;
+    // 🧠 v7.18: البوابة الجديدة — التلقائي يكتم كل الكلام إلا ردود موقعه هو
+    if (!speechGate(settings, session, kind)) return false;
+    if (session && !canSpeak(session, { userId })) return false;
     if (!chance(probability)) return false;
-    reserve(session, { userId });
+    if (session) reserve(session, { userId });
     void speak(ctx).catch(() => {}); // fire-and-forget — لا يمنع ولا يُسقط شيئاً
     return true;
 }
@@ -443,9 +485,13 @@ module.exports = {
     handleChatMessage,
     observeBotMessage,
     maybeSpeak,        // 🕵️ معالجات المافيا في events.js تستعملها مباشرة (v7.16)
+    speak,             // 🛰️ v7.18: رد اللوبي يستدعيها مباشرة بعد بوابة speechGate
     effectiveChance,
     CHANCES,           // الاحتمالات الأساسية (الاستدعاءات تمررها عبر effectiveChance)
-    speechAllowed,     // 🧠 بوابة الكلام: زر 🫧 أو الوضع الذكي (v7.17)
+    speechAllowed,     // 🧠 توافق v7.17: زر 🫧 أو وضع اجتماعي/ذكي
+    speechGate,        // 🧠 v7.18: بوابة النوع — التلقائي يكتم إلا ردود موقعه
+    speechMode,        // 🧠 v7.18: 'full' | 'minimal' | 'none'
+    AUTO_MINIMAL_KINDS,
     notifyAiFail,      // تبليغ فشل الذكاء المرئي — تستعمله mafia.js أيضاً
     __testHooks,
 };

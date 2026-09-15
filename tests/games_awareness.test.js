@@ -1,5 +1,5 @@
 /**
- * tests/games_awareness.test.js — وعي الوكيل باللعبة (v7.17)
+ * tests/games_awareness.test.js — وعي الوكيل باللعبة (v7.17 + تحديثات v7.18)
  * ═══════════════════════════════════════════════════════════
  * بلاغ المالك الحرفي: «إلى الآن هو فاشل — عند بدأ لعبة ويدخل لها اريد
  * رسالة اللوبي نفسها يتم إرسالها للوكيل وهو حاليا لا يفعل ذلك —
@@ -8,19 +8,16 @@
  * ويحسب انه البوت الذي فاز وليس هو من فاز».
  *
  * يثبت بالفحص الفعلي:
- *  1) صفر كسر: تلقائي + زر اجتماعي معطل = صمت تام كما اليوم.
- *  2) رسالة اللوبي نفسها تُخزّن في الجلسة حرفياً + اللاعبون بالأسماء
- *     (كانت تُرمى — الوكيل «لا يعرف من يلعب معه»).
- *  3) كل مرحلة تُسجّل في سجل الوعي (توزيع/ليل قتل/قتيل باسمه/تصويت).
- *  4) الوضع الذكي ≠ التلقائي: ذكي + زر اجتماعي معطل → الكلام يعمل
- *     (الكلام جزء من لعبه الواعي) — وتلقائي يبقى صامتاً.
+ *  1) الوضع التلقائي (v7.18): يلعب ويقرر بعقله لكن يكتم الشات —
+ *     ردود موقعه فقط (الدور/الموت/الفوز) — الفرق الحقيقي عن الاجتماعي.
+ *  2) رسالة اللوبي نفسها تُخزّن في الجلسة حرفياً + اللاعبون بالأسماء.
+ *  3) كل مرحلة تُسجّل في سجل الوعي + القرار دائماً بعقل الوكيل حتى في التلقائي
+ *     (v7.18: «لا يختار هو اصلا من يقتل او على من يصوت» — انتهت).
+ *  4) الوضع الاجتماعي (أو الذكي القديم) يتكلم كاملاً حتى بلا زر 🫧.
  *  5) اللوبي تصل قرار الذكاء حرفياً (برومبت التصويت يحوي نص اللوبي).
- *  6) فشل الذكاء يصبح مرئياً للمالك (كان صامتاً كلياً — لهذا بدا
- *     الذكي = التلقائي).
- *  7) الاحتساب الصحيح: قائمة الفائزين في إيمبد فيها اسمنا → فوز لنا
- *     (كانت تضيع لأن منشنات الإيمبد لا تصل message.mentions)، وبلا
- *     اسمنا → لا شيء، و«تم قتل <نحن>» → قتلى، و«تم قتل <غيرنا>» → لا شيء.
- *  8) نصوص النتائج لا لبس فيها: «الوكيل «X» فاز فعلاً» وليس «رسالة بوت».
+ *  6) فشل الذكاء يصبح مرئياً للمالك.
+ *  7) الاحتساب الصحيح: قائمة الفائزين في إيمبد فيها اسمنا → فوز لنا.
+ *  8) نصوص النتائج لا لبس فيها: «الوكيل «X» فاز فعلاً».
  *  9) سياق المحادثة الرئيسية يرى اللعبة الحية (buildLiveGameContext).
  * ═══════════════════════════════════════════════════════════
  */
@@ -158,18 +155,25 @@ async function joinMafia({ players = [] } = {}) {
 async function run() {
     player.agentReady({ client: makeClient(), agentId: AGENT_A, agentName: 'وكيل أ', tokenType: 'user', kind: 'agent' });
 
-    // ── 1) صفر كسر: تلقائي + اجتماعي معطل = صفر كلام ──
+    // ── 1) الوضع التلقائي (v7.18): يلعب ويقرر بعقله لكن يكتم الشات —
+    // ردود موقعه فقط (الدور/الموت/الفوز) — الفرق الحقيقي عن الاجتماعي ──
     setSettings(AGENT_A, { enabled: true, social: { enabled: false }, engines: { mafia: { enabled: true, mode: 'auto' } } });
     {
         await joinMafia();
         const rolesMsg = makeMessage({ content: '✅ | تم توزيع الرتب على اللاعبين. ستبدأ الجولة الأولى في بضع ثاني' });
         await player.handleMessage({ client: makeClient(), message: rolesMsg, agentId: AGENT_A, runtimeSettings });
         await wait(60);
-        assert.strictEqual(social.speechAllowed(overrides.get(`${AGENT_A}:${GUILD}`), sessions.getSession(AGENT_A, GUILD)), false,
-            'تلقائي + اجتماعي معطل: بوابة الكلام مغلقة كما اليوم');
-        assert.ok(!recentTexts(AGENT_A).some(t => t.includes('تعليق اجتماعي')), 'صفر كلام في الوضع التلقائي');
+        const settings = overrides.get(`${AGENT_A}:${GUILD}`);
         const session = sessions.getSession(AGENT_A, GUILD);
-        assert.strictEqual(session.mafia.phase, 'roles', 'المرحلة سُجلت رغم الصمت');
+        // 🧠 v7.18: بوابة النوع — التلقائي يكتم الشات (شك/ندبة/رد على ذكر اسمه)
+        assert.strictEqual(social.speechGate(settings, session, 'suspect'), false, 'التلقائي: الشك مكتوم');
+        assert.strictEqual(social.speechGate(settings, session, 'name_drop'), false, 'التلقائي: الرد على ذكر اسمه مكتوم');
+        assert.strictEqual(social.speechGate(settings, session, 'beg'), false, 'التلقائي: الترجي مكتوم');
+        // لكن ردود موقعه تعمل — رد الفعل على بطاقة الدور جزء من اللعب نفسه
+        assert.strictEqual(social.speechGate(settings, session, 'role_generic'), true, 'التلقائي: رد الفعل على الدور يعمل');
+        assert.strictEqual(social.speechGate(settings, session, 'killed'), true, 'التلقائي: تعليق موته يعمل');
+        assert.ok(recentTexts(AGENT_A).some(t => t.includes('تعليق اجتماعي')), 'التلقائي رد على توزيع الرتب (رد موقع هو)');
+        assert.strictEqual(session.mafia.phase, 'roles', 'المرحلة سُجلت');
     }
 
     // ── 2) رسالة اللوبي نفسها محفوظة حرفياً + اللاعبون بأسمائهم ──
@@ -190,17 +194,22 @@ async function run() {
         assert.ok(lobby.__clicks.length === 1, 'الانضمام ضغط الزر فعلاً');
     }
 
-    // ── 3) كل مرحلة تُسجّل في سجل الوعي — «يعرف ماذا يحصل بها» ──
+    // ── 3) كل مرحلة تُسجّل في سجل الوعي + القرار دائماً بعقل الوكيل (v7.18) ──
     {
         const nightMsg = makeMessage({ content: '🔪 | جاري انتظار المافيا لاختيار شخص لقتله...' });
         await player.handleMessage({ client: makeClient(), message: nightMsg, agentId: AGENT_A, runtimeSettings });
         const killMsg = makeMessage({ content: `⚰️ | نجحت عملية المافيا وتم قتل <@${P1_ID}> وهذا الشخص كان **مواطن**` });
         await player.handleMessage({ client: makeClient(), message: killMsg, agentId: AGENT_A, runtimeSettings });
+        // 🧠 v7.18: حتى في الوضع التلقائي القرار بعقل الوكيل — العشوائي احتياط فشل فقط
+        providerMode = 'ok';
+        providerReply = 'فهد';
+        const beforeCalls = promptCalls;
         const voteMsg = makeMessage({
             content: 'لديكم **15 ثانية** لاختيار شخص لطرده من اللعبة',
             components: [{ components: [btn('خالد', 'vote_khalid'), btn('فهد', 'vote_fahad')] }],
         });
         await player.handleMessage({ client: makeClient(), message: voteMsg, agentId: AGENT_A, runtimeSettings });
+        await wait(30);
 
         const session = sessions.getSession(AGENT_A, GUILD);
         const texts = session.events.map(e => e.text).join(' | ');
@@ -208,7 +217,8 @@ async function run() {
         assert.ok(texts.includes('المافيا ستختار ضحية'), 'ليل القتل مسجل');
         assert.ok(texts.includes('قتلت المافيا «سامي»'), 'القتيل مسجل باسمه — لا معرفات مجهولة');
         assert.ok(texts.includes('صوّت على طرد'), 'التصويت مسجل في الوعي');
-        assert.deepStrictEqual(voteMsg.__clicks, ['vote_khalid'], 'التصويت التلقائي ضغط اسماً (عشوائي — النظام الحالي)');
+        assert.ok(promptCalls > beforeCalls, 'الذكاء استُشير حتى في الوضع التلقائي (قراره هو لا العشوائي)');
+        assert.deepStrictEqual(voteMsg.__clicks, ['vote_fahad'], 'ضغط اختيار الذكاء نفسه');
         assert.strictEqual(session.mafia.players.get(P1_ID).alive, false, 'سامي ميت في الذاكرة');
     }
 

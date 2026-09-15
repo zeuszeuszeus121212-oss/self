@@ -458,15 +458,15 @@ const EVENTS = [
 
             let targetButton = null;
             let strategySource = 'random';
-            if (ctx.engineSettings?.mode === 'ai') {
-                targetButton = await mafia.decideKick({
-                    runtimeSettings: ctx.runtimeSettings,
-                    agentName: ctx.agentName,
-                    session: live,
-                    candidates: playable,
-                }).catch(() => null);
-                if (targetButton) strategySource = 'ai';
-            }
+            // 🧠 v7.18: القرار دائماً بعقل الوكيل — العشوائي احتياط فشل فقط
+            // (كان مقيّداً بوضع «ذكي» فيبدو التلقائي كأنه لا يختار)
+            targetButton = await mafia.decideKick({
+                runtimeSettings: ctx.runtimeSettings,
+                agentName: ctx.agentName,
+                session: live,
+                candidates: playable,
+            }).catch(() => null);
+            if (targetButton) strategySource = 'ai';
             if (!targetButton) {
                 targetButton = playable[Math.floor(Math.random() * playable.length)];
             }
@@ -595,6 +595,50 @@ function collectMentions(message) {
     }
 }
 
+/**
+ * 🐞 v7.18 — لاعبو اللوبي الحقيقيون بأسمائهم: كان الاعتماد على
+ * message.mentions وحدها، ومنشنات الإيمبد لا تدخل فيها أصلاً (نفس جذر
+ * «يحسب انه البوت الذي فاز») — فكانت أسماء اللاعبين في الجولة تضيع كلياً
+ * (بلاغ المالك: «لا يتم ارسال اسماء اللاعبين في الجولة»). الآن نمسح نص
+ * الرسالة كاملاً (content + كل أجزاء الإيمبد) بـ regex ونحلل الأسماء.
+ */
+async function extractPlayerMentions(message) {
+    try {
+        const ids = new Set();
+        // 1) المنشنات الرسمية (content) — المصدر الأصلي
+        try {
+            for (const u of (message.mentions?.users?.values?.() || [])) ids.add(String(u.id));
+            for (const mem of (message.mentions?.members?.values?.() || [])) ids.add(String(mem.id ?? mem.user?.id));
+        } catch (_) {}
+        // 2) 🐞 منشنات الإيمبد — لا تصل message.mentions أصلاً (نفس جذر
+        // «يحسب انه البوت الذي فاز») — نمسح نص الرسالة كاملاً بـ regex
+        const fullText = `${textFromMessage(message)}\n${String(message.content || '')}`;
+        const re = /<@!?(\d{5,25})>/g;
+        let m;
+        while ((m = re.exec(fullText)) !== null) ids.add(m[1]);
+        if (!ids.size) return [];
+        const out = [];
+        for (const id of ids) {
+            let name = null;
+            const mentioned = message.mentions?.users?.get(id)
+                || message.mentions?.members?.get(id)?.user;
+            if (mentioned) name = mentioned.globalName || mentioned.username;
+            if (!name && message.guild?.members?.fetch) {
+                const member = await message.guild.members.fetch(id).catch(() => null);
+                if (member) name = member.displayName || member.user?.username || null;
+            }
+            if (!name) {
+                const cached = message.client?.users?.cache?.get(id);
+                if (cached) name = cached.globalName || cached.username;
+            }
+            if (name) out.push({ id, name });
+        }
+        return out;
+    } catch (_) {
+        return [];
+    }
+}
+
 /** اسم أزرار التصويت → سجلهم لاعبين (يقرأهم الذكاء لاحقاً) */
 function registerNamePlayers(session, buttons) {
     for (const button of buttons || []) {
@@ -635,6 +679,8 @@ const MAFIA_EVENTS = [
             if (!targetButton) return { handled: false };
 
             const clicked = await clickWithHumanDelay(message, targetButton);
+            // 🐞 v7.18: الأسماء من الإيمبد نفسه — لا من message.mentions فقط
+            const players = await extractPlayerMentions(message);
             return {
                 handled: true,
                 type: 'game_join',
@@ -644,11 +690,52 @@ const MAFIA_EVENTS = [
                 details: {
                     buttonLabel: clicked.label,
                     delayMs: clicked.delayMs,
-                    players: collectMentions(message), // يُسجلون في الجلسة من player.js بعد الإنشاء
-                    // 🧠 v7.17: «رسالة اللوبي نفسها يتم إرسالها للوكيل» — النص يُخزّن
-                    // في الجلسة ويقرؤه الذكاء في كل قرار وكلام وسياق محادثة
-                    lobbyText: text.slice(0, 400),
+                    players,
+                    // 🧠 v7.18: معرف اللوبي — نتبع تعديله حين ينضم باقي اللاعبين
+                    lobbyMessageId: message.id || null,
+                    // 🧠 «رسالة اللوبي نفسها يتم إرسالها للوكيل ومع الأعضاء عضو عضو وعددهم»
+                    lobbyText: text.slice(0, 900),
                 },
+            };
+        },
+    },
+
+    // ── 🧠 v7.18: تعديل رسالة اللوبي — اللاعبون ينضمون بعد انضمامنا فتُعدّل
+    // رسالة اللوبي بقائمة موسعة. بلا هذا المعالج كانت قائمة الأسماء تُجمَد على
+    // من كان موجوداً لحظة ضغطنا فقط (بلاغ المالك: «لا يتم ارسال اسماء اللاعبين في الجولة»)
+    {
+        engineId: 'mafia',
+        name: 'mafiaLobbyUpdate',
+        trigger: 'messageUpdate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+            if (!session.lobbyMessageId || String(session.lobbyMessageId) !== String(message.id)) return { handled: false };
+
+            const players = await extractPlayerMentions(message);
+            if (!players.length) return { handled: true, silent: true, result: 'lobby_update', type: 'game_play', gameName: 'مافيا', message: 'تحديث اللوبي — لا منشنات بعد', details: {} };
+
+            const before = session.mafia.players.size;
+            sessions.mafiaSetPlayers(ctx.agentId, message.guild.id, players);
+            const lobbyText = textFromMessage(message);
+            if (lobbyText) sessions.setLobbyText(ctx.agentId, message.guild.id, lobbyText);
+            const added = session.mafia.players.size - before;
+            if (added > 0) {
+                sessions.pushEvent(ctx.agentId, message.guild.id,
+                    `تحديث اللوبي: انضم ${added} لاعباً جديداً — المجموع الآن ${session.mafia.players.size}`);
+            }
+
+            return {
+                handled: true,
+                silent: true,
+                result: 'lobby_update',
+                type: 'game_play',
+                gameName: 'مافيا',
+                message: `تحديث اللوبي — اللاعبون الآن ${session.mafia.players.size}`,
+                details: { players: players.map(p => p.name) },
             };
         },
     },
@@ -853,20 +940,17 @@ const MAFIA_EVENTS = [
             if (candidates.length === 0) return { handled: false };
             registerNamePlayers(session, candidates);
 
-            // القرار: ذكي (الذكاء يختار المشتبه به) أو تلقائي (عشوائي — النظام الحالي)
-            const mode = ctx.engineSettings?.mode === 'ai' ? 'ai' : 'auto';
-            let target = null;
-            let source = 'random';
-            if (mode === 'ai') {
-                target = await mafia.decideVote({
-                    runtimeSettings: ctx.runtimeSettings,
-                    agentName: ctx.agentName,
-                    role: session.mafia.role,
-                    session,
-                    candidates,
-                });
-                if (target) source = 'ai';
-            }
+            // القرار: دائماً بعقل الوكيل (v7.18 — «لا يختار هو اصلا من يقتل او
+            // على من يصوت» كانت بسبب: التلقائي عشوائي حرفياً) — العشوائي احتياط فشل فقط
+            let target = await mafia.decideVote({
+                runtimeSettings: ctx.runtimeSettings,
+                agentName: ctx.agentName,
+                role: session.mafia.role,
+                session,
+                candidates,
+                rawText: text,
+            });
+            let source = target ? 'ai' : 'random';
             if (!target) target = mafia.pickRandom(candidates);
             if (!target) return { handled: false };
 
@@ -874,16 +958,16 @@ const MAFIA_EVENTS = [
             const clicked = await mafia.humanClick(message, target, { minDelay: 900, maxDelay: 1800 }).catch(() => null);
             if (!clicked) return { handled: false };
 
-            // 🧠 الوعي (v7.17) — صوّتنا على أحد
-            sessions.pushEvent(ctx.agentId, message.guild.id, `صوّت على طرد «${target.label || '؟'}» (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`);
+            // 🧠 الوعي — صوّتنا على أحد
+            sessions.pushEvent(ctx.agentId, message.guild.id, `صوّت على طرد «${target.label || '؟'}» (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي احتياطي'})`);
 
             return {
                 handled: true,
                 type: 'game_play',
                 result: 'vote',
                 gameName: 'مافيا',
-                message: `🗳️ صُوّت على طرد: ${target.label || '؟'}`,
-                details: { target: target.label || null, source, mode },
+                message: `🗳️ صوّت هو نفسه على طرد: ${target.label || '؟'}`,
+                details: { target: target.label || null, source, mode: ctx.engineSettings?.mode || 'auto' },
             };
         },
     },

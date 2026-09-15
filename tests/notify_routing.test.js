@@ -94,7 +94,25 @@ async function run() {
         ok('5) agentId غير صالح → تجاهل آمن والعالمية تعمل');
     }
 
-    console.log(`\n🌍 notify_routing: ${passed}/5 اختبارات ناجحة`);
+    // ── 6) 🎮 قناة إشعارات الألعاب المنفصلة لكل وكيل (v7.18) ──
+    {
+        const { getGameNotificationChannel } = require('../bot');
+        agentDoc = { _id: VALID_AGENT_ID, name: 'وكيل الألعاب', game_notification_channel_id: 'chan-games-separate' };
+        globalSettings.notification_channel_id = 'chan-global';
+        // قناة الألعاب المنفصلة تُعاد أولاً
+        const gch = await getGameNotificationChannel(VALID_AGENT_ID);
+        assert.equal(gch, 'chan-games-separate', 'قناة ألعاب منفصلة للوكيل');
+        // المسار العام لا يتأثر بها — الإشعارات العامة تبقى على قناتها
+        const normal = await getNotificationChannel(VALID_AGENT_ID, 'guild-1');
+        assert.equal(normal, 'chan-global', 'قناة الألعاب المنفصلة لا تخطف الإشعارات العامة');
+        // بلا قناة ألعاب → null (يسقط للمسار العادي وقت الإرسال)
+        delete agentDoc.game_notification_channel_id;
+        const none = await getGameNotificationChannel(VALID_AGENT_ID);
+        assert.equal(none, null, 'بلا قناة ألعاب → يسقط للمسار العادي');
+        ok('6) 🎮 قناة إشعارات ألعاب منفصلة لكل وكيل — والعامة على مسارها');
+    }
+
+    console.log(`\n🌍 notify_routing: ${passed}/6 اختبارات ناجحة`);
 }
 
 run().catch((e) => { console.error('❌ FATAL:', e); process.exit(1); });

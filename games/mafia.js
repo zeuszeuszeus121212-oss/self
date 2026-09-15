@@ -1,5 +1,5 @@
 /**
- * games/mafia.js — قرارات المافيا والرسائل السرية (v7.16)
+ * games/mafia.js — قرارات المافيا والرسائل السرية (v7.18)
  * ═══════════════════════════════════════════════════════════
  * بلاغ المالك: «الرسائل تأتي لو كان مافيا او طبيب تكون فقط مرئية
  * للحساب وحده بمعنى مخفية» — اختيار ضحية المافيا وحماية الطبيب
@@ -34,6 +34,41 @@ const AI_TIMEOUT_MS = 6500;
 // ════════════════════════════════════════════════════════════
 //  التعرف على الصيغ — «باحتمالات كثيرة» كما طلب المالك
 // ════════════════════════════════════════════════════════════
+
+/**
+ * 🐞 v7.18 — نص الرسالة السرية الكامل: كانت تُقرأ content + title/desc فقط
+ * وحقول الإيمبد (fields) كانت مستثناة — بطاقة الدور داخل حقل إيمبد لا تُكتشف
+ * فيبقى الدور مجهولاً والعقلة تخمّن «مواطن» وهو مافيا (بلاغ المالك الحرفي).
+ */
+function secretText(message) {
+    if (!message) return '';
+    const parts = [];
+    if (message.content) parts.push(String(message.content));
+    if (Array.isArray(message.embeds)) {
+        for (const embed of message.embeds) {
+            if (embed.title) parts.push(String(embed.title));
+            if (embed.description) parts.push(String(embed.description));
+            if (Array.isArray(embed.fields)) {
+                for (const field of embed.fields) {
+                    if (field.name) parts.push(String(field.name));
+                    if (field.value) parts.push(String(field.value));
+                }
+            }
+            if (embed.footer && embed.footer.text) parts.push(String(embed.footer.text));
+            if (embed.author && embed.author.name) parts.push(String(embed.author.name));
+        }
+    }
+    // Components V2 — نص الأقسام إن وُجد (مميزات نصية داخل TextDisplay)
+    try {
+        if (Array.isArray(message.components)) {
+            for (const comp of message.components) {
+                const json = typeof comp.toJSON === 'function' ? comp.toJSON() : comp;
+                if (json && typeof json.content === 'string') parts.push(json.content);
+            }
+        }
+    } catch (_) {}
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
 
 // صيغ اختيار ضحية القتل (رسالة المافيا السرية)
 const KILL_MARKERS = [
@@ -160,7 +195,7 @@ async function humanClick(message, button, { minDelay = 900, maxDelay = 1800 } =
 
 const ROLE_AR = { mafia: 'مافيا 🔪', doctor: 'طبيب 💊', detective: 'محقق 🔍', citizen: 'مواطن 🙂' };
 
-function buildDecisionPrompt({ kind, agentName, role, session, candidates }) {
+function buildDecisionPrompt({ kind, agentName, role, session, candidates, rawText = null }) {
     const roleText = ROLE_AR[role] || 'غير معروف بعد';
     const objective = kind === 'kill'
         ? 'أنت المافيا: اختر الضحية الأخطر — المخطِر الذي يكشفكم، ولا تختر صديقاً لك'
@@ -185,8 +220,9 @@ function buildDecisionPrompt({ kind, agentName, role, session, candidates }) {
     }).join('\n');
     return (
         `أنت تلعب لعبة مافيا في ديسكورد باسم «${agentName}» ودورك: ${roleText}.\n` +
+        (rawText ? `رسالة اللعبة التي وصلتك الآن حرفياً: «${String(rawText).slice(0, 400)}»\n` : '') +
         `${objective}\n\n` +
-        `المرشحون المتاحون:\n${playerLines || '  • لا أحد'}\n\n` +
+        `الخيارات المتاحة (الأزرار):\n${playerLines || '  • لا أحد'}\n\n` +
         `سياق الجلسة:\n${sessions.contextSummary(session) || '- لا معلومات بعد'}\n\n` +
         'اكتب اسم الشخص الذي تختاره فقط — الاسم كما هو في القائمة أعلاه بدون أي كلام إضافي.'
     );
@@ -218,8 +254,8 @@ async function aiPick(runtimeSettings, ctx) {
 }
 
 /** قرار التصويت — نفس الآلية بعنوان مختلف (يستعمله معالج التصويت) */
-async function decideVote({ runtimeSettings, agentName, role, session, candidates }) {
-    const picked = await aiPick(runtimeSettings, { kind: 'vote', agentName, role, session, candidates });
+async function decideVote({ runtimeSettings, agentName, role, session, candidates, rawText = null }) {
+    const picked = await aiPick(runtimeSettings, { kind: 'vote', agentName, role, session, candidates, rawText });
     return picked ? matchButtonByName(candidates, picked) : null;
 }
 
@@ -252,8 +288,8 @@ async function decideKick({ runtimeSettings, agentName, session, candidates }) {
 }
 
 /** قرار القتل/الحماية — يستعمله معالج الرسائل السرية */
-async function decideChoice({ runtimeSettings, agentName, role, session, candidates, kind }) {
-    const picked = await aiPick(runtimeSettings, { kind, agentName, role, session, candidates });
+async function decideChoice({ runtimeSettings, agentName, role, session, candidates, kind, rawText = null }) {
+    const picked = await aiPick(runtimeSettings, { kind, agentName, role, session, candidates, rawText });
     return picked ? matchButtonByName(candidates, picked) : null;
 }
 
@@ -272,7 +308,8 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
     if (!settings?.engines?.mafia?.enabled) return null;
     if (!isSecretMessage(message)) return null;
 
-    const text = [message.content, ...(Array.isArray(message.embeds) ? message.embeds.map(e => [e.title, e.description].filter(Boolean).join(' ')) : [])].filter(Boolean).join(' ');
+    // 🐞 v7.18: النص الكامل يشمل حقول الإيمبد (كانت مستثناة فتضيع بطاقة الدور)
+    const text = secretText(message);
 
     // جلسة مافيا حية من بوت اللعبة نفسه — وإلا لا شيء (لا نقر أزرار أبحاث غريبة)
     let guildId = null;
@@ -286,18 +323,44 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
         guildId = presetGuildId || message.guild?.id || null;
     }
 
+    // 📥 الصندوق الحي (v7.18): الرسالة السرية نفسها حرفياً لعقل الوكيل —
+    // «رساله الاختيار يتم إرسالها للوكيل مع الخيارات»
+    sessions.pushInbox(agentId, guildId, {
+        id: message.id || null,
+        kind: 'secret',
+        text: `رسالة سرية من بوت اللعبة: ${text.slice(0, 400)}`,
+    });
+
     // الدور قد يأتي في أي رسالة سرية — سجّله فوراً
     const role = detectRole(text);
     if (role) {
+        const hadRole = session.mafia.role;
         sessions.mafiaSetRole(agentId, guildId, role);
         session.mafia.role = role;
+        // 🧠 v7.18: بطاقة الدور تصل وعيه + رد فعل حقيقي بكيفه في قناة اللعبة
+        // (المالك: «توزيع الأدوار يتم ارسال رسالة توزيع الأدوار للوكيل يبدي رد فعل اولا بكيفه»)
+        if (!hadRole || hadRole !== role) {
+            sessions.pushEvent(agentId, guildId, `عرفت دورك: ${ROLE_AR[role] || role}`);
+            if (guildId && client?.channels?.fetch) {
+                const gameChannel = await client.channels.fetch(session.channelId).catch(() => null);
+                if (gameChannel && typeof gameChannel.send === 'function') {
+                    social.maybeSpeak({
+                        settings, session, kind: `role_${role}`,
+                        probability: social.effectiveChance(session, 'role_react', social.CHANCES.role_react),
+                        client, channel: gameChannel, agentId, guildId,
+                        eventLine: `وصلتك بطاقة دورك السرية: أنت ${ROLE_AR[role] || role}${role === 'mafia' ? ' — حاول ألا تكشف نفسك أبداً' : ''}`,
+                        runtimeSettings, agentName, session,
+                    });
+                }
+            }
+        }
     }
 
     const kind = detectChoiceKind(text);
     if (!kind) {
         // رسالة دور بلا أزرار (مثل «دورك هو: مواطن») — ملاحظة صامتة
         if (role) {
-            return { handled: true, silent: true, type: 'game_play', result: 'role_note', gameName: 'مافيا', role, message: `عُرف الدور: ${role}` };
+            return { handled: true, silent: true, type: 'game_play', result: 'role_note', gameName: 'مافيا', role, message: `عُرف الدور: ${ROLE_AR[role] || role}` };
         }
         return null;
     }
@@ -307,24 +370,23 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
     const candidates = candidateButtons(allButtons, { agentName });
     if (candidates.length === 0) return null;
 
-    // القرار: ذكي أو عشوائي
-    const mode = settings.engines?.mafia?.mode === 'ai' ? 'ai' : 'auto';
-    let target = null;
-    let source = 'random';
-    if (mode === 'ai') {
-        target = await decideChoice({ runtimeSettings, agentName, role: session.mafia.role, session, candidates, kind });
-        if (target) source = 'ai';
-    }
+    // 🧠 v7.18: القرار دائماً بعقل الوكيل في الوضعين — «لا يختار هو اصلا من يقتل
+    // او على من يصوت» كان بسبب: التلقائي عشوائي حرفياً والذكي يسقط عشوائياً بصمت.
+    // العشوائي الآن احتياط فشل فقط.
+    let target = await decideChoice({
+        runtimeSettings, agentName, role: session.mafia.role, session, candidates, kind, rawText: text,
+    });
+    let source = target ? 'ai' : 'random';
     if (!target) target = pickRandom(candidates);
     if (!target) return null;
 
     const clicked = await humanClick(message, target).catch(() => null);
     if (!clicked) return null;
 
-    // 🧠 الوعي (v7.17) — حركتنا السرية تسجل في سجل ما يحصل
+    // 🧠 الوعي — حركتنا السرية تسجل في سجل ما يحصل
     sessions.pushEvent(agentId, guildId, kind === 'kill'
-        ? `اختار سراً ضحية المافيا: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`
-        : `اختار سراً من يُحمى: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`);
+        ? `اختار سراً ضحية المافيا: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي احتياطي'})`
+        : `اختار سراً من يُحمى: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي احتياطي'})`);
 
     return {
         handled: true,
@@ -332,9 +394,9 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
         result: 'secret_choice',
         gameName: 'مافيا',
         message: kind === 'kill'
-            ? `🔪 اختيرت ضحية المافيا: ${target.label || '؟'}`
-            : `💊 اختير من يُحمى: ${target.label || '؟'}`,
-        details: { kind, role: session.mafia.role, target: target.label || null, source, mode, candidates: candidates.length, dm: !message.guild },
+            ? `🔪 اختار هو نفسه ضحية المافيا: ${target.label || '؟'}`
+            : `💊 اختار هو نفسه من يُحمى: ${target.label || '؟'}`,
+        details: { kind, role: session.mafia.role, target: target.label || null, source, mode: settings.engines?.mafia?.mode || 'auto', candidates: candidates.length, dm: !message.guild },
     };
 }
 
@@ -342,6 +404,7 @@ module.exports = {
     isSecretMessage,
     detectChoiceKind,
     detectRole,
+    secretText,
     collectChoiceButtons,
     candidateButtons,
     matchButtonByName,

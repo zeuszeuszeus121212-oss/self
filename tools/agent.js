@@ -600,9 +600,13 @@ async function runAgent(
                 }
 
                 let targetGuild = guild;
+                // 🌐 v7.18: قراءة من سيرفر آخر — كانت محصورة owner فقط
+                // (بلاغ المالك: «لماذا تعمل فقط مع السيرفر الحالي للوكيل ولا يستطيع
+                // استخدامها لجلب رسائل من قنوات سيرفر اخر؟») — الآن متاحة للأدمن
+                // أيضاً (قراءة فقط)
                 if (params.target_guild) {
-                    if (accessLevel !== 'owner') {
-                        const result = _err('⛔ الأدمن يستطيع قراءة السيرفر الحالي فقط.');
+                    if (accessLevel === 'member') {
+                        const result = _err('ما تقدر تقرأ سيرفرات أخرى من هذه المحادثة.');
                         allResults.push(`[TOOL_RESULT: ${tool}]\n${JSON.stringify(result)}`);
                         continue;
                     }
@@ -618,10 +622,16 @@ async function runAgent(
 
                 let result;
                 try {
+                    // 🌐 v7.18: إن لم توجد القناة في السيرفر الهدف — ابحث في كل
+                    // سيرفرات العميل (الوكيل يعمل في عدة سيرفرات)
                     const getTargetCh = async () => {
                         if (params.channel) {
                             const found = await findChannel(targetGuild, String(params.channel));
                             if (found && isTextChannel(found)) return found;
+                            for (const g of client.guilds.cache.values()) {
+                                const f = await findChannel(g, String(params.channel));
+                                if (f && isTextChannel(f)) return f;
+                            }
                         }
                         return channel;
                     };
