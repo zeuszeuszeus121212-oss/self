@@ -226,6 +226,7 @@ async function renderGamesPage(agentId, guildId, manager) {
         '## خيارات الرد',
         `- 🧠 إجابة ريبلكا بالذكاء أولاً: **${settings.ai_answers ? 'مفعّلة (القاموس احتياط)' : 'قاموس فقط'}**`,
         `- 🔇 كتم ردود الذكاء على رسائل الألعاب: **${settings.suppress_ai ? 'مكتوم' : 'عادي (كما كان دائماً)'}**`,
+        `- 🫧 التفاعل الاجتماعي أثناء اللعب: **${settings.social?.enabled ? 'مفعّل (يعقّب على الطرد والفوز ويرد على من يذكر اسمه)' : 'معطل (صمت كامل)'}**`,
         '',
         '## إحصائيات هذه الجلسة',
         `- 🚪 انضمامات: **${stats.joins}** • 🎮 حركات: **${stats.plays}** • 🏆 فوز: **${stats.wins}** • 💀 خسارة: **${stats.losses}** • ⚠️ أخطاء: **${stats.errors}**`,
@@ -255,6 +256,9 @@ async function renderGamesPage(agentId, guildId, manager) {
         new ButtonBuilder().setCustomId(`${PREFIX}:suppress_toggle:${agentId}:${guildId}`)
             .setLabel(settings.suppress_ai ? 'كتم الذكاء: مفعّل' : 'كتم الذكاء: معطل')
             .setStyle(ButtonStyle.Secondary).setEmoji('🔇'),
+        new ButtonBuilder().setCustomId(`${PREFIX}:social_toggle:${agentId}:${guildId}`)
+            .setLabel(settings.social?.enabled ? 'التفاعل الاجتماعي: مفعّل' : 'التفاعل الاجتماعي: معطل')
+            .setStyle(settings.social?.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🫧'),
     );
 
     // صف 2.5: الانضمام المميز (كراسي/ريبلكا) — معطل افتراضياً لأنه ينقر أي زر بعد ذكر اسم اللعبة
@@ -574,6 +578,17 @@ async function handleGamesInteraction(interaction, manager) {
             const guildId = parts[3];
             const settings = await store.getGameSettings(agentId, guildId);
             await store.updateGameSettings(agentId, guildId, { suppress_ai: !settings.suppress_ai });
+            await update(interaction, await renderGamesPage(agentId, guildId, manager));
+            return true;
+        }
+
+        if (parts[1] === 'social_toggle') {
+            const agentId = parts[2];
+            const guildId = parts[3];
+            const settings = await store.getGameSettings(agentId, guildId);
+            const next = !(settings.social && settings.social.enabled);
+            await store.updateGameSettings(agentId, guildId, { social: { enabled: next } });
+            await store.pushRecentEvent(agentId, { kind: 'social', text: next ? '🫧 فُعّل التفاعل الاجتماعي أثناء اللعب' : '🫧 أُوقف التفاعل الاجتماعي' });
             await update(interaction, await renderGamesPage(agentId, guildId, manager));
             return true;
         }

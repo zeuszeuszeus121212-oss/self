@@ -23,6 +23,8 @@ const engines = require('./engines');
 const policy = require('./policy');
 const store = require('./store');
 const eventsMod = require('./events');
+const sessions = require('./sessions');
+const social = require('./social');
 const { getProviderOrFallback } = require('../providers');
 
 // هوية الوكلاء الحية — يملؤها agentReady
@@ -38,9 +40,22 @@ const zarResendTimers = new Map();
 const processedOutcomeMessages = new Set();
 const MAX_PROCESSED_OUTCOME = 1000;
 
-// عبارات النتيجة — منقولة حرفياً من Auto engineRuntime
-const WIN_PHRASES = ['فاز باللعبة', 'فاز'];
-const LOSS_PHRASES = ['خسرت', 'خسر', 'تم طرد'];
+// عبارات النتيجة — منقولة من Auto engineRuntime (مع توسيع طُرد/انطرد والفائز)
+const WIN_PHRASES = ['فاز باللعبة', 'فاز', 'الفائز'];
+const LOSS_PHRASES = ['خسرت', 'خسر', 'تم طرد', 'طُرد', 'انطرد'];
+
+// 🛰️ بلاغ المالك (v7.15): «جاري البحث عن لاعبين خارجيين للانضمام...» تُسجل كخسارة!
+// رسائل اللوبي/البحث ليست نتائج أبداً — مهما ذُكر اسمنا فيها
+const LOBBY_MARKERS = [
+    'جاري البحث عن لاعبين', 'البحث عن لاعبين', 'انتظار اللاعبين',
+    'للانضمام إلى اللعبة', 'للانضمام الي اللعبة', 'انضم الآن',
+];
+
+// صيغ شرطية/مستقبلية — «إذا خسرت ستفقد» ليست خسارة! (تُطابق بالسطر)
+const HYPOTHETICAL_MARKERS = [
+    'يخسر', 'ستخسر', 'اذا خسر', 'إذا خسر', 'لن تخسر',
+    'اذا فاز', 'إذا فاز', 'سيفوز', 'يفوز', 'سيطردها', 'سيطرده',
+];
 
 // 🕶️ المُخبِر — يُحقن من bot.js مثل guildRegistry/qwenAccounts
 let notifier = null;
@@ -94,6 +109,7 @@ function agentStop(agentId) {
         if (key.startsWith(`${id}:`)) { clearTimeout(zarResendTimers.get(key)); zarResendTimers.delete(key); }
     }
     policy.releaseLocksForAgent(id);
+    sessions.endAllForAgent(id); // 🎮 جلسات اللعب تُغلق كلياً (v7.15)
     store.invalidateAgent(id);
     store.resetSessionStats(id);
 }
@@ -220,37 +236,115 @@ function playerIdentifiers(client) {
         .filter(Boolean).map(item => item.toLowerCase());
 }
 
-function outcomeFromMessage(message, client, policyDoc) {
+/**
+ * أسطر الرسالة مع الحفاظ على الحدود — بخلاف textFromMessage المسطّح،
+ * كل حقل/عنوان إيمبد يبدأ سطراً جديداً حتى لا تختلط قائمة اللاعبين
+ * بشروط الجائزة في حقل مجاور (سبب الخسائر المزيفة).
+ */
+function linesFromMessage(message) {
+    const lines = [];
+    if (message.content) for (const line of String(message.content).split('\n')) lines.push(line);
+    if (Array.isArray(message.embeds)) {
+        for (const embed of message.embeds) {
+            if (embed.title) lines.push(String(embed.title));
+            if (embed.description) for (const line of String(embed.description).split('\n')) lines.push(line);
+            if (Array.isArray(embed.fields)) {
+                for (const field of embed.fields) {
+                    if (field.name) lines.push(String(field.name));
+                    if (field.value) for (const line of String(field.value).split('\n')) lines.push(line);
+                }
+            }
+            if (embed.footer && embed.footer.text) lines.push(String(embed.footer.text));
+            if (embed.author && embed.author.name) lines.push(String(embed.author.name));
+        }
+    }
+    return lines.map(line => line.trim()).filter(Boolean);
+}
+
+/** هل منشن الوكيل هو أول منشن يلي العبارة؟ (المطرود/الفائز يُذكر مباشرة بعد العبارة)
+ *  تُتخطى علامات الترقيم والفواصل فقط — لا يُتخطى منشن لاعب آخر (تم طرد <غيرنا> ≠ نحن) */
+function firstMentionAfterIsMe(line, lower, phraseEnd, identifiers) {
+    const after = lower.slice(phraseEnd, phraseEnd + 80);
+    // تخطي الفواصل والترقيم فقط (نقاط/نقطتان/شرطة/نجوم...) — التوقف عند أول حرف أو منشن
+    const skipped = after.match(/^[^\p{L}\p{N}<]*/u);
+    const rest = after.slice(skipped ? skipped[0].length : 0);
+    const match = rest.match(/^<@!?(\d+)>/);
+    if (!match) return false;
+    return identifiers.includes(`<@${match[1]}>`) || identifiers.includes(`<@!${match[1]}>`);
+}
+
+/** هل ذُكر معرفنا نصياً قبل العبارة (نافذة 40 حرفاً)؟ — للفوز: «<منشن> فاز باللعبة» */
+function identifierBeforePhrase(lower, phraseStart, identifiers) {
+    const before = lower.slice(Math.max(0, phraseStart - 40), phraseStart);
+    return identifiers.some(id => before.includes(id));
+}
+
+function outcomeFromMessage(message, client) {
     if (!message || !message.author || !message.author.bot) return null;
     if (message.id && processedOutcomeMessages.has(message.id)) return null;
 
-    const text = eventsMod.textFromMessage(message).toLowerCase();
-    if (!text) return null;
+    const rawText = eventsMod.textFromMessage(message);
+    if (!rawText) return null;
+    const lowerText = rawText.toLowerCase();
 
-    // الفلتر: البوتات المسموحة للنتائج — نمرر أي محرك يعمل (تقريب عملي لنمط Auto)
+    // ① رسائل اللوبي/البحث عن لاعبين ليست نتائج أبداً (بلاغ المالك v7.15)
+    if (LOBBY_MARKERS.some(marker => lowerText.includes(marker))) return null;
+
+    // ② بوابة الهوية: الرسالة تخاطبنا أو تذكرنا (منشن حقيقي أو نص)
     const identifiers = playerIdentifiers(client);
-    if (identifiers.length === 0 || !identifiers.some(identifier => text.includes(identifier))) return null;
+    const mentionsMe = Boolean(client?.user?.id)
+        && typeof message.mentions?.has === 'function'
+        && message.mentions.has(client.user.id);
+    if (!mentionsMe && (identifiers.length === 0 || !identifiers.some(identifier => lowerText.includes(identifier)))) return null;
 
-    const winPhrase = WIN_PHRASES.find(phrase => text.includes(phrase));
-    if (winPhrase) {
-        rememberProcessedOutcome(message.id);
-        return { result: 'win', level: 'success', reason: `رسالة بوت تحتوي: ${winPhrase}` };
-    }
+    // ③ فحص سطراً سطراً — النتيجة تعني «الوكيل» في نفس السطر، بلا صيغ شرطية
+    for (const line of linesFromMessage(message)) {
+        const lower = line.toLowerCase();
+        if (HYPOTHETICAL_MARKERS.some(marker => lower.includes(marker))) continue;
 
-    const lossPhrase = LOSS_PHRASES.find(phrase => text.includes(phrase));
-    if (lossPhrase) {
-        rememberProcessedOutcome(message.id);
-        return { result: 'loss', level: 'warning', reason: `رسالة بوت تحتوي: ${lossPhrase}` };
+        for (const phrase of WIN_PHRASES) {
+            let idx = lower.indexOf(phrase);
+            while (idx !== -1) {
+                const phraseEnd = idx + phrase.length;
+                const hit = firstMentionAfterIsMe(line, lower, phraseEnd, identifiers)
+                    || identifierBeforePhrase(lower, idx, identifiers)
+                    || (mentionsMe && (lower.includes('فزت') || lower.includes('فوزك')));
+                if (hit) {
+                    rememberProcessedOutcome(message.id);
+                    return { result: 'win', kind: 'win', level: 'success', reason: `رسالة بوت تحتوي: ${phrase}` };
+                }
+                idx = lower.indexOf(phrase, phraseEnd);
+            }
+        }
+
+        for (const phrase of LOSS_PHRASES) {
+            let idx = lower.indexOf(phrase);
+            while (idx !== -1) {
+                const phraseEnd = idx + phrase.length;
+                // الطرد: من يُذكر مباشرة بعد العبارة هو المطرود — لا يكفي ذكرنا في السطر
+                const hit = firstMentionAfterIsMe(line, lower, phraseEnd, identifiers)
+                    || (mentionsMe && (lower.includes('طردك') || lower.includes('طُردك') || lower.includes('خسرت') || lower.includes('خسارتك')));
+                if (hit) {
+                    const isKick = lower.includes('طرد') || lower.includes('طُرد') || lower.includes('انطرد');
+                    rememberProcessedOutcome(message.id);
+                    return { result: 'loss', kind: isKick ? 'kick' : 'loss', level: 'warning', reason: `رسالة بوت تحتوي: ${phrase}` };
+                }
+                idx = lower.indexOf(phrase, phraseEnd);
+            }
+        }
     }
     return null;
 }
 
 async function processOutcome({ agentId, client, message, settings }) {
     const outcome = outcomeFromMessage(message, client);
-    if (!outcome) return false;
+    if (!outcome) return null;
     const guildId = message.guild.id;
 
-    policy.clearLocks(); // نهاية جولة = تحرير أقفال هذا الوكيل (بساطة آمنة: الأقفال للجولات القصيرة)
+    // 🐞 v7.15: كان clearLocks() يحرر أقفال كل الوكلاء على المنصة —
+    // الآن تحرير مُقيّد بأقفال هذا الوكيل وحده
+    policy.releaseLocksForAgent(String(agentId));
+    sessions.endSession(agentId, guildId); // الجولة انتهت — الجلسة تُغلق
     store.incrementStats(agentId, guildId, outcome.result === 'win' ? 'wins' : 'losses');
     await store.pushRecentEvent(agentId, {
         kind: 'result',
@@ -267,7 +361,7 @@ async function processOutcome({ agentId, client, message, settings }) {
         level: outcome.result === 'win' ? 'success' : 'warning',
         extra: { reason: outcome.reason },
     });
-    return true;
+    return outcome;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -282,7 +376,6 @@ async function processOutcome({ agentId, client, message, settings }) {
 async function handleMessage({ client, message, agentId, runtimeSettings }) {
     try {
         if (!message?.guild || !message.author) return false;
-        if (!message.author.bot) return false; // رسائل الألعاب من بوتات فقط
         if (message.author.id === client?.user?.id) return false;
         const agent = agents.get(String(agentId));
         if (!agent) return false;
@@ -290,6 +383,16 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
         const settings = await store.getGameSettings(agentId, message.guild.id);
         // ⚡ المسار السريع — اللعب معطل: صفر تأثير على السلوك الحالي
         if (!settings.enabled) return false;
+
+        // 💬 رسالة بشرية → مراقبة اجتماعية فقط (v7.15) — لا تغير مسار الرسالة
+        // أبداً: المنشن المباشر يبقى للمحادثة الرئيسية، والمراقبة تسجل الكلام
+        // وتتبع الأصدقاء وترد محتملاً عند ذكر اسم الوكيل فقط
+        if (!message.author.bot) {
+            try {
+                await social.handleChatMessage({ client, message, agentId, runtimeSettings, agentName: agent.agentName, settings });
+            } catch (_) {}
+            return false;
+        }
 
         const guildId = message.guild.id;
         let handledAny = false;
@@ -342,29 +445,57 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                     continue;
                 }
 
-                // نجاح — إحصائيات وسجل وإشعار
-                handledAny = true;
-                store.incrementStats(agentId, guildId, result.type === 'game_join' ? 'joins' : 'plays');
-                await store.pushRecentEvent(agentId, { kind: result.type, text: `${engines.getEngine(event.engineId)?.icon || '🎮'} ${result.message || event.gameName}` });
-                await store.logGameEvent(agentId, guildId, {
-                    type: result.type, engine: event.engineId, gameName: result.gameName,
-                    result: result.result, details: result.details || {},
-                    message_id: message.id, bot_id: message.author.id,
-                });
-                await notifyGameEvent({
-                    agentId, guildId,
-                    title: result.type === 'game_join' ? '🎮 انضمام للعبة' : '🎮 حركة لعب',
-                    message: `**${result.gameName}** — ${result.message || ''}`,
-                    level: 'info',
-                    extra: { engine: event.engineId, bot_id: message.author.id },
-                });
+                // نجاح — جلسة حية + إحصائيات وسجل وإشعار (النتائج الصامتة كتخطي الدور
+                // تبقي الجلسة والقفل بلا إحصائيات ولا إزعاج)
+                if (result.type === 'game_join') {
+                    sessions.startSession(agentId, guildId, {
+                        engineId: event.engineId,
+                        channelId: message.channel.id,
+                        botId: message.author.id,
+                        gameName: event.gameName,
+                        guildName: message.guild.name,
+                    });
+                } else {
+                    sessions.touchSession(agentId, guildId);
+                }
+                if (result.silent !== true) {
+                    handledAny = true;
+                    store.incrementStats(agentId, guildId, result.type === 'game_join' ? 'joins' : 'plays');
+                    await store.pushRecentEvent(agentId, { kind: result.type, text: `${engines.getEngine(event.engineId)?.icon || '🎮'} ${result.message || event.gameName}` });
+                    await store.logGameEvent(agentId, guildId, {
+                        type: result.type, engine: event.engineId, gameName: result.gameName,
+                        result: result.result, details: result.details || {},
+                        message_id: message.id, bot_id: message.author.id,
+                    });
+                    await notifyGameEvent({
+                        agentId, guildId,
+                        title: result.type === 'game_join' ? '🎮 انضمام للعبة' : '🎮 حركة لعب',
+                        message: `**${result.gameName}** — ${result.message || ''}`,
+                        level: 'info',
+                        extra: { engine: event.engineId, bot_id: message.author.id },
+                    });
+                }
                 // القفل يبقى حتى نتيجة الجولة (كما في Auto: game_result يحرر)
                 break; // رسالة واحدة = معالج واحد
             } catch (_) { /* معالج واحد لا يُسقط البقية */ }
         }
 
-        // 3) كشف نتيجة فوز/خسارة (بغض النظر عن المعالجات)
-        try { await processOutcome({ agentId, client, message, settings }); } catch (_) {}
+        // 3) كشف نتيجة فوز/خسارة (بغض النظر عن المعالجات) — يرجع النتيجة أو null
+        let outcome = null;
+        let sessionBeforeOutcome = null;
+        try {
+            // الجلسة تُلتقط قبل أن تُغلقها النتيجة — تعليق الطرد/الخسارة يحتاج سياقها
+            sessionBeforeOutcome = sessions.getSession(agentId, message.guild.id);
+            outcome = await processOutcome({ agentId, client, message, settings });
+        } catch (_) {}
+
+        // 🫧 التفاعل الاجتماعي — مراقبة رسالة البوت: نتيجتنا (تعليق) أو طرد صديق (مزحة)
+        try {
+            await social.observeBotMessage({
+                client, message, agentId, runtimeSettings, agentName: agent.agentName,
+                settings, outcome, session: sessionBeforeOutcome,
+            });
+        } catch (_) {}
 
         return handledAny && settings.suppress_ai === true;
     } catch (_) {
@@ -425,14 +556,17 @@ async function handleMessageUpdate({ client, message, agentId, runtimeSettings }
                     continue;
                 }
 
-                handledAny = true;
-                store.incrementStats(agentId, guildId, result.type === 'game_join' ? 'joins' : 'plays');
-                await store.pushRecentEvent(agentId, { kind: result.type, text: `${engines.getEngine(event.engineId)?.icon || '🎮'} ${result.message || event.gameName}` });
-                await store.logGameEvent(agentId, guildId, {
-                    type: result.type, engine: event.engineId, gameName: result.gameName,
-                    result: result.result, details: result.details || {},
-                    message_id: message.id, bot_id: message.author.id,
-                });
+                sessions.touchSession(agentId, message.guild.id);
+                if (result.silent !== true) {
+                    handledAny = true;
+                    store.incrementStats(agentId, guildId, result.type === 'game_join' ? 'joins' : 'plays');
+                    await store.pushRecentEvent(agentId, { kind: result.type, text: `${engines.getEngine(event.engineId)?.icon || '🎮'} ${result.message || event.gameName}` });
+                    await store.logGameEvent(agentId, guildId, {
+                        type: result.type, engine: event.engineId, gameName: result.gameName,
+                        result: result.result, details: result.details || {},
+                        message_id: message.id, bot_id: message.author.id,
+                    });
+                }
                 break;
             } catch (_) { /* معالج واحد لا يُسقط البقية */ }
         }
@@ -476,5 +610,6 @@ module.exports = {
     __internals: {
         agents, zarLoops, processedOutcomeMessages,
         cleanAiAnswer, outcomeFromMessage, answerWithAi,
+        linesFromMessage,
     },
 };

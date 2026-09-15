@@ -53,11 +53,62 @@ function isGreenButton(button) {
     return style === 3 || styleText === 'SUCCESS' || styleText === 'GREEN';
 }
 
+// 🚫 أزرار واجهة لا علاقة لها بالانضمام/اللعب أبداً (v7.15 — بلاغ المالك:
+// كان يضغط «حقيبتي» في بوت البادئة «.» بدل زر الدخول)
+const UI_BUTTON_BLACKLIST = [
+    'اخرج', 'انسحب', 'متجر', 'حقيبتي', 'محفظتي', 'الحقيبة', 'المحفظة',
+    'معلومات', 'قوانين', 'القوانين', 'رصيد', 'نقاط', 'نقاطي', 'مساعدة',
+    'تذكير', 'إحصائيات', 'احصائيات', 'حسابي', 'ملفي', 'الرئيسية', 'تحديث',
+    'طرد مرتين', 'حالة', 'الترتيب', 'قائمة', 'شراء',
+];
+
+// ✅ أسماء انضمام صريحة — أولوية قصوى عندما توجد
+const JOIN_LABELS = ['انضمام', 'انضم', 'الانضمام', 'دخول', 'الدخول', 'ادخل', 'اللعب', 'لعب'];
+
+function isUiButton(button) {
+    const label = String((button && button.label) || '');
+    return UI_BUTTON_BLACKLIST.some(word => label.includes(word));
+}
+
+function isJoinLabeled(button) {
+    const label = String((button && button.label) || '');
+    return JOIN_LABELS.some(word => label.includes(word));
+}
+
+/**
+ * اختيار زر الدخول الذكي (v7.15):
+ *  1) زر باسم انضمام صريح → فوراً (لا تخمين)
+ *  2) زر أخضر (SUCCESS) — عشوائي بين الخضر (تمويه محفوظ)
+ *  3) أول زر متاح خارج القائمة السوداء (نمط Auto: أول زر = الدخول غالباً)
+ */
+function pickJoinButton(allButtons) {
+    const enabled = (allButtons || []).filter(button => button && button.customId && !button.disabled);
+    if (enabled.length === 0) return null;
+    const joinLabeled = enabled.filter(isJoinLabeled);
+    if (joinLabeled.length > 0) return joinLabeled[0];
+    const greens = enabled.filter(button => isGreenButton(button) && !isUiButton(button));
+    if (greens.length > 0) return greens[Math.floor(Math.random() * greens.length)];
+    const candidates = enabled.filter(button => !isUiButton(button));
+    if (candidates.length === 0) return null;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
 function collectButtons(message) {
     if (!message.components || message.components.length === 0) return [];
     return message.components.flatMap(row => row.components || [])
         .filter(button => button && button.customId && !button.disabled);
 }
+
+// 🧑 محاكاة البشر لدور الروليت — الأرقام المنقولة حرفياً من Auto roulettePlay
+// (قابلة للضبط من الاختبارات فقط — ليس واجهة عامة)
+const HUMAN_SIM = {
+    skip     : 0.01,   // احتمال تخطي الدور (تردد بشري)
+    minDelay : 800,
+    maxDelay : 2500,
+    extraProb: 0.10,   // احتمال تأخير أطول (تشتت/كتابة)
+    extraMin : 3000,
+    extraMax : 6000,
+};
 
 async function clickWithHumanDelay(message, button, minDelay = 1000, maxDelay = 2000) {
     // 🎲 التمويه البشري — نفس أرقام Auto: عشوائي بين 1000 و 2000ms
@@ -360,8 +411,73 @@ const EVENTS = [
         },
     },
 
-    // ── روليت: دخول اللوبي — إيمبد «روليت/العجلة» + رقم شاغر عشوائي بتأخير بشري ──
-    // المنقول من: Roulette/events/rouletteJoin.js
+    // ── روليت: دور اللعب — «<منشن الوكيل>» + أزرار اللاعبين → استهداف عشوائي ──
+    // المنقول من: Roulette/events/roulettePlay.js (كان مفقوداً في v7.14 —
+    // لهذا كان الوكيل لا يضغط شيئاً عندما يحين دوره!) + بوابة جلسة حية (أكثر
+    // أماناً من Auto لأن وكيلنا يشارك المحادثة — لا ضغط خارج لعبة انضم إليها)
+    {
+        engineId: 'roulette',
+        name: 'roulettePlay',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'روليت',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            if (!message.components || message.components.length === 0) return { handled: false };
+
+            const myId = client.user && client.user.id;
+            if (!myId) return { handled: false };
+            // الدور الحقيقي: الرسالة موجّهة للوكيل بذاتها (منشن في المحتوى)
+            if (!message.content.includes(`<@${myId}>`) && !message.content.includes(`<@!${myId}>`)) {
+                return { handled: false };
+            }
+
+            // 🛡️ بوابة الجلسة الحية — انضم أولاً وإلا لا حركة (كما في Auto بلا هذه البوابة
+            // لأن حساباته مكرّسة، لكن وكيلنا يشارك القناة فنشدّد)
+            const sessions = require('./sessions');
+            const live = sessions.touchSession(ctx.agentId, message.guild.id);
+            if (!live) return { handled: false };
+
+            // الأزرار القابلة للعب — استبعاد انسحاب/واجهة (منقول من Auto + قائمتنا)
+            const allButtons = message.components.flatMap(row => row.components || []);
+            const playable = allButtons.filter(button => {
+                if (!button || button.disabled || !button.customId) return false;
+                const label = button.label || '';
+                if (label.includes('انسحب') || label.includes('طرد مرتين')) return false;
+                if (isUiButton(button)) return false;
+                return true;
+            });
+            if (playable.length === 0) return { handled: false };
+
+            // 🎯 استهداف عشوائي بين اللاعبين المتاحين (نسخة الوكيل الواحد من سلم Auto:
+            // الغرباء أولاً — بلا حسابات شقيقة في المنصة أصلاً)
+            const targetButton = playable[Math.floor(Math.random() * playable.length)];
+            const strategyLog = `⚔️ [هجوم] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`;
+
+            // 🔁 محاكاة بشرية — أرقام Auto حرفياً (800-2500ms + 10% تأخير أطول + 1% تخطي)
+            if (Math.random() < HUMAN_SIM.skip) {
+                return { handled: true, silent: true, result: 'skip', gameName: 'روليت', type: 'game_play', message: 'تخطي الدور (محاكاة بشرية)' };
+            }
+            let delay = Math.floor(Math.random() * (HUMAN_SIM.maxDelay - HUMAN_SIM.minDelay + 1)) + HUMAN_SIM.minDelay;
+            if (Math.random() < HUMAN_SIM.extraProb) {
+                delay += Math.floor(Math.random() * (HUMAN_SIM.extraMax - HUMAN_SIM.extraMin + 1)) + HUMAN_SIM.extraMin;
+            }
+            await new Promise(resolve => setTimeout(resolve, delay));
+            await message.clickButton(targetButton.customId).catch(() => {});
+
+            return {
+                handled: true,
+                type: 'game_play',
+                result: 'play',
+                gameName: 'روليت',
+                message: strategyLog,
+                details: { buttonLabel: targetButton.label || null, delayMs: delay, playableCount: playable.length },
+            };
+        },
+    },
+
+    // ── روليت: دخول اللوبي — إيمبد «روليت/العجلة» + زر دخول ذكي بتأخير بشري ──
+    // المنقول من: Roulette/events/rouletteJoin.js — مع اختيار الأزرار الذكي (v7.15)
     {
         engineId: 'roulette',
         name: 'rouletteJoin',
@@ -370,6 +486,12 @@ const EVENTS = [
         gameName: 'روليت',
         async execute(message, client, ctx) {
             if (!message.author || !message.author.bot) return { handled: false };
+
+            const myId = client.user && client.user.id;
+            // رسالة موجّهة للوكيل (دوره) → ليست لوبي دخول — معالج الدور يتكفل بها
+            if (myId && message.content && (message.content.includes(`<@${myId}>`) || message.content.includes(`<@!${myId}>`))) {
+                return { handled: false };
+            }
 
             const allTexts = [];
             if (message.content) allTexts.push(message.content);
@@ -386,20 +508,8 @@ const EVENTS = [
             if (!message.components || message.components.length === 0) return { handled: false };
 
             const allButtons = message.components.flatMap(row => row.components || []);
-
-            const availableButtons = allButtons.filter(button => {
-                if (button.disabled) return false;
-                if (!button.customId) return false;
-                const label = button.label || '';
-                if (label.includes('اخرج') || label.includes('متجر')) return false;
-                return true;
-            });
-
-            if (availableButtons.length === 0) return { handled: false };
-
-            // 🎲 التمويه العشوائي: اختيار زر عشوائي تماماً من الخانات الشاغرة
-            const randomIndex = Math.floor(Math.random() * availableButtons.length);
-            const targetButton = availableButtons[randomIndex];
+            const targetButton = pickJoinButton(allButtons);
+            if (!targetButton) return { handled: false };
 
             const clicked = await clickWithHumanDelay(message, targetButton);
             return {
@@ -407,8 +517,8 @@ const EVENTS = [
                 type: 'game_join',
                 result: 'join',
                 gameName: 'روليت',
-                message: `تم الدخول عشوائياً بالرقم: ${targetButton.label}`,
-                details: { buttonLabel: clicked.label, delayMs: clicked.delayMs, availableCount: availableButtons.length },
+                message: `تم الدخول بالزر: ${targetButton.label}`,
+                details: { buttonLabel: clicked.label, delayMs: clicked.delayMs, availableCount: allButtons.length },
             };
         },
     },
@@ -490,7 +600,11 @@ module.exports = {
     eventsForTrigger,
     textFromMessage,
     isGreenButton,
+    isUiButton,
+    isJoinLabeled,
+    pickJoinButton,
     collectButtons,
+    HUMAN_SIM,
     REPLKA_DATA,
     mapReplkaType,
     answerFromDictionary,

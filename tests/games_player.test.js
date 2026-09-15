@@ -20,6 +20,8 @@
  * 10) صفحات اللوحة V2 سليمة (بلا رميات، حدود الديسكورد محترمة).
  * 11) انحدار v7.14.1: أمر /الألعاب يرسل اللوحة فعلاً بعد التأجيل — لا تعليق
  *     تحميل أبداً (حتى عند فشل القاعدة: لوحة خطأ بدل الصمت).
+ * 12) بلاغات المالك v7.15: الخسارة المزيفة (لوبي/شرطية/طرد غيرنا)، زر حقيبتي،
+ *     معالج دور الروليت المفقود، والقفل المُقيّد بالوكيل صاحب النتيجة.
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -461,13 +463,180 @@ async function run() {
         assert.strictEqual(handled3, false, 'أوامر غيرنا تمر للوحة المدير كما هي');
     }
 
+    // ── 17) بلاغ المالك: «جاري البحث عن لاعبين خارجيين...» تُسجّل خسارة مزيفة ──
+    // (كان الكود يطابق «خسرت» substring في شرط الجائزة «إذا خسرت ستفقد» + منشن
+    //  قائمة اللاعبين → خسارة وهمية. الآن: لوبي مرفوض + شرطية مرفوضة + حدود الأسطر)
+    {
+        const { outcomeFromMessage } = player.__internals;
+        const client = makeClient();
+        const me = `<@${AGENT_USER_ID}>`;
+
+        // الرسالة الحرفية من البلاغ — كان يُسجّل خسارة
+        const lobbyMsg = makeMessage({
+            content: '🛰️ جاري البحث عن لاعبين خارجيين للانضمام إلى اللعبة...',
+            embeds: [{
+                title: 'روليت',
+                description: `اللاعبون الحاليون:\n${me} <@555000111222333001>`,
+                fields: [{ name: '⚠️ المخاطرة', value: 'إذا خسرت ستفقد 100 نقطة من رصيدك' }],
+            }],
+        });
+        assert.strictEqual(outcomeFromMessage(lobbyMsg, client), null, 'رسالة البحث عن لاعبين ليست خسارة أبداً');
+        const lossesBefore = store.statsFor(AGENT_A, GUILD).losses;
+        await player.handleMessage({ client, message: lobbyMsg, agentId: AGENT_A, runtimeSettings });
+        assert.strictEqual(store.statsFor(AGENT_A, GUILD).losses, lossesBefore, 'صفر خسائر مزيفة عبر خط الأنابيب كاملاً');
+
+        // شرطية بلا علامة لوبي: «إذا خسرت» في حقل مستقل — ليست نتيجة
+        const conditionalMsg = makeMessage({
+            embeds: [{
+                title: 'روليت',
+                description: `اللاعبون: ${me}`,
+                fields: [{ name: 'الجائزة', value: 'إذا خسرت ستفقد نقاطك' }],
+            }],
+        });
+        assert.strictEqual(outcomeFromMessage(conditionalMsg, client), null, '«إذا خسرت ستفقد» شرط وليس نتيجة');
+
+        // طرد لاعب آخر وإن ذُكرنا في السطر نفسه — المطرود هو من يلي العبارة مباشرة
+        const otherKick = makeMessage({
+            content: `تم طرد <@555000111222333001> — المتبقون: ${me}`,
+        });
+        assert.strictEqual(outcomeFromMessage(otherKick, client), null, 'طرد غيرنا ليس خسارتنا حتى في سطرنا');
+
+        // فوز لاعب آخر لا يُسجل لنا
+        const otherWin = makeMessage({ content: '🏆 فاز <@555000111222333001> باللعبة!' });
+        assert.strictEqual(outcomeFromMessage(otherWin, client), null, 'فوز غيرنا ليس فوزنا');
+    }
+
+    // ── 18) النتائج الصحيحة تُسجَّل بدقة ──
+    {
+        const { outcomeFromMessage } = player.__internals;
+        const client = makeClient();
+        const me = `<@${AGENT_USER_ID}>`;
+
+        const kick = outcomeFromMessage(makeMessage({ content: `💀 تم طرد ${me} من اللعبة!` }), client);
+        assert.ok(kick && kick.result === 'loss' && kick.kind === 'kick', 'طردنا = خسارة من نوع طرد');
+
+        const win1 = outcomeFromMessage(makeMessage({ content: `🏆 فاز ${me} باللعبة!` }), client);
+        assert.ok(win1 && win1.result === 'win', 'فوزنا (منشن قبل العبارة)');
+
+        const win2 = outcomeFromMessage(makeMessage({ content: `# 👑 - ${me} فاز باللعبة!` }), client);
+        assert.ok(win2 && win2.result === 'win', 'فوزنا (نمط الاختبار القديم يعمل بعد التحديث)');
+
+        const win3 = outcomeFromMessage(makeMessage({ content: `الفائز: ${me} 🎉` }), client);
+        assert.ok(win3 && win3.result === 'win', '«الفائز: نحن» يُسجل فوزاً');
+
+        // مخاطبة بلا منشن نصي: «تم طردك» + message.mentions.has
+        const secondPerson = makeMessage({ content: 'تم طردك من اللعبة!' });
+        secondPerson.mentions = { has: (id) => id === AGENT_USER_ID };
+        const loss2 = outcomeFromMessage(secondPerson, client);
+        assert.ok(loss2 && loss2.result === 'loss' && loss2.kind === 'kick', '«تم طردك» تخاطبنا = طرد');
+    }
+
+    // ── 19) بلاغ المالك: بوت البادئة «.» — كان يضغط «حقيبتي» بدل زر الدخول ──
+    {
+        setSettings(AGENT_A, GUILD, { enabled: true, engines: { roulette: { enabled: true } } });
+        // زر الانضمام الصريح يتقدم دائماً وإن كانت حقيبتي خضراء وأول الترتيب
+        for (let i = 0; i < 4; i++) {
+            const msg = makeMessage({
+                content: '.روليت — لوحة اللعبة',
+                components: [{ components: [btn('حقيبتي', 'bag_join', { style: 3 }), btn('انضمام', 'join_btn', { style: 3 })] }],
+            });
+            await player.handleMessage({ client: makeClient(), message: msg, agentId: AGENT_A, runtimeSettings });
+            assert.deepStrictEqual(msg.__clicks, ['join_btn'], 'زر الانضمام الصريح يتقدم على حقيبتي');
+        }
+        // بلا اسم انضمام: حقيبتي مستبعدة حتى لو خضراء — الضغطة من المقاعد فقط
+        for (let i = 0; i < 6; i++) {
+            const msg = makeMessage({
+                content: '.روليت — لوحة اللعبة',
+                components: [{ components: [btn('حقيبتي', 'bag2', { style: 3 }), btn('5', 'seat5'), btn('9', 'seat9')] }],
+            });
+            await player.handleMessage({ client: makeClient(), message: msg, agentId: AGENT_A, runtimeSettings });
+            assert.ok(['seat5', 'seat9'].includes(msg.__clicks[0]), `حقيبتي لا تنضغط أبداً — كانت ${msg.__clicks[0]}`);
+        }
+        // وحدة الاختيار مباشرة
+        const pick = eventsMod.pickJoinButton;
+        assert.strictEqual(pick([btn('انضمام', 'j'), btn('دخول', 'd')]).customId, 'j', 'أول زر انضمام يفوز');
+        assert.strictEqual(pick([btn('متجر', 's'), btn('اخرج', 'x')]), null, 'كلها واجهة → لا اختيار');
+        assert.strictEqual(pick([]), null, 'بلا أزرار → لا اختيار');
+    }
+
+    // ── 20) بلاغ المالك: «عندما يأتي دوره لا يضغط اي شيء» — معالج الدور المفقود ──
+    // (roulettePlay كان موجوداً في Auto وحناقطعن في v7.14 — الآن منقول + بوابة جلسة)
+    {
+        const sessionsMod = require('../games/sessions');
+        sessionsMod.__reset(); // انضمامات المجموعات السابقة فتحت جلسات — نبدأ نظيفين
+        const sim = eventsMod.HUMAN_SIM;
+        const savedSim = { ...sim };
+        sim.skip = 0; sim.minDelay = 5; sim.maxDelay = 10; sim.extraProb = 0;
+
+        // بلا جلسة انضمام حية → لا ضغط خارج أي لعبة (أكثر أماناً من Auto نفسه)
+        const turnNoSession = makeMessage({
+            content: `<@${AGENT_USER_ID}> دورك! اختر لاعباً لطرده`,
+            components: [{ components: [btn('خالد', 'p_khaled'), btn('سامي', 'p_sami'), btn('انسحب', 'withdraw'), btn('حقيبتي', 'bag3')] }],
+        });
+        await player.handleMessage({ client: makeClient(), message: turnNoSession, agentId: AGENT_A, runtimeSettings });
+        assert.strictEqual(turnNoSession.__clicks.length, 0, 'بلا جلسة: لا ضغط');
+
+        // انضمام فعلي → جلسة حية
+        const joinMsg = makeMessage({
+            content: '🎡 روليت — اختر رقمك للدخول',
+            components: [{ components: [btn('انضمام', 'turn_join')] }],
+        });
+        await player.handleMessage({ client: makeClient(), message: joinMsg, agentId: AGENT_A, runtimeSettings });
+        assert.ok(sessionsMod.getSession(AGENT_A, GUILD), 'الانضمام فتح جلسة حية');
+
+        // الدور عليه → يضغط لاعباً فقط (لا انسحاب ولا حقيبتي)
+        const turnMsg = makeMessage({
+            content: `<@${AGENT_USER_ID}> دورك! اختر لاعباً لطرده`,
+            components: [{ components: [btn('خالد', 'p_khaled'), btn('سامي', 'p_sami'), btn('انسحب', 'withdraw'), btn('حقيبتي', 'bag3')] }],
+        });
+        await player.handleMessage({ client: makeClient(), message: turnMsg, agentId: AGENT_A, runtimeSettings });
+        assert.strictEqual(turnMsg.__clicks.length, 1, 'الدور: ضغطة واحدة');
+        assert.ok(['p_khaled', 'p_sami'].includes(turnMsg.__clicks[0]), `الضغط على لاعب فقط — كانت ${turnMsg.__clicks[0]}`);
+
+        // تخطي الدور (محاكاة بشرية 1%) — صامت: بلا ضغط ولا إحصائية والجلسة باقية
+        sim.skip = 1;
+        const turnSkip = makeMessage({
+            id: 'mskip1',
+            content: `<@${AGENT_USER_ID}> دورك!`,
+            components: [{ components: [btn('خالد', 'p_k2')] }],
+        });
+        await player.handleMessage({ client: makeClient(), message: turnSkip, agentId: AGENT_A, runtimeSettings });
+        assert.strictEqual(turnSkip.__clicks.length, 0, 'التخطي: صفر ضغط');
+        assert.ok(sessionsMod.getSession(AGENT_A, GUILD), 'التخطي لا يغلق الجلسة');
+        Object.assign(sim, savedSim);
+    }
+
+    // ── 21) القفل المُقيّد: خسارة وكيل لا تحرر أقفال غيره (كان clearLocks يحرر الكل) ──
+    {
+        await policy.setOverlapLock(true);
+        setSettings(AGENT_B, GUILD, { enabled: true, engines: { roulette: { enabled: true } } });
+        const lockMsgB = makeMessage({
+            content: '🎡 روليت — دخول',
+            components: [{ components: [btn('انضمام', 'scoped_join_b')] }],
+        });
+        await player.handleMessage({ client: makeClient(), message: lockMsgB, agentId: AGENT_B, runtimeSettings });
+        assert.ok(policy.getLocks().some(l => l.agentId === AGENT_B), 'ب يمسك قفل روليت');
+
+        // أ يسجل خسارة/طرد — قفل ب يجب أن يبقى
+        setSettings(AGENT_A, GUILD, { enabled: true, engines: { roulette: { enabled: true } } });
+        const lossMsgA = makeMessage({ content: `💀 تم طرد <@${AGENT_USER_ID}> من اللعبة` });
+        await player.handleMessage({ client: makeClient(), message: lossMsgA, agentId: AGENT_A, runtimeSettings });
+        assert.ok(policy.getLocks().some(l => l.agentId === AGENT_B), 'خسارة أ لا تحرر قفل ب');
+
+        // خسارة ب تحرر قفلها وحده
+        const lossMsgB = makeMessage({ content: `💀 تم طرد <@${AGENT_USER_ID}> من اللعبة` });
+        await player.handleMessage({ client: makeClient(), message: lossMsgB, agentId: AGENT_B, runtimeSettings });
+        assert.strictEqual(policy.getLocks().length, 0, 'خسارة ب تحرر قفلها فقط');
+        await policy.setOverlapLock(false);
+    }
+
     // ── تنظيف ──
     player.agentStop(AGENT_A);
     player.agentStop(AGENT_B);
     overrides.clear();
     policy.clearLocks();
 
-    console.log('✅ games_player.test.js — كل الفحوصات مرت (16 مجموعة)');
+    console.log('✅ games_player.test.js — كل الفحوصات مرت (21 مجموعة)');
 }
 
 run().catch((error) => {

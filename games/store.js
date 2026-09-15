@@ -25,6 +25,7 @@ function defaultSettings() {
         zar_command : '-روليت', // أمر بدء الدورة (Auto يرسل '-روليت' حرفياً)
         ai_answers  : true,    // ريبلكا: جرّب الذكاء أولاً ثم القاموس (القاموس هو الاحتياط دائماً)
         suppress_ai : false,   // إطفاء ردود الذكاء على رسائل الألعاب المعالجة — افتراضياً بلا أي تغيير على السلوك الحالي
+        social      : { enabled: false }, // 🫧 التفاعل الاجتماعي — معطل افتراضياً (v7.15 صفر كسر)
         engines     : getEngines().reduce((acc, engine) => {
             acc[engine.id] = { enabled: false, ...engine.defaultSettings };
             return acc;
@@ -47,6 +48,9 @@ function normalize(doc) {
     if (doc.zar_command) merged.zar_command = String(doc.zar_command).trim() || base.zar_command;
     if (typeof doc.ai_answers === 'boolean') merged.ai_answers = doc.ai_answers;
     if (typeof doc.suppress_ai === 'boolean') merged.suppress_ai = doc.suppress_ai;
+    if (doc.social && typeof doc.social === 'object') {
+        if (typeof doc.social.enabled === 'boolean') merged.social.enabled = doc.social.enabled;
+    }
     const docEngines = doc.engines && typeof doc.engines === 'object' ? doc.engines : {};
     for (const engine of getEngines()) {
         const saved = docEngines[engine.id] || {};
@@ -90,6 +94,9 @@ async function updateGameSettings(agentId, guildId, patch = {}) {
     if (patch.zar_command !== undefined) $set.zar_command = String(patch.zar_command || '').trim() || '-روليت';
     if (typeof patch.ai_answers === 'boolean') $set.ai_answers = patch.ai_answers;
     if (typeof patch.suppress_ai === 'boolean') $set.suppress_ai = patch.suppress_ai;
+    if (patch.social && typeof patch.social === 'object' && typeof patch.social.enabled === 'boolean') {
+        $set['social.enabled'] = patch.social.enabled;
+    }
     if (patch.engines && typeof patch.engines === 'object') {
         for (const [engineId, value] of Object.entries(patch.engines)) {
             if (!getEngine(engineId)) continue;
