@@ -66,7 +66,13 @@ function newSession(data = {}) {
             phase : 'lobby',     // lobby | roles | night_kill | night_save | day | day_discuss | day_vote | ended
             players: new Map(),  // id → { name, talks, alive }
             lastVictim: null,    // آخر قتيل { id, name, role }
+            // 🗳️ v7.19 — بلاغ المالك: «لا يعرف في جولات التصويت من صوت على من»
+            voteCounts  : new Map(), // اسم اللاعب → عدد الأصوات عليه (من تعديلات العدّاد)
+            voteMessageId: null,     // معرف رسالة التصويت الحالية — تتبع تعديلاتها
+            allies      : new Set(), // 🩸 زملاء الوكيل في المافيا (من بطاقة الدور)
+            meDead      : false,     // ⚰️ قُتلنا — نلعب بصمت (لا تصويت ولا حركات)
         },
+        voteAnnounces: 0,         // 🗣️ كم مرة أعلن تصويته بالشات (سقف 3 لكل جلسة)
     };
 }
 
@@ -339,6 +345,19 @@ function contextSummary(session) {
             if (friends.length) lines.push(`- أصدقاؤك منهم: ${friends.join('، ')}`);
             if (session.mafia.lastVictim) lines.push(`- آخر قتيل: ${session.mafia.lastVictim.name || session.mafia.lastVictim.id}`);
         }
+        // 🗳️ v7.19: لوحة الأصوات — «من صوت على من» كما طلبت المالك
+        if (session.mafia.voteCounts.size) {
+            const tally = [...session.mafia.voteCounts.entries()]
+                .map(([name, count]) => `${name} (${count})`).join('، ');
+            lines.push(`- لوحة الأصوات في جولة التصويت الحالية: ${tally}`);
+        }
+        // 🩸 v7.19: زملاؤك في المافيا — «ومن معه»
+        if (session.mafia.allies.size) {
+            const allyNames = [...session.mafia.allies]
+                .map(id => session.mafia.players.get(id)?.name || id);
+            lines.push(`- زملاؤك في المافيا (لا تكشفهم ولا تصوت عليهم): ${allyNames.join('، ')}`);
+        }
+        if (session.mafia.meDead) lines.push('- ⚰️ قُتلت في هذه الجولة — أنت متفرج الآن، لا تصوت ولا تختر');
     }
     if (session.chatRing.length) {
         lines.push('- آخر كلام القناة:');
@@ -380,6 +399,18 @@ function buildLiveGameContext({ agentId, guildId, now = Date.now } = {}) {
         lines.push(`- دورك في المافيا: ${session.mafia.role || 'غير معروف بعد'} — المرحلة: ${session.mafia.phase}`);
         if (session.mafia.role === 'mafia') lines.push('- أنت مافيا: حاول ألا تكشف نفسك، وتعاون مع المافيا الآخرين إن وجدوا');
         if (session.mafia.lastVictim) lines.push(`- آخر قتيل: ${session.mafia.lastVictim.name || session.mafia.lastVictim.id}`);
+        // 🗳️ v7.19: لوحة الأصوات + الزملاء في سياق المحادثة الرئيسية أيضاً
+        if (session.mafia.voteCounts.size) {
+            const tally = [...session.mafia.voteCounts.entries()]
+                .map(([name, count]) => `${name} (${count})`).join('، ');
+            lines.push(`- لوحة الأصوات في جولة التصويت الحالية: ${tally}`);
+        }
+        if (session.mafia.allies.size) {
+            const allyNames = [...session.mafia.allies]
+                .map(id => session.mafia.players.get(id)?.name || id);
+            lines.push(`- زملاؤك في المافيا: ${allyNames.join('، ')}`);
+        }
+        if (session.mafia.meDead) lines.push('- ⚰️ قُتلت في هذه الجولة — أنت متفرج الآن');
     }
     // 📥 الصندوق الحي — الرسائل الحقيقية (بلاغ المالك v7.18: «اي رساله من
     // اللعبة يتم إرسالها للوكيل» — لا ملخصات ناقصة)
@@ -395,6 +426,88 @@ function buildLiveGameContext({ agentId, guildId, now = Date.now } = {}) {
     }
     lines.push('- إن سألك أحد «من في اللعبة؟» أو «بمن تشك؟» أو عن أي شيء في الجولة فأجب كلاعب يعرف ما يجري حوله تماماً من المعلومات أعلاه — لا تخمّن ولا تقول لا أعرف.');
     return lines.join('\n');
+}
+
+// ══════════════════════════════════════════════════════════
+//  🗳️ جولة التصويت (v7.19 — بلاغ المالك: «لا يعرف في جولات التصويت
+//  من صوت على من» + «وخيار له لكي يصوت على احد»)
+// ══════════════════════════════════════════════════════════
+
+/** معرف رسالة التصويت الحالية — تعديلاتها (العدّاد) تُترجم لأصوات */
+function mafiaSetVoteMessage(agentId, guildId, messageId) {
+    const session = getSession(agentId, guildId);
+    if (session && messageId) session.mafia.voteMessageId = String(messageId);
+    return session;
+}
+
+/** لوحة الأصوات الحالية — تُبث لعقل الوكيل في كل قرار وكلام وسؤال */
+function mafiaSetVote(agentId, guildId, name, count = null) {
+    const session = getSession(agentId, guildId);
+    const clean = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!session || !clean) return session;
+    const current = session.mafia.voteCounts.get(clean) || 0;
+    const next = count === null ? current + 1 : Math.max(0, Number(count) || 0);
+    session.mafia.voteCounts.set(clean, next);
+    session.lastSeenAt = Date.now();
+    return session;
+}
+
+/** خزّن زملاء الوكيل في المافيا من بطاقة الدور («زملاؤك: <@X> <@Y>») */
+function mafiaAddAllies(agentId, guildId, entries = []) {
+    const session = getSession(agentId, guildId);
+    if (!session) return session;
+    let added = 0;
+    for (const entry of entries) {
+        const id = String(entry && entry.id ? entry.id : entry || '');
+        if (!id || !/^\d{5,25}$/.test(id) || id === String(session.me.id || '')) continue;
+        if (!session.mafia.allies.has(id)) { session.mafia.allies.add(id); added += 1; }
+        if (entry && entry.name) {
+            const known = session.mafia.players.get(id);
+            if (!known) session.mafia.players.set(id, { name: String(entry.name).slice(0, 60), talks: 0, alive: true });
+        }
+    }
+    if (added) session.lastSeenAt = Date.now();
+    return session;
+}
+
+/** ⚰️ قُتلنا — خارج اللعبة: لا تصويت ولا حركات سرية بعد اليوم */
+function mafiaMarkMeDead(agentId, guildId) {
+    const session = getSession(agentId, guildId);
+    if (session) {
+        session.mafia.meDead = true;
+        session.mafia.phase = 'ended';
+        session.lastSeenAt = Date.now();
+    }
+    return session;
+}
+
+/**
+ * 🧩 سطر الخيارات — أسماء الأزرار/القوائم داخل رسالة اللعبة (v7.19):
+ * الصندوق الحي كان ينسخ نص الرسالة فقط وأزرار الخيارات (أسماء اللاعبين
+ * التي يصوت عليها أو يقتلها) لا تصل لعقله أبداً — بلاغ المالك الحرفي:
+ * «وخيار له لكي يصوت على احد». دالة نقية تُستخدم من player.js وmafia.js.
+ */
+function optionsLineFromComponents(components) {
+    try {
+        if (!Array.isArray(components) || components.length === 0) return '';
+        const labels = [];
+        const walk = (node, depth) => {
+            if (!node || depth > 4 || labels.length > 40) return;
+            if (Array.isArray(node)) { for (const child of node) walk(child, depth + 1); return; }
+            if (node.type === 3 && Array.isArray(node.options)) {
+                for (const option of node.options) {
+                    if (option && option.label) labels.push(String(option.label));
+                }
+                return;
+            }
+            if (node.label) { labels.push(String(node.label)); return; }
+            if (Array.isArray(node.components)) walk(node.components, depth + 1);
+        };
+        walk(components, 0);
+        const unique = [...new Set(labels.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean))];
+        if (!unique.length) return '';
+        return `الخيارات: ${unique.slice(0, 24).map(l => `[${l}]`).join(' ')}`;
+    } catch (_) { return ''; }
 }
 
 /** للاختبار */
@@ -431,5 +544,11 @@ module.exports = {
     setMe,
     INBOX_MAX,
     INBOX_TEXT_MAX,
+    // 🗳️ جولة التصويت + الزملاء + الموت (v7.19)
+    mafiaSetVoteMessage,
+    mafiaSetVote,
+    mafiaAddAllies,
+    mafiaMarkMeDead,
+    optionsLineFromComponents,
     __reset,
 };

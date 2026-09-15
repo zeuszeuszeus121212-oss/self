@@ -563,6 +563,62 @@ const MAFIA_PHASE_TEXT = [
 // رسائل التصويت — استبعاد رسالة النقاش التي تحمل «للتحقق بين»
 const VOTE_TEXT = /اختيار\s*شخص\s*لطرد|للتصويت\s*على\s*طرد|تصويت\s*على\s*طرد|اختر\s*شخصا\s*لطرد|طرد\s*من\s*اللعبة/;
 
+// 🗳️ v7.19 — بلاغ المالك: «لا يستطيع اللعب مثلا تصويت على طرد في جولة التصويت»:
+// الكشف كان مقفولاً على خمس صيغ حرفية — أي صياغة غير متوقعة من بوت اللعبة
+// = لا تصويت أبداً. الآن: الكلمات المفتاحية العامة للطرد/التصويت تكفي
+// (وتتطلب مرشحين حقيقيين على الأزرار قبل التحرّك)
+const VOTE_HINT = /(طرد|تصويت|أصوت|اصوت|صوتوا|صوّتوا|أصوات|اصوات|صوتك|اقتصاص|محاكمة|إعدام|إعدام|حكم على)/;
+
+function looksLikeVote(text) {
+    const n = sessions.normalizeName(text);
+    if (!n) return false;
+    if (n.includes(sessions.normalizeName('للتحقق بين اللاعبين'))) return false; // النقاش ليس تصويتاً
+    if (VOTE_TEXT.test(n)) return true;
+    return VOTE_HINT.test(n);
+}
+
+/**
+ * 🗳️ v7.19 — قراءة عدّاد التصويت من أسماء الأزرار بعد التعديل:
+ * «خالد (2)» / «خالد - 2» / «خالد: 2» / «خالد ٢» — الأرقام العربية مدعومة.
+ * هذا سبب «لا يعرف من صوت على من» — العدّاد كان يضيع نصاً خاماً.
+ */
+const ARABIC_DIGITS = { '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9' };
+function toWesternDigits(text) {
+    return String(text || '').replace(/[٠-٩]/g, d => ARABIC_DIGITS[d] || d);
+}
+function parseVoteLabel(label) {
+    const clean = toWesternDigits(String(label || '')).replace(/[*_`~|]/g, '').replace(/\s+/g, ' ').trim();
+    if (!clean) return null;
+    const m = clean.match(/^(.+?)\s*[\(\[\{\-—–:]\s*(\d{1,3})\s*[\)\]\}]?$/) || clean.match(/^(.+?)\s+(\d{1,3})$/);
+    if (!m) return { name: clean, count: null };
+    const name = m[1].trim();
+    if (!name || name.length < 2) return null;
+    return { name, count: Number(m[2]) || 0 };
+}
+
+/** سجّل أصوات رسالة التصويت الحالية في ذاكرة الجلسة + سجل الوعي */
+function recordVoteTally(agentId, guildId, message) {
+    const allButtons = collectButtons(message);
+    let updated = 0;
+    const seen = new Set();
+    for (const button of allButtons) {
+        const parsed = parseVoteLabel(button.label || '');
+        if (!parsed || !parsed.name || seen.has(parsed.name)) continue;
+        seen.add(parsed.name);
+        sessions.mafiaSetVote(agentId, guildId, parsed.name, parsed.count === null ? undefined : parsed.count);
+        updated += 1;
+    }
+    if (updated) {
+        const session = sessions.getSession(agentId, guildId);
+        if (session?.mafia?.voteCounts?.size) {
+            const tally = [...session.mafia.voteCounts.entries()]
+                .map(([name, count]) => `${name} (${count})`).join('، ');
+            sessions.pushEvent(agentId, guildId, `لوحة الأصوات الآن: ${tally}`);
+        }
+    }
+    return updated;
+}
+
 // منع تصويت مزدوج لنفس رسالة التصويت (تتعدّل العدّاد فيرسل messageUpdate)
 const votedMessages = new Set();
 const MAX_VOTED = 500;
@@ -672,6 +728,9 @@ const MAFIA_EVENTS = [
             if (myId && (text.includes(`<@${myId}>`) || text.includes(`<@!${myId}>`))) return { handled: false };
             // نصوص المراحل ليست لوبي
             if (MAFIA_PHASE_TEXT.some(marker => text.includes(marker))) return { handled: false };
+            // 🗳️ v7.19: رسالة التصويت قد تحتوي «مافيا» («صوتوا على من تظنونه مافيا»)
+            // — كانت تُفهم لوبياً ويضغط زر تصويت عشوائياً!
+            if (looksLikeVote(text)) return { handled: false };
 
             const allButtons = collectButtons(message);
             if (allButtons.length === 0) return { handled: false };
@@ -798,6 +857,22 @@ const MAFIA_EVENTS = [
             // 🧠 الوعي (v7.17)
             sessions.pushEvent(ctx.agentId, message.guild.id, 'الليل: المافيا ستختار ضحية');
 
+            // 🗳️ v7.19: البطاقة الظاهرة بالقناة مع أزرار اختيار؟ نختار فعلاً —
+            // كان معالج الطور يستهلك الرسالة بـ break فلا أحد يختار أبداً
+            // («طرد اذا كان مافيا» — بلاغ المالك: لا يختار هو اصلا)
+            let choiceResult = null;
+            try {
+                choiceResult = await mafia.handleSecretMessage({
+                    client, message, agentId: ctx.agentId,
+                    runtimeSettings: ctx.runtimeSettings,
+                    settings: ctx.settings,
+                    agentName: ctx.agentName,
+                    session, guildId: message.guild.id,
+                    allowVisible: true,
+                });
+            } catch (_) { choiceResult = null; }
+            if (choiceResult && choiceResult.handled) return choiceResult;
+
             // المافيا لا ترجى أثناء دورها — هي من يقتل
             if (session.mafia.role !== 'mafia') {
                 social.maybeSpeak({
@@ -832,6 +907,20 @@ const MAFIA_EVENTS = [
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'night_save');
             // 🧠 الوعي (v7.17)
             sessions.pushEvent(ctx.agentId, message.guild.id, 'الليل: الطبيب سيختار من يحميه');
+
+            // 🗳️ v7.19: بطاقة الطبيب الظاهرة بالقناة مع أزرار؟ نختار فعلاً (نفس جذر المافيا)
+            let saveChoiceResult = null;
+            try {
+                saveChoiceResult = await mafia.handleSecretMessage({
+                    client, message, agentId: ctx.agentId,
+                    runtimeSettings: ctx.runtimeSettings,
+                    settings: ctx.settings,
+                    agentName: ctx.agentName,
+                    session, guildId: message.guild.id,
+                    allowVisible: true,
+                });
+            } catch (_) { saveChoiceResult = null; }
+            if (saveChoiceResult && saveChoiceResult.handled) return saveChoiceResult;
 
             // الطبيب هو من يختار — لا يطلب حماية لنفسه
             if (session.mafia.role !== 'doctor') {
@@ -868,6 +957,11 @@ const MAFIA_EVENTS = [
             const match = text.match(/<@!?(\d+)>/);
             const victimId = match ? match[1] : null;
             if (victimId) sessions.mafiaMarkDead(ctx.agentId, message.guild.id, victimId);
+            // ⚰️ v7.19: القتيل هو الوكيل نفسه؟ خارج اللعبة — لا تصويت ولا حركات بعد اليوم
+            if (victimId && String(session.me?.id || '') === String(victimId)) {
+                sessions.mafiaMarkMeDead(ctx.agentId, message.guild.id);
+                sessions.pushEvent(ctx.agentId, message.guild.id, 'قتلتك المافيا — أنت متفرج الآن');
+            }
             // 🧠 الوعي (v7.17) — باسم القتيل إن عرفناه
             const victimPlayer = victimId ? session.mafia.players.get(victimId) : null;
             sessions.pushEvent(ctx.agentId, message.guild.id,
@@ -918,6 +1012,7 @@ const MAFIA_EVENTS = [
 
     // ── التصويت: «لديكم X ثانية لاختيار شخص لطرده» + أزرار أسماء اللاعبين ──
     // «يجب على الوكيل الضغط على زر اللاعب الذي يشك انه مافيا» — وضع ذكي/تلقائي
+    // 🗳️ v7.19: الكشف موسّع (looksLikeVote) — أي صياغة تصويت من بوت اللعبة تعمل
     {
         engineId: 'mafia',
         name: 'mafiaVote',
@@ -928,16 +1023,26 @@ const MAFIA_EVENTS = [
             if (!message.author || !message.author.bot) return { handled: false };
             if (!message.components || message.components.length === 0) return { handled: false };
             const text = textFromMessage(message);
-            if (!VOTE_TEXT.test(text) || text.includes('للتحقق بين اللاعبين')) return { handled: false };
+            if (!looksLikeVote(text)) return { handled: false };
             const session = mafiaSession(ctx, message);
             if (!session) return { handled: false };
+            // ⚰️ v7.19: قُتلنا؟ متفرجون — لا تصويت (لكن الأصوات تُراقب لاحقاً)
+            if (session.mafia.meDead) {
+                sessions.mafiaSetVoteMessage(ctx.agentId, message.guild.id, message.id);
+                recordVoteTally(ctx.agentId, message.guild.id, message);
+                return { handled: true, silent: true, result: 'vote_watch', type: 'game_play', gameName: 'مافيا', message: 'جولة تصويت — أنت متفرج (ميت)', details: {} };
+            }
             rememberVoted(message.id);
+            sessions.mafiaSetVoteMessage(ctx.agentId, message.guild.id, message.id);
 
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'day_vote');
+            recordVoteTally(ctx.agentId, message.guild.id, message);
 
             const allButtons = collectButtons(message);
             const candidates = mafia.candidateButtons(allButtons, { agentName: ctx.agentName });
-            if (candidates.length === 0) return { handled: false };
+            // الكشف الموسّع يتطلب مرشحين حقيقيين (≥2) حتى لا يتحرك على أي رسالة فيها طرد
+            const exactMatch = VOTE_TEXT.test(sessions.normalizeName(text));
+            if (candidates.length === 0 || (!exactMatch && candidates.length < 2)) return { handled: false };
             registerNamePlayers(session, candidates);
 
             // القرار: دائماً بعقل الوكيل (v7.18 — «لا يختار هو اصلا من يقتل او
@@ -961,6 +1066,18 @@ const MAFIA_EVENTS = [
             // 🧠 الوعي — صوّتنا على أحد
             sessions.pushEvent(ctx.agentId, message.guild.id, `صوّت على طرد «${target.label || '؟'}» (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي احتياطي'})`);
 
+            // 🗣️ v7.19: الإعلان في الوضع الاجتماعي — المالك يرى أنه يلعب فعلاً
+            // («انا عامله اجتماعي لكنه لا يستطيع اللعب») — التلقائي يبقى صامتاً
+            try {
+                social.maybeVoteAnnounce({
+                    client, channel: message.channel,
+                    agentId: ctx.agentId, guildId: message.guild.id,
+                    settings: ctx.settings, session,
+                    target: target.label || '؟',
+                    runtimeSettings: ctx.runtimeSettings, agentName: ctx.agentName,
+                });
+            } catch (_) {}
+
             return {
                 handled: true,
                 type: 'game_play',
@@ -968,6 +1085,33 @@ const MAFIA_EVENTS = [
                 gameName: 'مافيا',
                 message: `🗳️ صوّت هو نفسه على طرد: ${target.label || '؟'}`,
                 details: { target: target.label || null, source, mode: ctx.engineSettings?.mode || 'auto' },
+            };
+        },
+    },
+
+    // ── 🗳️ v7.19: عدّاد التصويت يتعدل (messageUpdate) — من صوت على من؟ ──
+    // كان العدّاد يضيع نصاً خاماً بلا أزرار — الآن يُقرأ كأصوات حقيقية:
+    // «أحمد (2)، خالد (1)» تصل عقله في كل قرار وكلام وسؤال
+    {
+        engineId: 'mafia',
+        name: 'mafiaVoteTally',
+        trigger: 'messageUpdate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+            if (!session.mafia.voteMessageId || String(session.mafia.voteMessageId) !== String(message.id)) return { handled: false };
+            const updated = recordVoteTally(ctx.agentId, message.guild.id, message);
+            return {
+                handled: true,
+                silent: true,
+                result: 'vote_tally',
+                type: 'game_play',
+                gameName: 'مافيا',
+                message: `لوحة الأصوات اتحدثت (${updated} مرشحاً)`,
+                details: { updated },
             };
         },
     },
@@ -984,7 +1128,7 @@ const MAFIA_EVENTS = [
             if (votedMessages.has(message.id)) return { handled: false };
             if (!message.components || message.components.length === 0) return { handled: false };
             const text = textFromMessage(message);
-            if (!VOTE_TEXT.test(text) || text.includes('للتحقق بين اللاعبين')) return { handled: false };
+            if (!looksLikeVote(text)) return { handled: false };
             const session = mafiaSession(ctx, message);
             if (!session) return { handled: false };
 
@@ -1104,6 +1248,10 @@ module.exports = {
     REPLKA_DATA,
     mapReplkaType,
     answerFromDictionary,
+    // 🗳️ التصويت (v7.19) — لأغراض الاختبار
+    looksLikeVote,
+    parseVoteLabel,
+    recordVoteTally,
     // 🕵️ المافيا (v7.16) — لأغراض الاختبار
     __mafiaHooks: { votedMessages, MAFIA_PHASE_TEXT, VOTE_TEXT, rememberVoted, MAFIA_EVENTS, registerNamePlayers, collectMentions },
 };

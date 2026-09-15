@@ -83,6 +83,9 @@ const SAVE_MARKERS = [
     'لحمايته', 'لحمايتها', 'لحماية', 'احميه', 'أحميه', 'يحمي', 'تحمي',
     'اختار شخصا لحمايته', 'اختر شخصا لحمايته', 'اختيار شخص لحمايته',
     'حماية شخص', 'انتظر الطبيب', 'دور الطبيب', 'علاج',
+    // 🐞 v7.19: «اختر شخصاً لحمايته» — التاء تنكسر مطابقة «حمايه» بعد التسوية
+    // فكانت التفرقة تُرجع قتل — العقلة تستشير بذهنية مافيا وهو طبيب
+    'لحمايته', 'حمايته', 'حمايتها', 'يحميه', 'يحميها',
 ];
 
 // صيغ الأدوار — «دورك: مافيا» أو ذكر الدور في الرسالة السرية
@@ -98,6 +101,8 @@ const TARGET_EXCLUDES = [
     'ميت', 'خارج', 'طرد', 'موت', 'قالب', 'مشاهدة', 'الغاء', 'إلغاء', 'المشاهدون',
     // واجهة البوتات — بلاغ المالك: لا «حقيبتي» في أي قرار
     'حقيبة', 'حقيبتي', 'محفظة', 'محفظتي', 'متجر', 'رصيد', 'نقاط', 'معلومات', 'قوانين', 'مساعدة',
+    // 🐞 v7.19: زر «تحديث/refresh» يُضغط بلا معنى — كان مرشحاً كضحية
+    'تحديث', 'refresh',
 ];
 
 function normalize(text) {
@@ -122,7 +127,9 @@ function isSecretMessage(message) {
     return false;
 }
 
-/** نوع الاختيار من نص الرسالة — 'kill' | 'save' | null */
+/** نوع الاختيار من نص الرسالة — 'kill' | 'save' | null
+ *  🐞 v7.19: التفرقة كانت تُرجع قتل لبطاقة الطبيب «اختر شخصاً لحمايته»
+ *  (كلا النوعين يطابق — والبحث عن «حماية» لا يجد «حمايته») */
 function detectChoiceKind(text) {
     if (!text) return null;
     const n = normalize(text);
@@ -131,7 +138,7 @@ function detectChoiceKind(text) {
     // الحماية تتفوق عند الالتباس («انتظر الطبيب» قبل «اختار»)
     if (save && !kill) return 'save';
     if (kill && !save) return 'kill';
-    if (kill && save) return normalize(text).includes(normalize('حماية')) ? 'save' : 'kill';
+    if (kill && save) return /حمي|حماي|علاج/.test(n) ? 'save' : 'kill';
     return null;
 }
 
@@ -197,11 +204,24 @@ const ROLE_AR = { mafia: 'مافيا 🔪', doctor: 'طبيب 💊', detective: 
 
 function buildDecisionPrompt({ kind, agentName, role, session, candidates, rawText = null }) {
     const roleText = ROLE_AR[role] || 'غير معروف بعد';
-    const objective = kind === 'kill'
-        ? 'أنت المافيا: اختر الضحية الأخطر — المخطِر الذي يكشفكم، ولا تختر صديقاً لك'
-        : kind === 'save'
-            ? 'أنت الطبيب: اختر من يستحق الحماية — صديقك أو الأكثر فائدة للمواطنين أو نفسك إن أمكن'
-            : 'أنت تصوت على طرد شخص تشك أنه مافيا — الصامت طوال الجولة مشتبه به، ولا تصوت على نفسك';
+    // 🧠 v7.19 — هدف التصويت حسب الدور (بلاغ المالك: «طرد اذا كان مافيا»):
+    // المافيا كان يُسأل «صوّت على من تشك أنه مافيا» — يعني يصوّت على زملائه!
+    let objective;
+    if (kind === 'kill') {
+        objective = 'أنت المافيا: اختر الضحية الأخطر — المخطِر الذي يكشفكم، ولا تختر صديقاً لك';
+    } else if (kind === 'save') {
+        objective = 'أنت الطبيب: اختر من يستحق الحماية — صديقك أو الأكثر فائدة للمواطنين أو نفسك إن أمكن';
+    } else if (role === 'mafia') {
+        objective =
+            'أنت مافيا وتصوّت الآن على طرد شخص — هدفك إسقاط مواطن بريء (وليس زميلاً لك إطلاقاً)، ' +
+            'والتزم رأي الأغلبية حتى لا تنكشف، وتبرّر تصويتك بشيء عام (صمته أو كلامه) دون ذكر أنك مافيا';
+    } else if (role === 'doctor') {
+        objective = 'أنت الطبيب وتصوّت على طرد شخص تشك أنه مافيا — ركّازك من ظنّته مافيا من مراحل الليل';
+    } else if (role === 'detective') {
+        objective = 'أنت المحقق وتصوّت على طرد شخص — إن كنت تحققت من أحد فادفع نحو المافيا الحقيقي';
+    } else {
+        objective = 'أنت تصوت على طرد شخص تشك أنه مافيا — الصامت طوال الجولة مشتبه به، ولا تصوت على نفسك';
+    }
     const playerLines = candidates.map(button => {
         const name = String(button.label || '؟');
         const known = [...(session?.mafia?.players || new Map()).values()]
@@ -212,17 +232,39 @@ function buildDecisionPrompt({ kind, agentName, role, session, candidates, rawTe
             const p = session?.mafia?.players?.get(id);
             return p && sessions.normalizeName(p.name) === sessions.normalizeName(name);
         });
+        // 🩸 v7.19: زميل المافيا يظهر للعقل — لا يصوّت عليه ولا يقتله
+        const ally = [...(session?.mafia?.allies || new Set())].some(id => {
+            const p = session?.mafia?.players?.get(id);
+            return p && sessions.normalizeName(p.name) === sessions.normalizeName(name);
+        });
         const bits = [name];
         if (talks !== null) bits.push(`تكلم ${talks} مرة`);
         if (alive) bits.push(alive);
         if (friend) bits.push('صديق لك');
+        if (ally) bits.push('زميلك في المافيا — لا تختاره أبداً');
         return `  • ${bits.join(' — ')}`;
     }).join('\n');
+    // 🗳️ v7.19: لوحة الأصوات الحالية — يرى من ترجّحت كفته قبل أن يقرر
+    let tallyLine = '';
+    if (session?.mafia?.voteCounts?.size) {
+        const tally = [...session.mafia.voteCounts.entries()]
+            .map(([name, count]) => `${name} (${count})`).join('، ');
+        tallyLine = `\nلوحة الأصوات الحالية في هذه الجولة: ${tally}\n`;
+    }
+    // 🩸 v7.19: زملاؤه المافيا
+    let alliesLine = '';
+    if (session?.mafia?.allies?.size) {
+        const allyNames = [...session.mafia.allies]
+            .map(id => session?.mafia?.players?.get(id)?.name || id);
+        alliesLine = `\nزملاؤك في المافيا: ${allyNames.join('، ')} — لا تقتلهم ولا تصوّت عليهم ولا تكشفهم\n`;
+    }
     return (
         `أنت تلعب لعبة مافيا في ديسكورد باسم «${agentName}» ودورك: ${roleText}.\n` +
         (rawText ? `رسالة اللعبة التي وصلتك الآن حرفياً: «${String(rawText).slice(0, 400)}»\n` : '') +
-        `${objective}\n\n` +
-        `الخيارات المتاحة (الأزرار):\n${playerLines || '  • لا أحد'}\n\n` +
+        `${objective}\n` +
+        tallyLine +
+        alliesLine +
+        `\nالخيارات المتاحة (الأزرار):\n${playerLines || '  • لا أحد'}\n\n` +
         `سياق الجلسة:\n${sessions.contextSummary(session) || '- لا معلومات بعد'}\n\n` +
         'اكتب اسم الشخص الذي تختاره فقط — الاسم كما هو في القائمة أعلاه بدون أي كلام إضافي.'
     );
@@ -298,15 +340,19 @@ async function decideChoice({ runtimeSettings, agentName, role, session, candida
 // ════════════════════════════════════════════════════════════
 
 /**
- * عالج رسالة سرية. ترجع null إذا لم تكن لنا (ليست مافيا/لا جلسة/لا صيغة)
+ * عالج رسالة سرية أو بطاقة اختيار. ترجع null إذا لم تكن لنا (ليست مافيا/لا جلسة/لا صيغة)
  * أو نتيجة { handled, kind, result, choice, source, role, ... }.
- * تُستدعى من مسارين: الخاص (player.js مباشرة) والمخفية داخل القناة (events.js).
+ * تُستدعى من ثلاثة مسارات:
+ *   - الخاص (player.js مباشرة)
+ *   - المخفية داخل القناة (events.js mafiaSecret)
+ *   - 🆕 v7.19: البطاقة الظاهرة بالقناة (allowVisible) — معالجا ليل القتل/الطبيب
+ *     كانا يستهلكان الرسالة بـ break فلا أحد يختار أبداً إن كانت البطاقة مرئية
  */
-async function handleSecretMessage({ client, message, agentId, runtimeSettings, settings, agentName, session: presetSession, guildId: presetGuildId }) {
+async function handleSecretMessage({ client, message, agentId, runtimeSettings, settings, agentName, session: presetSession, guildId: presetGuildId, allowVisible = false }) {
     if (!message || !message.author || !message.author.bot) return null;
     if (!client?.user?.id) return null;
     if (!settings?.engines?.mafia?.enabled) return null;
-    if (!isSecretMessage(message)) return null;
+    if (!allowVisible && !isSecretMessage(message)) return null;
 
     // 🐞 v7.18: النص الكامل يشمل حقول الإيمبد (كانت مستثناة فتضيع بطاقة الدور)
     const text = secretText(message);
@@ -323,12 +369,24 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
         guildId = presetGuildId || message.guild?.id || null;
     }
 
+    // ⚰️ v7.19: قُتلنا؟ لا حركات سرية بعد اليوم — نلعب بصمت متفرجين
+    if (session.mafia.meDead) return null;
+
+    // 🆕 v7.19 — حارس المسار الظاهر: رسالة بلا أزرار = إعلان طور عامة
+    // («جاري انتظار المافيا...») وليست بطاقة لنا — لا تدخل الوعي ولا تُغير
+    // الدور أبداً (كانت تُسجّل الدور من كلمة «مافيا» في إعلان الطور!)
+    const visibleCandidates = allowVisible
+        ? candidateButtons(collectChoiceButtons(message), { agentName })
+        : null;
+    if (allowVisible && (!visibleCandidates || visibleCandidates.length === 0)) return null;
+
     // 📥 الصندوق الحي (v7.18): الرسالة السرية نفسها حرفياً لعقل الوكيل —
-    // «رساله الاختيار يتم إرسالها للوكيل مع الخيارات»
+    // «رساله الاختيار يتم إرسالها للوكيل مع الخيارات» — والخيارات الآن فعلاً (v7.19)
+    const optionsLine = sessions.optionsLineFromComponents(message.components);
     sessions.pushInbox(agentId, guildId, {
         id: message.id || null,
         kind: 'secret',
-        text: `رسالة سرية من بوت اللعبة: ${text.slice(0, 400)}`,
+        text: `رسالة سرية من بوت اللعبة: ${text.slice(0, 400)}${optionsLine ? ` — ${optionsLine}` : ''}`,
     });
 
     // الدور قد يأتي في أي رسالة سرية — سجّله فوراً
@@ -337,6 +395,21 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
         const hadRole = session.mafia.role;
         sessions.mafiaSetRole(agentId, guildId, role);
         session.mafia.role = role;
+
+        // 🩸 v7.19: زملاؤه في المافيا من بطاقة الدور — «ومن معه» (بلاغ المالك)
+        if (role === 'mafia' && /زميل|زملاء|شريك|فريق|معك/.test(text)) {
+            const ids = new Set();
+            const re = /<@!?(\d{5,25})>/g;
+            let m;
+            const full = `${message.content || ''}\n${text}`;
+            while ((m = re.exec(full)) !== null) ids.add(m[1]);
+            ids.delete(String(client.user.id)); // الوكيل نفسه ليس زميله
+            if (ids.size) {
+                sessions.mafiaAddAllies(agentId, guildId, [...ids]);
+                sessions.pushEvent(agentId, guildId, `عرفت زملاءك في المافيا: ${ids.size} لاعب`);
+            }
+        }
+
         // 🧠 v7.18: بطاقة الدور تصل وعيه + رد فعل حقيقي بكيفه في قناة اللعبة
         // (المالك: «توزيع الأدوار يتم ارسال رسالة توزيع الأدوار للوكيل يبدي رد فعل اولا بكيفه»)
         if (!hadRole || hadRole !== role) {
@@ -363,6 +436,14 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
             return { handled: true, silent: true, type: 'game_play', result: 'role_note', gameName: 'مافيا', role, message: `عُرف الدور: ${ROLE_AR[role] || role}` };
         }
         return null;
+    }
+
+    // 🆕 v7.19 — حارس التوافق (المسار الظاهر فقط): بطاقة القتل لطبيب/مواطن معروف؟
+    // ليست لنا — بطاقات القناة الظاهرة قد يراها الجميع ولا نحرك إلا لدورنا
+    if (allowVisible && session.mafia.role) {
+        const expected = session.mafia.role === 'mafia' ? 'kill'
+            : session.mafia.role === 'doctor' ? 'save' : 'none';
+        if (expected === 'none' || expected !== kind) return null;
     }
 
     // الأزرار: مرشحون صالحون فقط

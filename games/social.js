@@ -42,6 +42,9 @@ const CHANCES = {
     suspect      : 0.45, // نقاش النهار — رأي في المشتبه به
     // 🛰️ اللوبي (v7.18 — بلاغ المالك: «يستطيع أن يعمل رد على رسالة اللوبي ام لا»)
     lobby_react  : 0.60, // بعد الانضمام — يرد على رسالة اللوبي نفسها أحياناً
+    // 🗣️ التصويت (v7.19 — «انا عامله اجتماعي لكنه لا يستطيع اللعب»):
+    // يعلن تصويته في الشات حتى يرى المالك أنه يلعب فعلاً — التلقائي صامت
+    vote_announce: 0.80,
 };
 
 // 🤫 الوضع التلقائي (v7.18): يلعب ويقرر بعقله لكن كلامه محدود بردود فعل
@@ -151,6 +154,13 @@ const CANNED = {
         'جاهزين؟ أنا معكم',
         'دخلت، لا تطردوني أول واحد 😅',
         'هذي الجولة لي، انتبهوا',
+    ],
+    // 🗣️ التصويت (v7.19)
+    vote_announce: [
+        'صوتي راح على اللي ساكت من أول الجولة',
+        'قررت، نصوت عليه — حظاً موفقاً 😅',
+        'أنا أشكه من زمان، صوتي عليه',
+        'يالله نصوت، خلونا نخلص الجولة',
     ],
     ask_protect: [
         'دكتور احميني والله محتاجك 💊',
@@ -336,6 +346,27 @@ function maybeSpeak(ctx) {
     return true;
 }
 
+// 🗣️ الإعلان عن التصويت (v7.19) — جزء من اللعب لا من الثرثرة:
+// بلا تبريد الدقيقة (المهلة 15ث فقط) وبسقف 3 إعلانات في الجلسة،
+// والوضع التلقائي يبقى صامتاً تماماً (فرق الوضعين الحقيقي)
+const MAX_VOTE_ANNOUNCES = 3;
+function maybeVoteAnnounce({ client, channel, agentId, guildId, settings, session, target, runtimeSettings, agentName }) {
+    try {
+        if (!settings || !settings.enabled) return false;
+        if (speechMode(settings, session) !== 'full') return false;   // التلقائي صامت
+        if (!session || session.voteAnnounces >= MAX_VOTE_ANNOUNCES) return false;
+        if (!chance(CHANCES.vote_announce)) return false;
+        session.voteAnnounces += 1;
+        void speak({
+            client, channel, agentId, guildId,
+            kind: 'vote_announce',
+            eventLine: `صوّت الآن على طرد «${target}» — اعلن تصويتك بإيجاز وبرر قصير (لا تكشف دورك إن كنت مافيا)`,
+            runtimeSettings, agentName, session,
+        }).catch(() => {});
+        return true;
+    } catch (_) { return false; }
+}
+
 // ════════════════════════════════════════════════════════════
 //  النقاط العامة — تُستدعى من player.js فقط
 // ════════════════════════════════════════════════════════════
@@ -486,6 +517,7 @@ module.exports = {
     observeBotMessage,
     maybeSpeak,        // 🕵️ معالجات المافيا في events.js تستعملها مباشرة (v7.16)
     speak,             // 🛰️ v7.18: رد اللوبي يستدعيها مباشرة بعد بوابة speechGate
+    maybeVoteAnnounce, // 🗣️ v7.19: إعلان التصويت في الوضع الاجتماعي
     effectiveChance,
     CHANCES,           // الاحتمالات الأساسية (الاستدعاءات تمررها عبر effectiveChance)
     speechAllowed,     // 🧠 توافق v7.17: زر 🫧 أو وضع اجتماعي/ذكي

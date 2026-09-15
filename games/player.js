@@ -507,14 +507,17 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
         // 📥 الصندوق الحي (v7.18 — بلاغ المالك: «انا طلبت بأنه اي رساله من اللعبة
         // يتم إرسالها للوكيل») — أي رسالة بوت اللعبة نفسه في قناة الجلسة الحية
         // تُنسخ حرفياً لعقل الوكيل قبل أي شيء — لا ملخصات ولا تضييع
+        // 🧩 v7.19: أسماء الأزرار/الخيارات تُلحق بالنص — «وخيار له لكي يصوت
+        // على احد» كانت الخيارات لا تصل لعقله أبداً
         try {
             const liveSession = sessions.getSession(agentId, guildId);
             if (liveSession && message.author.bot
                 && String(liveSession.botId || '') === String(message.author.id)
                 && String(liveSession.channelId || '') === String(message.channel.id)) {
                 const rawInboxText = eventsMod.textFromMessage(message);
-                if (rawInboxText) {
-                    sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: rawInboxText });
+                const optionsLine = sessions.optionsLineFromComponents(message.components);
+                if (rawInboxText || optionsLine) {
+                    sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: `${rawInboxText}${optionsLine ? ` — ${optionsLine}` : ''}` });
                 } else {
                     sessions.touchSession(agentId, guildId);
                 }
@@ -687,13 +690,18 @@ async function handleMessageUpdate({ client, message, agentId, runtimeSettings }
 
         // 📥 الصندوق الحي — تحديثات رسائل اللعبة (عدّاد التصويت/اللوبي) تُنسخ
         // أيضاً؛ inboxIds يمنع تكرار نفس الرسالة التي نُسخت عند إنشائها
+        // 🗳️ v7.19: عدّاد التصويت يعيش في أسماء الأزرار («أحمد (2)») — تُلحق الآن
         try {
             const liveSession = sessions.getSession(agentId, guildId);
             if (liveSession && String(liveSession.botId || '') === String(message.author.id)
                 && String(liveSession.channelId || '') === String(message.channel.id)) {
                 const rawUpd = eventsMod.textFromMessage(message);
-                if (rawUpd) sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: rawUpd });
-                else sessions.touchSession(agentId, guildId);
+                const updOptions = sessions.optionsLineFromComponents(message.components);
+                if (rawUpd || updOptions) {
+                    sessions.pushInbox(agentId, guildId, { id: message.id, kind: 'game_msg', text: `${rawUpd}${updOptions ? ` — ${updOptions}` : ''}` });
+                } else {
+                    sessions.touchSession(agentId, guildId);
+                }
             }
         } catch (_) {}
 
