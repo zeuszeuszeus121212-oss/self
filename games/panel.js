@@ -238,18 +238,27 @@ async function renderGamesPage(agentId, guildId, manager) {
         recent.length ? `\n**آخر الأحداث:**\n${recent.slice(0, 6).map(e => `- ${e.text}`).join('\n')}` : '',
     ].filter(Boolean).join('\n');
 
-    // صف الأزرار 1: الرئيسي + أول محركين
-    const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`${PREFIX}:toggle:${agentId}:${guildId}`)
-            .setLabel(settings.enabled ? 'إيقاف اللعب كلياً' : 'تشغيل اللعب')
-            .setStyle(settings.enabled ? ButtonStyle.Danger : ButtonStyle.Success)
-            .setEmoji(settings.enabled ? '⏹️' : '▶️'),
-        ...engines.getEngines().map((engine) => new ButtonBuilder()
-            .setCustomId(`${PREFIX}:engine:${engine.id}:${agentId}:${guildId}`)
-            .setLabel(`${engine.displayName} ${settings.engines[engine.id]?.enabled ? '⏹️' : '▶️'}`)
-            .setStyle(settings.engines[engine.id]?.enabled ? ButtonStyle.Secondary : ButtonStyle.Success)),
-    );
+    // صف الأزرار 1: الرئيسي + أزرار المحركات
+    // 🐞 v7.16.1: كان الصف يحشو كل المحركات مع زر التشغيل في صف واحد —
+    // أربعة محركات = 5 مكونات (بالضبط الحد) — لكن مافيا جعلتها 6
+    // → ديسكورد يرفض الصفحة كلياً (Invalid Form Body) عند اختيار السيرفر
+    // والخطأ كان يُبتلع بصمت. الآن: التقسيم تلقائي — أي عدد محركات يعمل.
+    const toggleButton = new ButtonBuilder()
+        .setCustomId(`${PREFIX}:toggle:${agentId}:${guildId}`)
+        .setLabel(settings.enabled ? 'إيقاف اللعب كلياً' : 'تشغيل اللعب')
+        .setStyle(settings.enabled ? ButtonStyle.Danger : ButtonStyle.Success)
+        .setEmoji(settings.enabled ? '⏹️' : '▶️');
+    const engineButtons = engines.getEngines().map((engine) => new ButtonBuilder()
+        .setCustomId(`${PREFIX}:engine:${engine.id}:${agentId}:${guildId}`)
+        .setLabel(`${engine.displayName} ${settings.engines[engine.id]?.enabled ? '⏹️' : '▶️'}`)
+        .setStyle(settings.engines[engine.id]?.enabled ? ButtonStyle.Secondary : ButtonStyle.Success));
+
+    const controlRows = [
+        new ActionRowBuilder().addComponents(toggleButton, ...engineButtons.slice(0, 4)),
+    ];
+    for (let i = 4; i < engineButtons.length; i += 5) {
+        controlRows.push(new ActionRowBuilder().addComponents(...engineButtons.slice(i, i + 5)));
+    }
 
     // صف 2: قناة زر + أمر زر
     const zarRow = new ActionRowBuilder().addComponents(
@@ -307,7 +316,7 @@ async function renderGamesPage(agentId, guildId, manager) {
         accent: settings.enabled ? ui.ACCENTS.success : ui.ACCENTS.dark,
         title: '🎮 مركز ألعاب الوكيل',
         body,
-        rows: [row1, zarRow, premiumRow, modeRow, channelRow, rowNav],
+        rows: [...controlRows, zarRow, premiumRow, modeRow, channelRow, rowNav],
         footer: `الضغط على أزرار بوت آخر ممكن لحسابات المستخدم فقط — ${canClick ? 'هذا الوكيل قادر ✅' : 'هذا الوكيل لا يملك القدرة الآن'}`,
     }));
 }
@@ -429,10 +438,26 @@ function serversModal() {
 // ════════════════════════════════════════════════════════════
 
 async function update(interaction, payload) {
-    if (interaction.replied || interaction.deferred) {
-        await interaction.editReply(payload).catch(() => {});
-    } else {
-        await interaction.update(payload).catch(() => {});
+    const attempt = (interaction.replied || interaction.deferred)
+        ? interaction.editReply(payload)
+        : interaction.update(payload);
+    try {
+        await attempt;
+    } catch (updateError) {
+        // 🐞 v7.16.1: كان .catch(() => {}) يبتلع رفض ديسكورد بصمت — المالك
+        // يرى «فشل التفاعل» بلا أي أثر في اللوق (مثل صف 6 مكونات المرفوض).
+        // الآن: الفشل يُسجل دائماً، وإن بقي التفاعل بلا إقرار نُرسل لوحة خطأ
+        // مرئية بدل الصمت.
+        console.error('[Games Panel] فشل تحديث اللوحة:', updateError);
+        if (!interaction.replied && !interaction.deferred) {
+            const fallback = ui.v2Payload(ui.container({
+                accent: ui.ACCENTS.danger,
+                title: '🎮 خطأ في لوحة الألعاب',
+                body: `\`${updateError?.message || String(updateError)}\``,
+                rows: [backHomeRow()],
+            }));
+            await interaction.update(fallback).catch(() => {});
+        }
     }
 }
 

@@ -630,13 +630,134 @@ async function run() {
         await policy.setOverlapLock(false);
     }
 
+    // ── 22) انحدار v7.16.1: اختيار السيرفر يرسل صفحة الألعاب فعلاً — لا «فشل التفاعل» ──
+    // الجذر: مافيا جعلت أزرار المحركات 6 مع زر التشغيل في صف واحد — ديسكورد
+    // يرفض أي صف > 5 مكونات (Invalid Form Body) والخطأ كان يُبتلع بصمت.
+    {
+        const panel = require('../games/panel');
+        const cfgMod = require.cache[cfgPath].exports;
+        const AGENT_VALID = 'a100000000000000000000aa'; // 24 hex — ObjectId سليم
+        const fakeManager = { runtimes: new Map() };
+        const fakeManagerLive = { runtimes: new Map([[AGENT_VALID, { client: { guilds: { cache: new Map([
+            [GUILD, { id: GUILD, name: 'سيرفر الاختبار', memberCount: 42 }],
+        ]) } } }]]) };
+
+        // فاحص يحاكي ديسكورد حرفياً: يرفض أي صف > 5 مكونات أو رسالة > 40 مكوناً
+        const validateV2 = (payload) => {
+            let total = 0;
+            for (const cont of (payload.components || [])) {
+                const json = typeof cont.toJSON === 'function' ? cont.toJSON() : cont;
+                for (const item of (json.components || [])) {
+                    total += 1;
+                    if (item.type === 1 && item.components.length > 5) {
+                        const err = new Error('Invalid Form Body');
+                        err.code = 50035;
+                        throw err;
+                    }
+                }
+            }
+            if (total > 40) {
+                const err = new Error('Invalid Form Body (40)');
+                err.code = 50035;
+                throw err;
+            }
+        };
+
+        // الحالة أ: كل صفحات اللوحة الأربع تمر على فاحص ديسكورد بلا رفض
+        cfgMod.agents_col = {
+            find: () => ({ sort: () => ({ limit: () => ({ toArray: async () => ([
+                { _id: AGENT_VALID, name: 'وكيل الحساب', token_type: 'user', status: 'running' },
+            ]) }) }) }),
+            findOne: async () => ({ _id: AGENT_VALID, name: 'وكيل الحساب', token_type: 'user' }),
+        };
+        const pages = {
+            'اختيار الوكيل': await panel.renderAgentSelect(fakeManager),
+            'اختيار السيرفر': await panel.renderGuildSelect(AGENT_VALID, fakeManagerLive),
+            'صفحة الألعاب': await panel.renderGamesPage(AGENT_VALID, GUILD, fakeManager),
+            'صفحة السياسة': await panel.renderPolicyPage(),
+        };
+        for (const [name, payload] of Object.entries(pages)) {
+            assert.ok(payload, `${name} بُنيت`);
+            let threw = null;
+            try { validateV2(payload); } catch (e) { threw = e; }
+            assert.ok(!threw, `${name} تُقبل من ديسكورد فعلاً${threw ? ' — ' + threw.message : ''}`);
+        }
+
+        // الحالة ب: المسار الكامل — اختيار سيرفر من القائمة يُحدّث اللوحة بلا «فشل التفاعل»
+        const sinkB = { pages: [], errPanels: 0 };
+        const discordLikeUpdate = async (payload) => {
+            let title = '';
+            try {
+                for (const cont of (payload.components || [])) {
+                    const json = typeof cont.toJSON === 'function' ? cont.toJSON() : cont;
+                    const texts = (json.components || []).filter(x => x.type === 10);
+                    if (texts.length) title = (texts[0].content || '');
+                }
+            } catch (_) {}
+            try {
+                validateV2(payload);
+                sinkB.pages.push({ payload, title });
+            } catch (e) {
+                // هذا بالضبط ما كان يحدث في v7.16.0: ديسكورد يرفض واللوح لا تتحدث
+                sinkB.errPanels += 0; // العدّاد لا يتحرك هنا — الرفض فقط
+                throw e;
+            }
+        };
+        const makeSelectInteraction = (updateImpl) => ({
+            isChatInputCommand: () => false,
+            isModalSubmit: () => false,
+            isStringSelectMenu: () => true,
+            isButton: () => false,
+            isChannelSelectMenu: () => false,
+            commandName: null,
+            customId: `games:guild_select:${AGENT_VALID}`,
+            values: [GUILD],
+            replied: false,
+            deferred: false,
+            update: updateImpl,
+            editReply: async () => { throw new Error('editReply لا يجب أن يُستدعى لمكون'); },
+            deferUpdate: async () => { throw new Error('deferUpdate غير متوقع هنا'); },
+        });
+        const handledB = await panel.handleGamesInteraction(makeSelectInteraction(discordLikeUpdate), fakeManager);
+        assert.strictEqual(handledB, true, 'اختيار السيرفر يُعالج');
+        assert.strictEqual(sinkB.pages.length, 1, 'صفحة الألعاب أُرسلت وقُبلت من ديسكورد — الاختيار يحدث فعلاً');
+        assert.ok(sinkB.pages[0].title.includes('مركز ألعاب الوكيل'), 'الصفحة المرسلة هي مركز الألعاب نفسه');
+        assert.strictEqual(sinkB.errPanels, 0, 'بلا أي رفض من ديسكورد');
+
+        // الحالة ج: حزام الأمان — لو فشل الإرسال مستقبلاً، لا صمت بعد اليوم:
+        // الفشل يُسجل ويُرسل بديل مرئي بدل «فشل التفاعل» الصامت
+        let updateCalls = 0;
+        const sinkC = { pages: [] };
+        const flakyUpdate = async (payload) => {
+            updateCalls += 1;
+            if (updateCalls === 1) {
+                const err = new Error('Invalid Form Body');
+                err.code = 50035;
+                throw err;
+            }
+            let title = '';
+            try {
+                for (const cont of (payload.components || [])) {
+                    const json = typeof cont.toJSON === 'function' ? cont.toJSON() : cont;
+                    const texts = (json.components || []).filter(x => x.type === 10);
+                    if (texts.length) title = (texts[0].content || '');
+                }
+            } catch (_) {}
+            sinkC.pages.push({ payload, title });
+        };
+        await panel.handleGamesInteraction(makeSelectInteraction(flakyUpdate), fakeManager);
+        assert.strictEqual(updateCalls, 2, 'بعد الفشل: حاول بإرسال بديل — لا صمت');
+        assert.strictEqual(sinkC.pages.length, 1, 'البديل وصل');
+        assert.ok(sinkC.pages[0].title.includes('خطأ في لوحة الألعاب'), 'المالك يرى لوحة خطأ حمراء بدل الصمت');
+    }
+
     // ── تنظيف ──
     player.agentStop(AGENT_A);
     player.agentStop(AGENT_B);
     overrides.clear();
     policy.clearLocks();
 
-    console.log('✅ games_player.test.js — كل الفحوصات مرت (21 مجموعة)');
+    console.log('✅ games_player.test.js — كل الفحوصات مرت (22 مجموعة)');
 }
 
 run().catch((error) => {
