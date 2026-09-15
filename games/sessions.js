@@ -44,6 +44,14 @@ function newSession(data = {}) {
         socialCount      : 0,    // كم مرة تكلم هذه الجلسة
         lastSocialAt     : 0,    // آخر تكلم (تبريد عام)
         lastMentionReply : new Map(), // userId → ts (تبريد لكل شخص)
+        // 🕵️ المافيا (v7.16) — ذاكرة الدور واللاعبين ومن سكت
+        talkCounts: new Map(),   // userId → كم رسالة كتبها في الشات خلال الجلسة
+        mafia     : {
+            role  : null,        // 'mafia' | 'doctor' | 'detective' | 'citizen' | null
+            phase : 'lobby',     // lobby | roles | night_kill | night_save | day | day_discuss | day_vote | ended
+            players: new Map(),  // id → { name, talks, alive }
+            lastVictim: null,    // آخر قتيل { id, name, role }
+        },
     };
 }
 
@@ -122,6 +130,83 @@ function addKicked(agentId, guildId, userId) {
     return session;
 }
 
+// ════════════════════════════════════════════════════════════
+//  🕵️ المافيا — ذاكرة الدور واللاعبين ومن سكت (v7.16)
+// ════════════════════════════════════════════════════════════
+
+/** عدّاد الكلام — كل رسالة بشرية في قناة الجلسة تزيد عداد صاحبها
+ *  (الذكاء يشك في من لم يتكلم طوال الجولة — بلاغ المالك) */
+function bumpTalk(agentId, guildId, userId) {
+    const session = getSession(agentId, guildId);
+    if (!session || !userId) return session;
+    const id = String(userId);
+    session.talkCounts.set(id, (session.talkCounts.get(id) || 0) + 1);
+    const player = session.mafia.players.get(id);
+    if (player) player.talks = session.talkCounts.get(id);
+    return session;
+}
+
+function mafiaSetRole(agentId, guildId, role) {
+    const session = getSession(agentId, guildId);
+    if (session && role) session.mafia.role = String(role);
+    return session;
+}
+
+function mafiaSetPhase(agentId, guildId, phase) {
+    const session = getSession(agentId, guildId);
+    if (session && phase) session.mafia.phase = String(phase);
+    return session;
+}
+
+/** سجّل لاعبي اللوبي (منشن من رسالة اللوبي) — «يعرف من يلعب معه بالضبط والعدد» */
+function mafiaSetPlayers(agentId, guildId, entries = []) {
+    const session = getSession(agentId, guildId);
+    if (!session) return null;
+    for (const entry of entries) {
+        if (!entry || !entry.id) continue;
+        session.mafia.players.set(String(entry.id), {
+            name: String(entry.name || 'لاعب').slice(0, 60),
+            talks: session.talkCounts.get(String(entry.id)) || 0,
+            alive: entry.alive !== false,
+        });
+        session.players.add(String(entry.id));
+    }
+    return session;
+}
+
+function mafiaMarkDead(agentId, guildId, userId) {
+    const session = getSession(agentId, guildId);
+    const id = String(userId || '');
+    if (session && id && id !== 'undefined') {
+        const player = session.mafia.players.get(id);
+        if (player) player.alive = false;
+        session.mafia.lastVictim = { id, name: player ? player.name : null, role: null };
+    }
+    return session;
+}
+
+/** ابحث عن جلسة مافيا حية لهذا الوكيل من بوت معيّن — لرسائل الخاص السرية
+ *  (رسالة «اختار شخصا لاغتياله» تأتي على الخاص من بوت اللعبة نفسه) */
+function findMafiaSessionByBot(agentId, botId) {
+    const prefix = `${String(agentId)}:`;
+    for (const [k, session] of sessions.entries()) {
+        if (!k.startsWith(prefix)) continue;
+        if (session.engineId !== 'mafia') continue;
+        if (String(session.botId || '') !== String(botId || '')) continue;
+        if (Date.now() - session.lastSeenAt > TTL_MS) { sessions.delete(k); continue; }
+        return { guildId: k.slice(prefix.length), session };
+    }
+    return null;
+}
+
+/** اسم من قائمة أزرار/لاعبين موجود في الخريطة؟ (مطابقة عربية متسامحة) */
+function normalizeName(name) {
+    return String(name || '')
+        .replace(/[أإآ]/g, 'ا').replace(/[ىي]/g, 'ي').replace(/ة/g, 'ه')
+        .replace(/[\u200c-\u200f\u0640]/g, '')
+        .replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 /** ملخص سياق للذكاء الاصطناعي — قصير دائماً */
 function contextSummary(session) {
     if (!session) return '';
@@ -130,6 +215,20 @@ function contextSummary(session) {
     if (session.kicked.size) lines.push(`- المطرودون: ${[...session.kicked].length} لاعب`);
     if (session.players.size) lines.push(`- لاعبون مرئيون: ${session.players.size}`);
     if (session.friends.size) lines.push(`- تحدث معك: ${session.friends.size} لاعب`);
+    // 🕵️ حالة المافيا — الدور واللاعبون الأحياء ومن سكت
+    if (session.engineId === 'mafia' || session.mafia.role) {
+        lines.push(`- دورك في المافيا: ${session.mafia.role || 'غير معروف بعد'}`);
+        lines.push(`- مرحلة اللعبة: ${session.mafia.phase}`);
+        if (session.mafia.players.size) {
+            const alive = [...session.mafia.players.entries()].filter(([, p]) => p.alive);
+            lines.push(`- اللاعبون الأحياء (${alive.length}): ${alive.map(([, p]) => p.name).join('، ') || '—'}`);
+            const silent = alive.filter(([, p]) => (p.talks || 0) === 0).map(([, p]) => p.name);
+            if (silent.length) lines.push(`- صامتون طوال الجولة (مشتبه بهم): ${silent.join('، ')}`);
+            const friends = alive.filter(([id]) => session.friends.has(id)).map(([, p]) => p.name);
+            if (friends.length) lines.push(`- أصدقاؤك منهم: ${friends.join('، ')}`);
+            if (session.mafia.lastVictim) lines.push(`- آخر قتيل: ${session.mafia.lastVictim.name || session.mafia.lastVictim.id}`);
+        }
+    }
     if (session.chatRing.length) {
         lines.push('- آخر كلام القناة:');
         for (const item of session.chatRing.slice(-6)) {
@@ -155,5 +254,13 @@ module.exports = {
     addFriend,
     addKicked,
     contextSummary,
+    // 🕵️ المافيا (v7.16)
+    bumpTalk,
+    mafiaSetRole,
+    mafiaSetPhase,
+    mafiaSetPlayers,
+    mafiaMarkDead,
+    findMafiaSessionByBot,
+    normalizeName,
     __reset,
 };

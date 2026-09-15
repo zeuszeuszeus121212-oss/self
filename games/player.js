@@ -42,7 +42,7 @@ const MAX_PROCESSED_OUTCOME = 1000;
 
 // عبارات النتيجة — منقولة من Auto engineRuntime (مع توسيع طُرد/انطرد والفائز)
 const WIN_PHRASES = ['فاز باللعبة', 'فاز', 'الفائز'];
-const LOSS_PHRASES = ['خسرت', 'خسر', 'تم طرد', 'طُرد', 'انطرد'];
+const LOSS_PHRASES = ['خسرت', 'خسر', 'تم طرد', 'طُرد', 'انطرد', 'تم قتل']; // 🕰️ تم قتل = موت في المافيا (v7.16)
 
 // 🛰️ بلاغ المالك (v7.15): «جاري البحث عن لاعبين خارجيين للانضمام...» تُسجل كخسارة!
 // رسائل اللوبي/البحث ليست نتائج أبداً — مهما ذُكر اسمنا فيها
@@ -308,7 +308,9 @@ function outcomeFromMessage(message, client) {
                 const phraseEnd = idx + phrase.length;
                 const hit = firstMentionAfterIsMe(line, lower, phraseEnd, identifiers)
                     || identifierBeforePhrase(lower, idx, identifiers)
-                    || (mentionsMe && (lower.includes('فزت') || lower.includes('فوزك')));
+                    || (mentionsMe && (lower.includes('فزت') || lower.includes('فوزك')))
+                    // 🕰️ إعلان الفائزين في المافيا: قائمة منشنات — اسمنا في نفس السطر يكفي
+                    || (mentionsMe && phrase === 'الفائز' && identifiers.some(id => lower.slice(phraseEnd).includes(id)));
                 if (hit) {
                     rememberProcessedOutcome(message.id);
                     return { result: 'win', kind: 'win', level: 'success', reason: `رسالة بوت تحتوي: ${phrase}` };
@@ -321,13 +323,14 @@ function outcomeFromMessage(message, client) {
             let idx = lower.indexOf(phrase);
             while (idx !== -1) {
                 const phraseEnd = idx + phrase.length;
-                // الطرد: من يُذكر مباشرة بعد العبارة هو المطرود — لا يكفي ذكرنا في السطر
+                // الطرد/القتل: من يُذكر مباشرة بعد العبارة هو المصاب — لا يكفي ذكرنا في السطر
                 const hit = firstMentionAfterIsMe(line, lower, phraseEnd, identifiers)
-                    || (mentionsMe && (lower.includes('طردك') || lower.includes('طُردك') || lower.includes('خسرت') || lower.includes('خسارتك')));
+                    || (mentionsMe && (lower.includes('طردك') || lower.includes('طُردك') || lower.includes('قتلك') || lower.includes('خسرت') || lower.includes('خسارتك')));
                 if (hit) {
                     const isKick = lower.includes('طرد') || lower.includes('طُرد') || lower.includes('انطرد');
+                    const isKilled = lower.includes('قتل');
                     rememberProcessedOutcome(message.id);
-                    return { result: 'loss', kind: isKick ? 'kick' : 'loss', level: 'warning', reason: `رسالة بوت تحتوي: ${phrase}` };
+                    return { result: 'loss', kind: isKick ? 'kick' : (isKilled ? 'killed' : 'loss'), level: 'warning', reason: `رسالة بوت تحتوي: ${phrase}` };
                 }
                 idx = lower.indexOf(phrase, phraseEnd);
             }
@@ -365,6 +368,58 @@ async function processOutcome({ agentId, client, message, settings }) {
 }
 
 // ════════════════════════════════════════════════════════════
+//  رسائل الخاص — الرسائل السرية للمافيا فقط (v7.16)
+//  بلاغ المالك: «الرسائل تأتي لو كان مافيا او طبيب تكون فقط مرئية
+//  للحساب وحده بمعنى مخفيه» — اختيار ضحية/حماية يصل على الخاص من بوت
+//  اللعبة نفسه. أي خاص آخر → false فوراً (صفر تدخل في الخاص).
+// ════════════════════════════════════════════════════════════
+
+async function handleDmMessage({ client, message, agentId, runtimeSettings }) {
+    try {
+        if (!message.author || !message.author.bot) return false;
+        const mafiaMod = require('./mafia');
+        if (!mafiaMod.isSecretMessage(message)) return false;
+
+        // باب سريع: جلسة مافيا حية من نفس البوت؟ وإلا لا شيء
+        const found = sessions.findMafiaSessionByBot(agentId, message.author.id);
+        if (!found) return false;
+
+        const settings = await store.getGameSettings(agentId, found.guildId);
+        if (!settings.enabled || !settings.engines?.mafia?.enabled) return false;
+
+        const agent = agents.get(String(agentId));
+        const result = await mafiaMod.handleSecretMessage({
+            client, message, agentId,
+            runtimeSettings, settings,
+            agentName: agent ? agent.agentName : null,
+            session: found.session,
+            guildId: found.guildId,
+        });
+        if (!result || !result.handled) return false;
+
+        sessions.touchSession(agentId, found.guildId);
+        if (result.silent !== true) {
+            store.incrementStats(agentId, found.guildId, 'plays');
+            await store.pushRecentEvent(agentId, { kind: 'game_play', text: `🕵️ ${result.message || 'حركة سرية في المافيا'}` });
+            await store.logGameEvent(agentId, found.guildId, {
+                type: result.type, engine: 'mafia', gameName: 'مافيا',
+                result: result.result, details: result.details || {}, dm: true,
+            });
+            await notifyGameEvent({
+                agentId, guildId: found.guildId,
+                title: '🕵️ حركة سرية في المافيا (الخاص)',
+                message: `**${result.message || ''}**`,
+                level: 'info',
+                extra: { engine: 'mafia', dm: true, details: result.details || {} },
+            });
+        }
+        return true;
+    } catch (_) {
+        return false; // أي خطأ في الخاص لا يمس أي مسار
+    }
+}
+
+// ════════════════════════════════════════════════════════════
 //  خط الأنابيب الرئيسي
 // ════════════════════════════════════════════════════════════
 
@@ -375,8 +430,14 @@ async function processOutcome({ agentId, client, message, settings }) {
  */
 async function handleMessage({ client, message, agentId, runtimeSettings }) {
     try {
-        if (!message?.guild || !message.author) return false;
+        if (!message?.author) return false;
         if (message.author.id === client?.user?.id) return false;
+
+        // 🕵️ رسالة على الخاص — فقط الرسائل السرية للمافيا (v7.16)، وإلا false فوراً
+        if (!message.guild) {
+            return await handleDmMessage({ client, message, agentId, runtimeSettings });
+        }
+
         const agent = agents.get(String(agentId));
         if (!agent) return false;
 
@@ -432,6 +493,9 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                         settings,
                         engineSettings,
                         answerWithAi: (q) => answerWithAi(runtimeSettings, q),
+                        // 🕵️ المافيا (v7.16): الكلام الاجتماعي وقرارات الذكاء يحتاجان هويتهما
+                        runtimeSettings,
+                        agentName: agent.agentName,
                     });
                 } catch (eventError) {
                     store.incrementStats(agentId, guildId, 'errors');
@@ -455,6 +519,10 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                         gameName: event.gameName,
                         guildName: message.guild.name,
                     });
+                    // 🕵️ لاعبو لوبي المافيا — «يعرف من يلعب معه بالضبط وكذلك العدد»
+                    if (Array.isArray(result.details?.players) && result.details.players.length) {
+                        sessions.mafiaSetPlayers(agentId, guildId, result.details.players);
+                    }
                 } else {
                     sessions.touchSession(agentId, guildId);
                 }
@@ -543,7 +611,7 @@ async function handleMessageUpdate({ client, message, agentId, runtimeSettings }
 
                 let result;
                 try {
-                    result = await event.execute(message, client, { agentId, settings, engineSettings });
+                    result = await event.execute(message, client, { agentId, settings, engineSettings, runtimeSettings, agentName: agent.agentName });
                 } catch (eventError) {
                     store.incrementStats(agentId, guildId, 'errors');
                     policy.releaseLock(lock.key, String(agentId));

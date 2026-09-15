@@ -174,12 +174,12 @@ async function run() {
         assert.strictEqual(updateSwallow, false, 'messageUpdate الافتراضي أيضاً بلا فعل');
     }
 
-    // ── 2) السجل: 4 محركات كما في Auto ──
+    // ── 2) السجل: 4 محركات كما في Auto + مافيا (v7.16) ──
     {
         const ids = engines.engineIds().sort();
-        assert.deepStrictEqual(ids, ['karasi', 'replka', 'roulette', 'zar'], 'المحركات الأربعة');
+        assert.deepStrictEqual(ids, ['karasi', 'mafia', 'replka', 'roulette', 'zar'], 'المحركات الخمسة (مافيا أُضيفت v7.16)');
         const names = engines.getEngines().map(e => e.displayName);
-        for (const expected of ['زر', 'روليت', 'كراسي', 'ريبلكا']) assert(names.includes(expected), `اسم المحرك ${expected}`);
+        for (const expected of ['زر', 'روليت', 'كراسي', 'ريبلكا', 'مافيا']) assert(names.includes(expected), `اسم المحرك ${expected}`);
     }
 
     // ── 3) تفعيل الوكيل أ لهذا السيرفر + كل المحركات ──

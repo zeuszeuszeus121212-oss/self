@@ -205,7 +205,12 @@ async function renderGamesPage(agentId, guildId, manager) {
             ? ` • انضمام مميز: ${es.premium_join ? '✅' : '⛔'}`
             : '';
         const delay = Number(es.delay || 0) ? ` • تأخير ${es.delay}ث` : '';
-        return `- ${engine.icon} **${engine.displayName}** — ${state}${premium}${delay}\n  > ${engine.description}`;
+        // 🧠 وضع القرار — مافيا وروليت فقط (v7.16 بلاغ المالك:
+        // «واحد يتحكم فيه الوكيل... والآخر يكون تلقائي»)
+        const mode = engine.id === 'mafia' || engine.id === 'roulette'
+            ? ` • الوضع: ${es.mode === 'ai' ? '🧠 ذكي (الذكاء يختار)' : '⚙️ تلقائي (عشوائي)'}`
+            : '';
+        return `- ${engine.icon} **${engine.displayName}** — ${state}${premium}${delay}${mode}\n  > ${engine.description}`;
     });
 
     const body = [
@@ -271,6 +276,16 @@ async function renderGamesPage(agentId, guildId, manager) {
             .setStyle(settings.engines.replka?.premium_join ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('⚡'),
     );
 
+    // صف 2.6: وضع القرار (v7.16) — ذكي = الذكاء يختار الضحية/الحماية/التصويت/الطرد
+    const modeRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`${PREFIX}:mode:mafia:${agentId}:${guildId}`)
+            .setLabel(`وضع المافيا: ${settings.engines.mafia?.mode === 'ai' ? '🧠 ذكي' : '⚙️ تلقائي'}`)
+            .setStyle(settings.engines.mafia?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🕵️'),
+        new ButtonBuilder().setCustomId(`${PREFIX}:mode:roulette:${agentId}:${guildId}`)
+            .setLabel(`وضع الروليت: ${settings.engines.roulette?.mode === 'ai' ? '🧠 ذكي' : '⚙️ تلقائي'}`)
+            .setStyle(settings.engines.roulette?.mode === 'ai' ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🎡'),
+    );
+
     // قناة حلقة زر — ChannelSelect
     const channelRow = new ActionRowBuilder().addComponents(
         new ChannelSelectMenuBuilder()
@@ -292,7 +307,7 @@ async function renderGamesPage(agentId, guildId, manager) {
         accent: settings.enabled ? ui.ACCENTS.success : ui.ACCENTS.dark,
         title: '🎮 مركز ألعاب الوكيل',
         body,
-        rows: [row1, zarRow, premiumRow, channelRow, rowNav],
+        rows: [row1, zarRow, premiumRow, modeRow, channelRow, rowNav],
         footer: `الضغط على أزرار بوت آخر ممكن لحسابات المستخدم فقط — ${canClick ? 'هذا الوكيل قادر ✅' : 'هذا الوكيل لا يملك القدرة الآن'}`,
     }));
 }
@@ -600,6 +615,20 @@ async function handleGamesInteraction(interaction, manager) {
             const settings = await store.getGameSettings(agentId, guildId);
             const current = Boolean(settings.engines[engineId]?.premium_join);
             await store.updateGameSettings(agentId, guildId, { engines: { [engineId]: { premium_join: !current } } });
+            await update(interaction, await renderGamesPage(agentId, guildId, manager));
+            return true;
+        }
+
+        // 🧠 تبديل وضع القرار ذكي/تلقائي (v7.16) — مافيا وروليت
+        if (parts[1] === 'mode') {
+            const engineId = parts[2];
+            const agentId = parts[3];
+            const guildId = parts[4];
+            if (!['mafia', 'roulette'].includes(engineId)) return true;
+            const settings = await store.getGameSettings(agentId, guildId);
+            const next = settings.engines[engineId]?.mode === 'ai' ? 'auto' : 'ai';
+            await store.updateGameSettings(agentId, guildId, { engines: { [engineId]: { mode: next } } });
+            await store.pushRecentEvent(agentId, { kind: 'engine', text: next === 'ai' ? `🧠 فُعّل الوضع الذكي (${engineId === 'mafia' ? 'مافيا' : 'روليت'})` : `⚙️ عاد الوضع التلقائي (${engineId === 'mafia' ? 'مافيا' : 'روليت'})` });
             await update(interaction, await renderGamesPage(agentId, guildId, manager));
             return true;
         }

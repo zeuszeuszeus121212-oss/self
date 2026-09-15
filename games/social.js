@@ -31,8 +31,15 @@ const CHANCES = {
     kicked       : 0.90, // طرده هو — يكاد دائماً يعقب
     win          : 0.60,
     loss         : 0.70,
+    killed       : 0.70, // قتله المافيا (بلاغ المالك v7.16)
     friend_kicked: 0.50, // طُرد صديق — يمزح أحياناً
+    mourn_ally   : 0.65, // قُتل صديقه على يد المافيا — يندب ويوعد بالثأر
     name_drop    : 0.85, // ذكروا اسمه — يرد غالباً
+    // 🕵️ كلام المافيا (v7.16)
+    role_react   : 0.80, // رؤية توزيع الأدوار — يتمنى مافيا / يلعن حظه
+    beg          : 0.55, // ليل القتل — يرجى ألا يُقتل
+    ask_protect  : 0.50, // دور الطبيب — «احميني»
+    suspect      : 0.45, // نقاش النهار — رأي في المشتبه به
 };
 
 // ⏳ التبريد والسقوف — بلا إزعاج
@@ -55,6 +62,11 @@ const CANNED = {
         'طيب خلاص، الجاية أنا أول من يطردكم',
         'أول مرة ألعب معكم وأطلع مظلوم',
     ],
+    killed: [
+        'قتلتموني والمجلس كله شاهد 😭',
+        'أنا قلت لكم مافيا فينا، ما سمعتم 😑',
+        'روحوا ادفنوني بس الجاية القصة تنقلب',
+    ],
     win: [
         'أخيراً 🏆',
         'سهلة هذي اللعبة والله',
@@ -70,11 +82,59 @@ const CANNED = {
         'أنجزمت عليه والله 😂',
         'اجتمعوا على واحد بس 😂',
     ],
+    mourn_ally: [
+        'دمه عليكم يا مافيا… راح آخذ حقي 🩸',
+        'قتلتم صاحبي؟ الراحة راح تدفعون ثمنها',
+        'الله يرحمه… والمافيا راح تعرف مين أنا',
+    ],
     name_drop: [
         'سجلت اسمي؟ 😄',
         'أنا مشغول ألعب، وش عندكم؟',
         'قلتوا شيء عني؟',
         'أنا موجود لا تشيلون هم',
+    ],
+    // 🕵️ أدوار المافيا — رد الفعل على توزيع الرتب
+    role_mafia: [
+        'مافيا؟ الليلة فيها دم 🔪',
+        'أخيراً مافيا… خلكوا حذرين الليلة 😈',
+        'أنا مافيا، أحد ينتبه؟ هههه',
+    ],
+    role_doctor: [
+        'دكتور الليلة 💊 مين يستحق الحماية؟',
+        'طبيب… قلبي مع المواطنين الليلة',
+    ],
+    role_detective: [
+        'محقق؟ بكشفكم كلكم 🔍',
+        'عيني عليكم من الليلة، يا مافيا',
+    ],
+    role_citizen: [
+        'مواطن مرة ثانية؟ حظي زفت 😭',
+        'اللعبة هذي تعرف إنني مواطن دايماً',
+        'أبغى أصير مافيا، ليش دايماً مواطن!',
+    ],
+    role_generic: [
+        'أبغى مافيا الليلة، اللي يوزع الرتب يرحمي 🙏',
+        'توزيع الأدوار… يا رب مافيا',
+        'خلّيني مافيا هالمرة وأنا أضمن اللعبة',
+    ],
+    // 🌙 الليل
+    beg: [
+        'أرجوكم لا تقتلوني، أنا بريء 😭',
+        'يا مافيا رحمكم الله، خذوا غيري',
+        'أنا والله مو فاهم ليش أنا، لا تقتلوني 🥲',
+        'الله لا يقتلني الليلة، عندي أصدقاء أحبهم',
+    ],
+    ask_protect: [
+        'دكتور احميني والله محتاجك 💊',
+        'يا طبيب لا تنساني الليلة، احميني',
+        'أنا وثيقك يا دكتور، احميني ولا تخيّني',
+        'الطبيب احميني… حسيته أهذّر عليّ 😅',
+    ],
+    suspect: [
+        'أشك الصامتين… المافيا ما تتكلم 😒',
+        'اللي ساكت من أول الجولة، وش سرّك؟',
+        'حسيته قاعد يسمّع ويطلع مافيا، أخاف منه',
+        'رأيي: راقبوا اللي ما قال كلمة، أنا أشكه',
     ],
 };
 
@@ -84,6 +144,21 @@ function pick(list) {
 
 function chance(p) {
     return Math.random() < p;
+}
+
+/**
+ * 🕵️ قاعدة صمت المافيا (بلاغ المالك): «المافيا يميل نوعاً ما لعدم التكلم»
+ * إذا صار الوكيل مافيا فالكلام الاجتماعي (الترجي/الشك/طلب الحماية)
+ * يتقلص جداً — والاحتمالات الأخرى تبقى كما هي.
+ */
+function effectiveChance(session, kind, base) {
+    let p = Number(base);
+    if (!Number.isFinite(p) || p <= 0) return 0;
+    if (session && session.mafia && session.mafia.role === 'mafia'
+        && ['beg', 'ask_protect', 'suspect', 'name_drop', 'role_react'].includes(kind)) {
+        p *= 0.12; // المافيا يكاد يصمت
+    }
+    return Math.min(p, 1);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -173,7 +248,8 @@ async function speak({ client, channel, agentId, guildId, kind, eventLine, runti
     return true;
 }
 
-/** قرار + حجز التبريد قبل التوليد (يمنع تكرار الكلام المتزامن) */
+/** قرار + حجز التبريد قبل التوليد (يمنع تكرار الكلام المتزامن)
+ *  probability تُمرَّر عبر effectiveChance من الاستدعاءات — هنا لا تلمس */
 function maybeSpeak(ctx) {
     const { settings, session, kind, userId = null, probability } = ctx;
     if (!socialEnabled(settings)) return false;
@@ -203,6 +279,10 @@ async function handleChatMessage({ client, message, agentId, runtimeSettings, ag
         const session = sessions.touchSession(agentId, guildId);
         if (!session) return false; // بلا جلسة لعب حية — صفر تدخل
 
+        // 🕵️ عدّاد الكلام يعمل دائماً (بلوقل الشك في الصامتين) — حتى بلا تفاعل اجتماعي
+        sessions.bumpTalk(agentId, guildId, message.author.id);
+
+        if (!socialEnabled(settings)) return false;
         const name = message.member?.displayName || message.author.username || 'لاعب';
         sessions.pushChatLine(agentId, guildId, { name, text: message.content });
 
@@ -232,6 +312,8 @@ async function handleChatMessage({ client, message, agentId, runtimeSettings, ag
 }
 
 const KICK_LINE = /تم\s*طرد|طُرد|انطرد|انطرح/;
+// ⚰️ قتل المافيا — يُعامل كطرد اجتماعياً (ندبة/تعليق) (v7.16)
+const KILL_LINE = /تم\s*قتل|قتلت|نجحت\s*عملية/;
 
 /**
  * رسالة بوت لعب — مراقبة النتائج الاجتماعية:
@@ -261,7 +343,7 @@ async function observeBotMessage({ client, message, agentId, runtimeSettings, ag
             if (kickedId && outcome === null && session.friends.has(kickedId)) {
                 maybeSpeak({
                     settings, session, kind: 'friend_kicked',
-                    probability: CHANCES.friend_kicked,
+                    probability: effectiveChance(session, 'friend_kicked', CHANCES.friend_kicked),
                     client, channel: message.channel, agentId, guildId,
                     eventLine: 'طردوا صديقاً لك من اللعبة',
                     mentionLabel: kickedId ? `<@${kickedId}>` : null,
@@ -271,13 +353,37 @@ async function observeBotMessage({ client, message, agentId, runtimeSettings, ag
             }
         }
 
+        // 1.5) ⚰️ قتل المافيا — قتيل صديق → ندبة ووعد بالثأر (بلاغ المالك:
+        //      «عندما يتم قتل شخص متحالف معه يندب القاتل و توعد باخذ حقه»)
+        for (const line of lines) {
+            if (!KILL_LINE.test(line)) continue;
+            const mentionMatch = line.match(/<@!?(\d+)>/);
+            const victimId = mentionMatch ? mentionMatch[1] : null;
+            if (victimId) sessions.mafiaMarkDead(agentId, guildId, victimId); // سجّل القتيل دائماً
+            if (victimId && outcome === null && session.friends.has(victimId)) {
+                maybeSpeak({
+                    settings, session, kind: 'mourn_ally',
+                    probability: effectiveChance(session, 'mourn_ally', CHANCES.mourn_ally),
+                    client, channel: message.channel, agentId, guildId,
+                    eventLine: 'قتلت المافيا صديقاً متحالفاً لك — ندّب القاتل ووعد بأخذ حقك',
+                    mentionLabel: victimId ? `<@${victimId}>` : null,
+                    runtimeSettings, agentName, session,
+                });
+                return true;
+            }
+        }
+
         // 2) نتيجة الوكيل نفسه — التعليق
         if (outcome && outcome.result) {
             const kind = outcome.kind === 'kick' ? 'kicked'
+                : outcome.kind === 'killed' ? 'killed'
                 : outcome.result === 'win' ? 'win' : 'loss';
-            const probability = kind === 'kicked' ? CHANCES.kicked
-                : kind === 'win' ? CHANCES.win : CHANCES.loss;
+            const probability = effectiveChance(session, kind,
+                kind === 'kicked' ? CHANCES.kicked
+                : kind === 'killed' ? CHANCES.killed
+                : kind === 'win' ? CHANCES.win : CHANCES.loss);
             const eventLine = kind === 'kicked' ? 'طردوك الآن من اللعبة — عبّر عن استغرابك واسأل السبب'
+                : kind === 'killed' ? 'قتلتك المافيا الليلة — تعلّق على موتك بالسخرية'
                 : kind === 'win' ? 'فزت بالجولة'
                 : 'خسرت الجولة';
             maybeSpeak({
@@ -295,11 +401,14 @@ async function observeBotMessage({ client, message, agentId, runtimeSettings, ag
 
 /** للاختبار */
 function __testHooks() {
-    return { CHANCES, CANNED, canSpeak, reserve, cleanComment, TIMING };
+    return { CHANCES, CANNED, canSpeak, reserve, cleanComment, TIMING, effectiveChance };
 }
 
 module.exports = {
     handleChatMessage,
     observeBotMessage,
+    maybeSpeak,        // 🕵️ معالجات المافيا في events.js تستعملها مباشرة (v7.16)
+    effectiveChance,
+    CHANCES,           // الاحتمالات الأساسية (الاستدعاءات تمررها عبر effectiveChance)
     __testHooks,
 };

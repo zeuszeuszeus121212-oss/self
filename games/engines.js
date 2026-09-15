@@ -32,7 +32,8 @@ const engines = [
         displayName: 'روليت',
         icon      : '🎡',
         description: 'الانضمام التلقائي للوبيات: يضغط رقماً شاغراً عشوائياً بتأخير بشري',
-        defaultSettings: { delay: 0, roundTimeout: 60 },
+        // mode: 'auto' (عشوائي — النظام الحالي) | 'ai' (الذكاء يختار من يُطرد) — v7.16
+        defaultSettings: { delay: 0, roundTimeout: 60, mode: 'auto' },
     },
     {
         id        : 'karasi',
@@ -47,6 +48,14 @@ const engines = [
         icon      : '🧠',
         description: 'يدخل لوبيات ريبلكا ويجيب أسئلة الفئة والحرف (قاموس + ذكاء اختياري)',
         defaultSettings: { delay: 0, roundTimeout: 60 },
+    },
+    {
+        id        : 'mafia',
+        displayName: 'مافيا',
+        icon      : '🕵️',
+        description: 'يلعب المافيا كاملة: يدخل اللوبي ويعرف اللاعبين، يصوّت على الطرد بأزرار الأسماء، يستجيب للرسائل السرية (اختيار ضحية المافيا/حماية الطبيب على الخاص أو المخفية)، ويتفاعل اجتماعياً (يرجى ألا يُقتل، يطلب الحماية، يندب قتلى أصدقائه، يشك في الصامتين)',
+        // mode: 'auto' (عشوائي — النظام الحالي) | 'ai' (الذكاء يقتل/يحمي/يصوّت) — v7.16
+        defaultSettings: { delay: 0, roundTimeout: 300, mode: 'auto' },
     },
 ];
 

@@ -23,6 +23,10 @@
 
 'use strict';
 
+const sessions = require('./sessions');
+const social = require('./social');
+const mafia = require('./mafia');
+
 // ════════════════════════════════════════════════════════════
 //  أدوات مشتركة (نفس مساعدات Auto)
 // ════════════════════════════════════════════════════════════
@@ -438,9 +442,12 @@ const EVENTS = [
             const live = sessions.touchSession(ctx.agentId, message.guild.id);
             if (!live) return { handled: false };
 
-            // الأزرار القابلة للعب — استبعاد انسحاب/واجهة (منقول من Auto + قائمتنا)
-            const allButtons = message.components.flatMap(row => row.components || []);
-            const playable = allButtons.filter(button => {
+            // 🎯 استهداف — الوضع الذكي (v7.16 بلاغ المالك: «وضع الذكاء الاصطناعي
+            // هو من يختار يطرد ووضع تلقائي وهو الحالي من النظام»):
+            // mode === 'ai'  → الذكاء يختار الضحية بالسياق (فشل الذكاء → عشوائي)
+            // mode === 'auto' → عشوائي بين اللاعبين المتاحين (نمط Auto كما كان)
+            const allButtons2 = message.components.flatMap(row => row.components || []);
+            const playable = allButtons2.filter(button => {
                 if (!button || button.disabled || !button.customId) return false;
                 const label = button.label || '';
                 if (label.includes('انسحب') || label.includes('طرد مرتين')) return false;
@@ -449,10 +456,23 @@ const EVENTS = [
             });
             if (playable.length === 0) return { handled: false };
 
-            // 🎯 استهداف عشوائي بين اللاعبين المتاحين (نسخة الوكيل الواحد من سلم Auto:
-            // الغرباء أولاً — بلا حسابات شقيقة في المنصة أصلاً)
-            const targetButton = playable[Math.floor(Math.random() * playable.length)];
-            const strategyLog = `⚔️ [هجوم] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`;
+            let targetButton = null;
+            let strategySource = 'random';
+            if (ctx.engineSettings?.mode === 'ai') {
+                targetButton = await mafia.decideKick({
+                    runtimeSettings: ctx.runtimeSettings,
+                    agentName: ctx.agentName,
+                    session: live,
+                    candidates: playable,
+                }).catch(() => null);
+                if (targetButton) strategySource = 'ai';
+            }
+            if (!targetButton) {
+                targetButton = playable[Math.floor(Math.random() * playable.length)];
+            }
+            const strategyLog = strategySource === 'ai'
+                ? `⚔️ [هجوم ذكي] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`
+                : `⚔️ [هجوم] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`;
 
             // 🔁 محاكاة بشرية — أرقام Auto حرفياً (800-2500ms + 10% تأخير أطول + 1% تخطي)
             if (Math.random() < HUMAN_SIM.skip) {
@@ -471,7 +491,7 @@ const EVENTS = [
                 result: 'play',
                 gameName: 'روليت',
                 message: strategyLog,
-                details: { buttonLabel: targetButton.label || null, delayMs: delay, playableCount: playable.length },
+                details: { buttonLabel: targetButton.label || null, delayMs: delay, playableCount: playable.length, source: strategySource },
             };
         },
     },
@@ -520,6 +540,377 @@ const EVENTS = [
                 message: `تم الدخول بالزر: ${targetButton.label}`,
                 details: { buttonLabel: clicked.label, delayMs: clicked.delayMs, availableCount: allButtons.length },
             };
+        },
+    },
+];
+
+// ════════════════════════════════════════════════════════════
+//  🕵️ المافيا (v7.16) — بلاغ المالك: «اريد اكون مافيا... يلعن حظوظة
+//  ان كان مواطن... يترجى ان لا يتم قتله... يقول احميني... يندب القاتل
+//  و توعد باخذ حقه... يراقب ان هذا الشخص لم يتكلم طوال الجولة فيشك فيه»
+//
+//  كل معالج: باب جلسة حية (إلا اللوبي الذي ينشئها) + كلام اجتماعي
+//  بالاحتمالات (قاعدة صمت المافيا داخل social.effectiveChance).
+// ════════════════════════════════════════════════════════════
+
+// نصوص المراحل — ليست لوبي دخول أبداً
+const MAFIA_PHASE_TEXT = [
+    'توزيع الرتب', 'تم توزيع', 'انتظار المافيا', 'انتظار الطبيب',
+    'تم قتل', 'للتحقق بين', 'اختيار شخص', 'اختار شخصا', 'اختر شخصا',
+    'لطرده', 'التصويت على', 'انتهت اللعبة', 'الفائز',
+];
+
+// رسائل التصويت — استبعاد رسالة النقاش التي تحمل «للتحقق بين»
+const VOTE_TEXT = /اختيار\s*شخص\s*لطرد|للتصويت\s*على\s*طرد|تصويت\s*على\s*طرد|اختر\s*شخصا\s*لطرد|طرد\s*من\s*اللعبة/;
+
+// منع تصويت مزدوج لنفس رسالة التصويت (تتعدّل العدّاد فيرسل messageUpdate)
+const votedMessages = new Set();
+const MAX_VOTED = 500;
+
+function rememberVoted(messageId) {
+    if (!messageId) return;
+    votedMessages.add(messageId);
+    if (votedMessages.size > MAX_VOTED) {
+        const oldest = votedMessages.values().next().value;
+        votedMessages.delete(oldest);
+    }
+}
+
+function mafiaSession(ctx, message) {
+    const session = sessions.touchSession(ctx.agentId, message.guild.id);
+    if (!session || session.engineId !== 'mafia') return null;
+    return session;
+}
+
+function collectMentions(message) {
+    try {
+        const users = message.mentions?.users;
+        if (!users) return [];
+        return [...users.values()].map(user => ({
+            id: String(user.id),
+            name: user.globalName || user.username || String(user.id),
+        }));
+    } catch (_) {
+        return [];
+    }
+}
+
+/** اسم أزرار التصويت → سجلهم لاعبين (يقرأهم الذكاء لاحقاً) */
+function registerNamePlayers(session, buttons) {
+    for (const button of buttons || []) {
+        const label = String(button.label || '').trim();
+        if (!label || label.length < 2) continue;
+        const exists = [...session.mafia.players.values()]
+            .some(p => sessions.normalizeName(p.name) === sessions.normalizeName(label));
+        if (!exists) {
+            const pseudoId = `name:${sessions.normalizeName(label)}`;
+            session.mafia.players.set(pseudoId, { name: label, talks: 0, alive: true });
+            session.players.add(pseudoId);
+        }
+    }
+}
+
+const MAFIA_EVENTS = [
+
+    // ── لوبي المافيا: «يعرف من يلعب معه بالضبط وكذلك العدد» (بلاغ المالك) ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaJoin',
+        trigger: 'messageCreate',
+        eventType: 'game_join',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const myId = client.user && client.user.id;
+            const text = [message.content, ...(message.embeds || []).map(e => [e.title, e.description].filter(Boolean).join(' '))].filter(Boolean).join(' ');
+            if (!text || !text.includes('مافيا')) return { handled: false };
+            // رسالة موجّهة للوكيل (دور/نتيجة) ليست لوبي
+            if (myId && (text.includes(`<@${myId}>`) || text.includes(`<@!${myId}>`))) return { handled: false };
+            // نصوص المراحل ليست لوبي
+            if (MAFIA_PHASE_TEXT.some(marker => text.includes(marker))) return { handled: false };
+
+            const allButtons = collectButtons(message);
+            if (allButtons.length === 0) return { handled: false };
+            const targetButton = pickJoinButton(allButtons);
+            if (!targetButton) return { handled: false };
+
+            const clicked = await clickWithHumanDelay(message, targetButton);
+            return {
+                handled: true,
+                type: 'game_join',
+                result: 'join',
+                gameName: 'مافيا',
+                message: `تم دخول لعبة المافيا بالزر: ${targetButton.label}`,
+                details: {
+                    buttonLabel: clicked.label,
+                    delayMs: clicked.delayMs,
+                    players: collectMentions(message), // يُسجلون في الجلسة من player.js بعد الإنشاء
+                },
+            };
+        },
+    },
+
+    // ── توزيع الرتب: «يقول مثلا اريد اكون مافيا او يلعن حظوظة ان كان مواطن» ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaRoles',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const text = textFromMessage(message);
+            if (!text.includes('توزيع الرتب') && !text.includes('تم توزيع') && !text.includes('ستبدأ الجولة')) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'roles');
+
+            // رد الفعل على الدور — صمت المافيا ينطبق على التمني أيضاً
+            const role = session.mafia.role;
+            const kind = role ? `role_${role}` : 'role_generic';
+            const eventLine = role === 'mafia' ? 'صار دورك مافيا وانت متحمس'
+                : role === 'citizen' ? 'صار دورك مواطن وتلعن حظك'
+                : role === 'doctor' ? 'صار دورك طبيب المافيا'
+                : role === 'detective' ? 'صار دورك محقق المافيا'
+                : 'تم توزيع الأدوار — تمنّى أن تكون مافيا';
+            social.maybeSpeak({
+                settings: ctx.settings, session, kind,
+                probability: social.effectiveChance(session, 'role_react', social.CHANCES.role_react),
+                client, channel: message.channel, agentId: ctx.agentId, guildId: message.guild.id,
+                eventLine,
+                runtimeSettings: ctx.runtimeSettings, agentName: ctx.agentName, session,
+            });
+
+            return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'توزيع الرتب — بدأت المافيا', details: { role: role || null } };
+        },
+    },
+
+    // ── ليل القتل: «🔪 جاري انتظار المافيا لاختيار شخص لقتله» → يرجى ألا يُقتل ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaNightKill',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const text = textFromMessage(message);
+            const isNight = (text.includes('انتظار المافيا') || text.includes('دور المافيا'))
+                && (text.includes('قتله') || text.includes('يقتل') || text.includes('قتل شخص'));
+            if (!isNight) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'night_kill');
+
+            // المافيا لا ترجى أثناء دورها — هي من يقتل
+            if (session.mafia.role !== 'mafia') {
+                social.maybeSpeak({
+                    settings: ctx.settings, session, kind: 'beg',
+                    probability: social.effectiveChance(session, 'beg', social.CHANCES.beg),
+                    client, channel: message.channel, agentId: ctx.agentId, guildId: message.guild.id,
+                    eventLine: 'المافيا ستختار ضحية الليلة — رجاء ألا تكون أنت الضحية',
+                    runtimeSettings: ctx.runtimeSettings, agentName: ctx.agentName, session,
+                });
+            }
+
+            return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'ليل القتل — المافيا تختار', details: {} };
+        },
+    },
+
+    // ── دور الطبيب: «💊 جاري انتظار الطبيب لاختيار شخص لحمايته» → «احميني؟» ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaNightSave',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const text = textFromMessage(message);
+            const isSave = (text.includes('انتظار الطبيب') || text.includes('دور الطبيب'))
+                && (text.includes('حمايته') || text.includes('حماية') || text.includes('يحمي'));
+            if (!isSave) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'night_save');
+
+            // الطبيب هو من يختار — لا يطلب حماية لنفسه
+            if (session.mafia.role !== 'doctor') {
+                social.maybeSpeak({
+                    settings: ctx.settings, session, kind: 'ask_protect',
+                    probability: social.effectiveChance(session, 'ask_protect', social.CHANCES.ask_protect),
+                    client, channel: message.channel, agentId: ctx.agentId, guildId: message.guild.id,
+                    eventLine: 'الطبيب سيختار من يحميه الليلة — اطلب الحماية أو اشك في لاعب',
+                    runtimeSettings: ctx.runtimeSettings, agentName: ctx.agentName, session,
+                });
+            }
+
+            return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'ليل الحماية — الطبيب يختار', details: {} };
+        },
+    },
+
+    // ── إعلان القتل: «⚰️ نجحت عملية المافيا وتم قتل <@X> وهذا الشخص كان مواطن» ──
+    // الميكانيكا فقط (تسجيل القتيل) — الندبة/التعليق في social.observeBotMessage
+    {
+        engineId: 'mafia',
+        name: 'mafiaKillAnnounce',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const text = textFromMessage(message);
+            const isKill = /تم\s*قتل/.test(text) && (text.includes('مافيا') || text.includes('نجحت'));
+            if (!isKill) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'day');
+            const match = text.match(/<@!?(\d+)>/);
+            const victimId = match ? match[1] : null;
+            if (victimId) sessions.mafiaMarkDead(ctx.agentId, message.guild.id, victimId);
+
+            return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'إعلان قتيل المافيا', details: { victimId } };
+        },
+    },
+
+    // ── نقاش النهار: «🔍 لديكم 15 ثانية للتحقق بين اللاعبين...» → رأي وشكّ ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaDiscuss',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            const text = textFromMessage(message);
+            const isDiscuss = text.includes('للتحقق بين اللاعبين')
+                || (text.includes('التحقق') && text.includes('المافيا') && text.includes('ثانية'));
+            if (!isDiscuss) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'day_discuss');
+
+            // «يراقب ان هذا الشخص لم يتكلم طوال الجولة فيشك فيه»
+            const silentPlayers = [...session.mafia.players.values()]
+                .filter(p => p.alive && (p.talks || 0) === 0)
+                .map(p => p.name);
+            const eventLine = silentPlayers.length
+                ? `نقاش النهار — هؤلاء صامتون طوال الجولة: ${silentPlayers.slice(0, 3).join('، ')} — اشك بهم واعطِ رأيك`
+                : 'نقاش النهار — شارك رأيك: من تشك أنه مافيا؟';
+            social.maybeSpeak({
+                settings: ctx.settings, session, kind: 'suspect',
+                probability: social.effectiveChance(session, 'suspect', social.CHANCES.suspect),
+                client, channel: message.channel, agentId: ctx.agentId, guildId: message.guild.id,
+                eventLine,
+                runtimeSettings: ctx.runtimeSettings, agentName: ctx.agentName, session,
+            });
+
+            return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'نقاش النهار', details: { silentPlayers: silentPlayers.length } };
+        },
+    },
+
+    // ── التصويت: «لديكم X ثانية لاختيار شخص لطرده» + أزرار أسماء اللاعبين ──
+    // «يجب على الوكيل الضغط على زر اللاعب الذي يشك انه مافيا» — وضع ذكي/تلقائي
+    {
+        engineId: 'mafia',
+        name: 'mafiaVote',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            if (!message.components || message.components.length === 0) return { handled: false };
+            const text = textFromMessage(message);
+            if (!VOTE_TEXT.test(text) || text.includes('للتحقق بين اللاعبين')) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+            rememberVoted(message.id);
+
+            sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'day_vote');
+
+            const allButtons = collectButtons(message);
+            const candidates = mafia.candidateButtons(allButtons, { agentName: ctx.agentName });
+            if (candidates.length === 0) return { handled: false };
+            registerNamePlayers(session, candidates);
+
+            // القرار: ذكي (الذكاء يختار المشتبه به) أو تلقائي (عشوائي — النظام الحالي)
+            const mode = ctx.engineSettings?.mode === 'ai' ? 'ai' : 'auto';
+            let target = null;
+            let source = 'random';
+            if (mode === 'ai') {
+                target = await mafia.decideVote({
+                    runtimeSettings: ctx.runtimeSettings,
+                    agentName: ctx.agentName,
+                    role: session.mafia.role,
+                    session,
+                    candidates,
+                });
+                if (target) source = 'ai';
+            }
+            if (!target) target = mafia.pickRandom(candidates);
+            if (!target) return { handled: false };
+
+            // تأخير بشري — قصير في الوضع الذكي لأن مهلة التصويت 15ث والذكاء يستهلك منها
+            const clicked = await mafia.humanClick(message, target, { minDelay: 900, maxDelay: 1800 }).catch(() => null);
+            if (!clicked) return { handled: false };
+
+            return {
+                handled: true,
+                type: 'game_play',
+                result: 'vote',
+                gameName: 'مافيا',
+                message: `🗳️ صُوّت على طرد: ${target.label || '؟'}`,
+                details: { target: target.label || null, source, mode },
+            };
+        },
+    },
+
+    // ── التصويت عبر تعديل الرسالة (العدّاد يتعدل) — الازدواج ممنوع بالتذكير ──
+    {
+        engineId: 'mafia',
+        name: 'mafiaVoteUpdate',
+        trigger: 'messageUpdate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            if (votedMessages.has(message.id)) return { handled: false };
+            if (!message.components || message.components.length === 0) return { handled: false };
+            const text = textFromMessage(message);
+            if (!VOTE_TEXT.test(text) || text.includes('للتحقق بين اللاعبين')) return { handled: false };
+            const session = mafiaSession(ctx, message);
+            if (!session) return { handled: false };
+
+            // نفس منطق mafiaVote — نعيد استعماله بالاستدعاء المباشر
+            const voteEvent = MAFIA_EVENTS.find(e => e.name === 'mafiaVote');
+            return voteEvent.execute(message, client, ctx);
+        },
+    },
+
+    // ── الرسائل السرية داخل القناة (مخفية ephemeral): اختيار ضحية/حماية ──
+    // رسائل الخاص تُعالج مباشرة من player.js (لا تمر هنا)
+    {
+        engineId: 'mafia',
+        name: 'mafiaSecret',
+        trigger: 'messageCreate',
+        eventType: 'game_play',
+        gameName: 'مافيا',
+        async execute(message, client, ctx) {
+            if (!message.author || !message.author.bot) return { handled: false };
+            if (message.guild && !mafia.isSecretMessage(message)) return { handled: false };
+            if (!message.guild) return { handled: false }; // الخاص مساره في player.js
+            const result = await mafia.handleSecretMessage({
+                client, message, agentId: ctx.agentId,
+                runtimeSettings: ctx.runtimeSettings,
+                settings: ctx.settings,
+                agentName: ctx.agentName,
+            });
+            return result || { handled: false };
         },
     },
 ];
@@ -591,6 +982,9 @@ function premiumJoinEvent({ engineId, gameName, keyword }) {
 EVENTS.push(premiumJoinEvent({ engineId: 'karasi', gameName: 'كراسي', keyword: 'كراسي' }));
 EVENTS.push(premiumJoinEvent({ engineId: 'replka', gameName: 'ريبلكا', keyword: 'ريبلكا' }));
 
+// 🕵️ معالجات المافيا — في النهاية حتى لا تلمس أي محرك قديم (صفر كسر)
+EVENTS.push(...MAFIA_EVENTS);
+
 function eventsForTrigger(trigger) {
     return EVENTS.filter(event => event.trigger === trigger);
 }
@@ -608,4 +1002,6 @@ module.exports = {
     REPLKA_DATA,
     mapReplkaType,
     answerFromDictionary,
+    // 🕵️ المافيا (v7.16) — لأغراض الاختبار
+    __mafiaHooks: { votedMessages, MAFIA_PHASE_TEXT, VOTE_TEXT, rememberVoted, MAFIA_EVENTS, registerNamePlayers, collectMentions },
 };

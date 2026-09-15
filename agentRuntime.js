@@ -1207,6 +1207,11 @@ client.on('messageCreate', async (message) => {
 
     // رسائل الخاص للحساب الحقيقي تُحوّل إلى قناة التحكم المحددة.
     if (!message.guild) {
+        // 🕵️ v7.16: الرسائل السرية للمافيا (اختيار ضحية/حماية) تصل على الخاص —
+        // نمررها على محرك الألعاب أولاً (لا شيء يعمل إلا بجلسة مافيا حية من
+        // نفس البوت). ملاحظة: لا نبتلع التحويل أبداً — المالك يرى الدور السري.
+        await gamesPlayer.handleMessage({ client, message, agentId, runtimeSettings })
+            .catch((e) => { console.error('[GamePlayer] DM handleMessage:', e?.message); return false; });
         if (tokenType === 'user') {
             for (const guild of client.guilds.cache.values()) {
                 const settings = await getAccountSettings(agentId, guild.id);
