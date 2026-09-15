@@ -118,7 +118,15 @@ async function clickWithHumanDelay(message, button, minDelay = 1000, maxDelay = 
     // 🎲 التمويه البشري — نفس أرقام Auto: عشوائي بين 1000 و 2000ms
     const delayMs = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
     await new Promise(resolve => setTimeout(resolve, delayMs));
-    await message.clickButton(button.customId);
+    try {
+        await message.clickButton(button.customId);
+    } catch (error) {
+        // 🐞 v7.20 (بلاغ المالك: «وليت بعض الأحيان دخل»): فشل نقرة واحدة كان
+        // يُسقط المعالج كله بلا انضمام ولا إعادة محاولة — الزر قد يتأخر تحديثه
+        // لحظة. محاولة ثانية بعد 700ms — وإن فشلت ينتشر الخطأ ليُسجل مرئياً.
+        await new Promise(resolve => setTimeout(resolve, 700));
+        await message.clickButton(button.customId);
+    }
     return { label: button.label || null, delayMs };
 }
 
@@ -432,7 +440,11 @@ const EVENTS = [
             const myId = client.user && client.user.id;
             if (!myId) return { handled: false };
             // الدور الحقيقي: الرسالة موجّهة للوكيل بذاتها (منشن في المحتوى)
-            if (!message.content.includes(`<@${myId}>`) && !message.content.includes(`<@!${myId}>`)) {
+            // 🐞 v7.20 (بلاغ المالك: «لاه لا يلعب لا يستطيع الطرد اصلا»): الفحص كان
+            // على message.content فقط — منشن داخل الإيمبد لا يُرى أبداً فلا يلعب
+            // حتى عندما ينضم! الآن النص الكامل (محتوى + كل أجزاء الإيمبد).
+            const fullTurnText = textFromMessage(message);
+            if (!fullTurnText.includes(`<@${myId}>`) && !fullTurnText.includes(`<@!${myId}>`)) {
                 return { handled: false };
             }
 
@@ -726,15 +738,30 @@ const MAFIA_EVENTS = [
             if (!text || !text.includes('مافيا')) return { handled: false };
             // رسالة موجّهة للوكيل (دور/نتيجة) ليست لوبي
             if (myId && (text.includes(`<@${myId}>`) || text.includes(`<@!${myId}>`))) return { handled: false };
-            // نصوص المراحل ليست لوبي
-            if (MAFIA_PHASE_TEXT.some(marker => text.includes(marker))) return { handled: false };
-            // 🗳️ v7.19: رسالة التصويت قد تحتوي «مافيا» («صوتوا على من تظنونه مافيا»)
-            // — كانت تُفهم لوبياً ويضغط زر تصويت عشوائياً!
-            if (looksLikeVote(text)) return { handled: false };
+
+            // 🧼 v7.20: حارس الجلسة الحية حُذف — المُميّز الهيكلي (زر الانضمام
+            // الصريح) يكفي وحده: اللوبي له زر انضمام فيُقبل حتى لو سبقتنا جولة
+            // قديمة (تُستبدل)، ورسائل التصويت بلا زر انضمام فلا تُفهم لوبياً أبداً.
+
+            // نصوص المراحل ليست لوبي — 🩺 v7.20: إلا إذا كان بيسمها زر انضمام صريح
+            // (الإشارة الهيكلية تتقدم على اللفظية — زر «انضمام» يعني لوبي دائماً)
 
             const allButtons = collectButtons(message);
             if (allButtons.length === 0) return { handled: false };
-            const targetButton = pickJoinButton(allButtons);
+            const explicitJoinBtn = allButtons.find(isJoinLabeled);
+
+            if (!explicitJoinBtn) {
+                if (MAFIA_PHASE_TEXT.some(marker => text.includes(marker))) return { handled: false };
+                // 🗳️ v7.19: رسالة التصويت قد تحتوي «مافيا» («صوتوا على من تظنونه مافيا»)
+                // — كانت تُفهم لوبياً ويضغط زر تصويت عشوائياً! (تبقى مرفوضة بلا زر انضمام)
+                if (looksLikeVote(text)) return { handled: false };
+            }
+            // 🐞 v7.20 (بلاغ المالك الحرفي: «بعد تعديلك الاخير أصبح لا يدخل اي لعبة
+            // اصلا... اي رسالة لوبي من الألعاب لا يدخلها»): حارس v7.19 كان يرفض
+            // اللوبي نفسه — نص قواعد اللعبة في رسالة اللوبي يذكر «التصويت/الطرد»
+            // فتُصنّف اللوبي تصويتاً ولا انضمام أبداً! زر انضمام صريح = لوبي مهما
+            // ذُكر في النص — ورسالة التصويت بلا زر انضمام تبقى مرفوضة.
+            const targetButton = explicitJoinBtn || pickJoinButton(allButtons);
             if (!targetButton) return { handled: false };
 
             const clicked = await clickWithHumanDelay(message, targetButton);

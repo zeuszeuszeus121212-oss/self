@@ -215,8 +215,21 @@ function clearLocks(engineId) {
     return cleared;
 }
 
+/**
+ * 🩺 v7.20 — سياسة افتراضية آمنة (fail-open مرئي):
+ * كان player.js يستدعي getPolicy() داخل try المعالج — إذا تعطلت القاعدة
+ * كان الخطأ يُبتلع فيُتخطى **كل** معالجات **كل** الألعاب بصمت تام
+ * (بلاغ المالك الحرفي: «أصبح لا يدخل اي لعبة اصلا»). الآن عند تعطل
+ * المتجر نُعيد سياسة متسامحة (كل الفلاتر مفتوحة — نفس الافتراضي)
+ * بدل حجب اللعب كله، والتشخيص يُعلن التعطل مرئياً.
+ */
+function defaultPolicy() {
+    return normalize({ key: DEFAULT_KEY, updatedAt: new Date() });
+}
+
 module.exports = {
     getPolicy,
+    defaultPolicy,
     setOverlapLock,
     setAllowedServers,
     setAllowedBots,

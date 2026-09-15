@@ -239,6 +239,64 @@ async function answerWithAi(runtimeSettings, { category, letter }) {
 //  كشف نتيجة الحساب (فوز/خسارة) — المنقول من engineRuntime outcome
 // ════════════════════════════════════════════════════════════
 
+// 🩺 v7.20 — التشخيص المرئي للرفض الصامت (بلاغ المالك: «اي رسالة لوبي من الألعاب
+// لا يدخلها» — وكان لا أحد يعرف لماذا!). كل بوابات الرفض كانت صامتة كلياً؛
+// الآن: لوبي ظاهر (كلمة لعبة معروفة + أزرار + لا جلسة حية) ولم ينضم أي معالج
+// → سبب الرفض الحقيقي يُسجل في سجل الأحداث مرئياً — مرة كل 90ث لكل محرك.
+const LOBBY_DIAG_KEYWORDS = {
+    mafia   : ['مافيا'],
+    roulette: ['روليت', 'العجلة'],
+    karasi  : ['كراسي'],
+    replka  : ['ريبلكا'],
+};
+const SKIP_DIAG_MS = 90_000;
+const skipDiagLast = new Map(); // `${agentId}:${guildId}:${engineId}` → ts
+
+async function diagnoseUnclaimedLobby({ message, settings, agentId, guildId }) {
+    if (!message?.author?.bot || !settings?.enabled) return;
+    if (sessions.getSession(agentId, guildId)) return; // داخل جلسة — مراحلها طبيعية لا تُشخّص
+    const allButtons = (message.components || [])
+        .flatMap(row => (row && row.components) || [])
+        .filter(button => button && button.customId && !button.disabled);
+    if (allButtons.length === 0) return;
+    const fullText = eventsMod.textFromMessage(message);
+    if (!fullText) return;
+
+    for (const [engineId, keywords] of Object.entries(LOBBY_DIAG_KEYWORDS)) {
+        if (!settings.engines?.[engineId]?.enabled) continue; // المحرك معطل بقصد المالك
+        if (!keywords.some(keyword => fullText.includes(keyword))) continue;
+
+        const key = `${String(agentId)}:${String(guildId)}:${engineId}`;
+        const now = Date.now();
+        if (now - (skipDiagLast.get(key) || 0) < SKIP_DIAG_MS) return;
+        skipDiagLast.set(key, now);
+
+        let reason = null;
+        let policyDoc = null;
+        try { policyDoc = await policy.getPolicy(); } catch (_) { policyDoc = null; }
+        if (!policyDoc) {
+            reason = 'سياسة الألعاب غير متاحة (المتجر معطل) — كان هذا يمنع كل الألعاب بصمت، صار fail-open';
+        } else if (!policy.isBotAllowed(policyDoc, engineId, message.author.id)) {
+            reason = `فلتر البوتات يمنع بوت اللعبة (${message.author.id})`;
+        } else if (!policy.isServerAllowed(policyDoc, null, engineId, guildId)) {
+            reason = 'فلتر السيرفرات يمنع هذا السيرفر';
+        } else {
+            const held = policy.getLocks().find(lock => lock.engineId === engineId
+                && String(lock.serverId) === String(guildId) && lock.agentId !== String(agentId));
+            if (held) reason = `قفل تداخل محتجز من وكيل آخر (${held.agentName || held.agentId})`;
+        }
+        if (!reason) {
+            const labels = allButtons.slice(0, 6).map(button => `[${button.label || 'بدون اسم'}]`).join(' ');
+            reason = `لم يتطابق أي معالج مع الرسالة — الأزرار: ${labels}`;
+        }
+
+        const engine = engines.getEngine(engineId);
+        await store.pushRecentEvent(agentId, { kind: 'skip_diag', text: `🩺 لوبي ${engine?.displayName || engineId} ظاهر ولم ننضم — السبب: ${reason}` });
+        await store.logGameEvent(agentId, guildId, { type: 'skip_diag', engine: engineId, reason, message_id: message.id });
+        return;
+    }
+}
+
 function playerIdentifiers(client) {
     const id = client?.user?.id;
     return [id ? `<@${id}>` : null, id ? `<@!${id}>` : null, id ? String(id) : null]
@@ -538,7 +596,9 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                 if (event.premium && !engineSettings.premium_join) continue;
 
                 // بوابة السياسة: البوت مسموح لهذا المحرك؟
-                const policyDoc = await policy.getPolicy();
+                // 🩺 v7.20: كان الرمي هنا يبتلع في catch المعالج فيتخطى كل الألعاب
+                // بصمت عند تعطل المتجر — الآن fail-open بسياسة افتراضية متسامحة
+                const policyDoc = await policy.getPolicy().catch(() => policy.defaultPolicy());
                 if (!policy.isBotAllowed(policyDoc, event.engineId, message.author.id)) continue;
                 // بوابة السياسة: السيرفر مسموح؟
                 if (!policy.isServerAllowed(policyDoc, null, event.engineId, message.guild.id)) continue;
@@ -665,6 +725,22 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
             });
         } catch (_) {}
 
+        // 🧼 v7.20: نهاية الجولة الصريحة — أغلق الجلسة المعلقة حتى لا يبقى وعي قديم
+        // يمنع لوبي الجولة التالية (كانت الجلسة تعيش 45 دقيقة بعد جولة انتهت بلا
+        // نتيجة مكتشفة). ننفذها بعد كل شيء حتى لا نزعج سياق النتيجة/التعليق.
+        try {
+            const endText = eventsMod.textFromMessage(message);
+            if (message.author.bot && /انتهت اللعبة|انتهت الجولة/.test(endText)) {
+                const liveAtEnd = sessions.getSession(agentId, guildId);
+                if (liveAtEnd && String(liveAtEnd.botId || '') === String(message.author.id)) {
+                    sessions.endSession(agentId, guildId);
+                }
+            }
+        } catch (_) {}
+
+        // 🩺 التشخيص المرئي — لوبي ظاهر ولم ننضم (كان صامتاً كلياً)
+        try { await diagnoseUnclaimedLobby({ message, settings, agentId, guildId }); } catch (_) {}
+
         return handledAny && settings.suppress_ai === true;
     } catch (_) {
         return false; // أي خطأ: الرسالة تكمل مسارها الطبيعي — لا كسر أبداً
@@ -713,7 +789,8 @@ async function handleMessageUpdate({ client, message, agentId, runtimeSettings }
                 const engineSettings = settings.engines?.[event.engineId];
                 if (!engineSettings?.enabled) continue;
 
-                const policyDoc = await policy.getPolicy();
+                // 🩺 v7.20: fail-open بدل الحجب الصامت (نفس جذر messageCreate)
+                const policyDoc = await policy.getPolicy().catch(() => policy.defaultPolicy());
                 if (!policy.isBotAllowed(policyDoc, event.engineId, message.author.id)) continue;
                 if (!policy.isServerAllowed(policyDoc, null, event.engineId, message.guild.id)) continue;
 

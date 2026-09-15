@@ -16,7 +16,10 @@
  *   - المنشن المباشر @هو لا يُلتقط هنا — مسار المحادثة الرئيسي يتكفل
  *     به كما اليوم (بلا ردود مزدوجة أبداً)
  *   - كل شيء fire-and-forget: فشل الذكاء أو الإرسال لا يمس أي مسار
- *   - بلا ذكاء: جمل احتياطية عربية جاهزة (نفس فلسفة قاموس ريبلكا)
+ *   - 🚫 v7.20 (بلاغ المالك: «توجد تعليقات وهمية عند اللعب... انا أردت
+ *     الذكاء الاصطناعي نفسه لكنك عملت تعليقات وهمية؟ احذفهم!»):
+ *     حُذفت كل الجمل الجاهزة نهائياً — فشل الذكاء = صمت تام + تبليغ مرئي.
+ *     لا كلام مزيّف أبداً.
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -78,107 +81,9 @@ function notifyAiFail(agentId, where, reason) {
 // ⏱️ التأخير البشري قبل الكلام — قابل للضبط من الاختبارات فقط
 const TIMING = { minDelay: 600, maxDelay: 1500 };
 
-// 💬 جمل احتياطية — عندما يفشل الذكاء (أو بلا مزود)
-const CANNED = {
-    kicked: [
-        'ليش طردتوني أنا 😭',
-        'إيه هالظلم والا كيف',
-        'طيب خلاص، الجاية أنا أول من يطردكم',
-        'أول مرة ألعب معكم وأطلع مظلوم',
-    ],
-    killed: [
-        'قتلتموني والمجلس كله شاهد 😭',
-        'أنا قلت لكم مافيا فينا، ما سمعتم 😑',
-        'روحوا ادفنوني بس الجاية القصة تنقلب',
-    ],
-    win: [
-        'أخيراً 🏆',
-        'سهلة هذي اللعبة والله',
-        'الجمهور كان حاضر 😎',
-    ],
-    loss: [
-        'المرة الجاية أحدهم',
-        'حظ أوفر 😅',
-        'قربت من الفوز بس',
-    ],
-    friend_kicked: [
-        'ههههه لا يهمك، الجاية الثأر لك',
-        'أنجزمت عليه والله 😂',
-        'اجتمعوا على واحد بس 😂',
-    ],
-    mourn_ally: [
-        'دمه عليكم يا مافيا… راح آخذ حقي 🩸',
-        'قتلتم صاحبي؟ الراحة راح تدفعون ثمنها',
-        'الله يرحمه… والمافيا راح تعرف مين أنا',
-    ],
-    name_drop: [
-        'سجلت اسمي؟ 😄',
-        'أنا مشغول ألعب، وش عندكم؟',
-        'قلتوا شيء عني؟',
-        'أنا موجود لا تشيلون هم',
-    ],
-    // 🕵️ أدوار المافيا — رد الفعل على توزيع الرتب
-    role_mafia: [
-        'مافيا؟ الليلة فيها دم 🔪',
-        'أخيراً مافيا… خلكوا حذرين الليلة 😈',
-        'أنا مافيا، أحد ينتبه؟ هههه',
-    ],
-    role_doctor: [
-        'دكتور الليلة 💊 مين يستحق الحماية؟',
-        'طبيب… قلبي مع المواطنين الليلة',
-    ],
-    role_detective: [
-        'محقق؟ بكشفكم كلكم 🔍',
-        'عيني عليكم من الليلة، يا مافيا',
-    ],
-    role_citizen: [
-        'مواطن مرة ثانية؟ حظي زفت 😭',
-        'اللعبة هذي تعرف إنني مواطن دايماً',
-        'أبغى أصير مافيا، ليش دايماً مواطن!',
-    ],
-    role_generic: [
-        'أبغى مافيا الليلة، اللي يوزع الرتب يرحمي 🙏',
-        'توزيع الأدوار… يا رب مافيا',
-        'خلّيني مافيا هالمرة وأنا أضمن اللعبة',
-    ],
-    // 🌙 الليل
-    beg: [
-        'أرجوكم لا تقتلوني، أنا بريء 😭',
-        'يا مافيا رحمكم الله، خذوا غيري',
-        'أنا والله مو فاهم ليش أنا، لا تقتلوني 🥲',
-        'الله لا يقتلني الليلة، عندي أصدقاء أحبهم',
-    ],
-    // 🛰️ اللوبي (v7.18)
-    lobby_react: [
-        'حلو، كنت بالانتظار 😎',
-        'جاهزين؟ أنا معكم',
-        'دخلت، لا تطردوني أول واحد 😅',
-        'هذي الجولة لي، انتبهوا',
-    ],
-    // 🗣️ التصويت (v7.19)
-    vote_announce: [
-        'صوتي راح على اللي ساكت من أول الجولة',
-        'قررت، نصوت عليه — حظاً موفقاً 😅',
-        'أنا أشكه من زمان، صوتي عليه',
-        'يالله نصوت، خلونا نخلص الجولة',
-    ],
-    ask_protect: [
-        'دكتور احميني والله محتاجك 💊',
-        'يا طبيب لا تنساني الليلة، احميني',
-        'أنا وثيقك يا دكتور، احميني ولا تخيّني',
-        'الطبيب احميني… حسيته أهذّر عليّ 😅',
-    ],
-    suspect: [
-        'أشك الصامتين… المافيا ما تتكلم 😒',
-        'اللي ساكت من أول الجولة، وش سرّك؟',
-        'حسيته قاعد يسمّع ويطلع مافيا، أخاف منه',
-        'رأيي: راقبوا اللي ما قال كلمة، أنا أشكه',
-    ],
-};
-
-function pick(list) {
-    return list[Math.floor(Math.random() * list.length)] || null;
-}
+// ═══════════════════════════════════════════════════════════
+//  بوابة موحدة — كل شيء يمر من هنا
+// ═══════════════════════════════════════════════════════════
 
 function chance(p) {
     return Math.random() < p;
@@ -262,7 +167,9 @@ function reserve(session, { userId = null } = {}) {
 }
 
 // ════════════════════════════════════════════════════════════
-//  توليد الكلام — ذكاء أولاً ثم الجمل الجاهزة
+//  توليد الكلام — 🚫 v7.20: الذكاء فقط. لا جمل جاهزة إطلاقاً
+//  (بلاغ المالك: «انا أردت الذكاء الاصطناعي نفسه... احذفهم!»)
+//  فشل الذكاء → صمت تام + تبليغ مرئي للمالك (notifyAiFail)
 // ════════════════════════════════════════════════════════════
 
 function cleanComment(raw) {
@@ -279,11 +186,11 @@ function cleanComment(raw) {
     return clean;
 }
 
-async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
+async function aiComment(runtimeSettings, { agentName, eventLine, session, agentId = null }) {
     try {
         const providerObj = getProviderOrFallback(runtimeSettings?.provider);
         if (!providerObj || typeof providerObj.chat !== 'function') {
-            notifyAiFail(runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', 'لا مزود متاح');
+            notifyAiFail(agentId || runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', 'لا مزود متاح');
             return null;
         }
         const personality = String(runtimeSettings?.personality || '').trim().slice(0, 300);
@@ -301,7 +208,7 @@ async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
         return cleanComment(result && (result.fullText || result.reply || result.text));
     } catch (error) {
         // 🧠 v7.17: أي فشل → الجمل الجاهزة، لكن الفشل نفسه يصبح مرئياً للمالك
-        notifyAiFail(runtimeSettings?.agentId, 'كلام اجتماعي', error?.message || String(error));
+        notifyAiFail(agentId || runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', error?.message || String(error));
         return null;
     }
 }
@@ -309,12 +216,13 @@ async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
 /** الإرسال الفعلي — fire-and-forget بلا أي تأثير على خط الأنابيب
  *  🛰️ v7.18: replyToMessageId — يرد على رسالة اللوبي نفسها لا رسالة جديدة */
 async function speak({ client, channel, agentId, guildId, kind, eventLine, runtimeSettings, agentName, session, mentionLabel = null, replyToMessageId = null }) {
-    let text = await aiComment(runtimeSettings, {
+    // 🚫 v7.20: الذكاء فقط — فشله صمت (لا تعليقات وهمية بعد اليوم)
+    const text = await aiComment(runtimeSettings, {
         agentName,
         eventLine: mentionLabel ? `${eventLine} (${mentionLabel})` : eventLine,
         session,
+        agentId,
     });
-    if (!text) text = pick(CANNED[kind] || CANNED.loss);
     if (!text) return false;
     // تأخير بشري صغير قبل الكلام — لا ردود خاطفة آلية
     await new Promise(r => setTimeout(r, TIMING.minDelay + Math.floor(Math.random() * (TIMING.maxDelay - TIMING.minDelay))));
@@ -509,7 +417,7 @@ async function observeBotMessage({ client, message, agentId, runtimeSettings, ag
 
 /** للاختبار */
 function __testHooks() {
-    return { CHANCES, CANNED, canSpeak, reserve, cleanComment, TIMING, effectiveChance };
+    return { CHANCES, canSpeak, reserve, cleanComment, TIMING, effectiveChance };
 }
 
 module.exports = {
