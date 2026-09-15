@@ -427,7 +427,25 @@ async function handleGamesInteraction(interaction, manager) {
     try {
         // ── الأمر الأساسي ──
         if (isCommand) {
-            await interaction.deferReply().catch(() => {});
+            // 🐞 v7.14.1: كان deferReply ثم return مباشرة — اللوحة تُبنى ولا تُرسل أبداً
+            // (الأمر يظل «يحمل» إلى الأبد كما أبلغ المالك). الآن: تأجيل فوري (حماية مهلة
+            // ديسكورد 3 ثوان) ثم إرسال صفحة اختيار الوكيل — نفس نمط /الرصد المجرّب.
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.deferReply().catch(() => {});
+            }
+            try {
+                const payload = await renderAgentSelect(manager);
+                await interaction.editReply(payload).catch(() => {});
+            } catch (renderError) {
+                console.error('[Games Panel] فشل بناء صفحة الألعاب:', renderError);
+                const payload = ui.v2Payload(ui.container({
+                    accent: ui.ACCENTS.danger,
+                    title: '🎮 خطأ في لوحة الألعاب',
+                    body: `\`${renderError?.message || String(renderError)}\``,
+                    rows: [backHomeRow()],
+                }));
+                await interaction.editReply(payload).catch(() => {});
+            }
             return true;
         }
 

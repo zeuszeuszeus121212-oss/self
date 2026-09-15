@@ -18,6 +18,8 @@
  *  8) إعدادات (وكيل×سيرفر) معزولة تماماً + التفعيل حي بلا إعادة تشغيل.
  *  9) كتم الذكاء: افتراضياً الرسالة تكمل مسارها (false) — وفعّاله يُبتلع.
  * 10) صفحات اللوحة V2 سليمة (بلا رميات، حدود الديسكورد محترمة).
+ * 11) انحدار v7.14.1: أمر /الألعاب يرسل اللوحة فعلاً بعد التأجيل — لا تعليق
+ *     تحميل أبداً (حتى عند فشل القاعدة: لوحة خطأ بدل الصمت).
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -407,13 +409,65 @@ async function run() {
         assert.ok(policyPage, 'صفحة السياسة بُنيت بلا انهيار (بلا DB — قيم افتراضية)');
     }
 
+    // ── 16) انحدار v7.14.1: أمر /الألعاب يرسل اللوحة فعلاً — لا تعليق تحميل أبداً ──
+    // (الخطأ الأصلي: deferReply ثم return بلا إرسال — الأمر يظل «يحمل» إلى الأبد)
+    {
+        const panel = require('../games/panel');
+        const fakeManager = { runtimes: new Map() };
+        const cfgMod = require.cache[cfgPath].exports;
+
+        const makeCommandInteraction = (sink) => ({
+            isChatInputCommand: () => true,
+            isModalSubmit: () => false,
+            isStringSelectMenu: () => false,
+            isButton: () => false,
+            isChannelSelectMenu: () => false,
+            commandName: 'الألعاب',
+            customId: null,
+            replied: false,
+            deferred: false,
+            deferReply: async () => { sink.defer += 1; },
+            editReply: async (payload) => { sink.edits += 1; sink.payload = payload; },
+            reply: async (payload) => { sink.replies += 1; sink.payload = payload; },
+        });
+
+        // الحالة السليمة: وكلاء موجودون → اللوحة تُرسل (تأجيل + تعديل بقائمة اختيار الوكيل)
+        cfgMod.agents_col = {
+            find: () => ({ sort: () => ({ limit: () => ({ toArray: async () => ([
+                { _id: AGENT_A, name: 'وكيل الحساب', token_type: 'user', status: 'running' },
+            ]) }) }) }),
+        };
+        const sink1 = { defer: 0, edits: 0, replies: 0, payload: null };
+        const handled1 = await panel.handleGamesInteraction(makeCommandInteraction(sink1), fakeManager);
+        assert.strictEqual(handled1, true, 'الأمر يعرف نفسه ويقطع التوجيه');
+        assert.strictEqual(sink1.defer, 1, 'تأجيل فوري (حماية مهلة ديسكورد 3 ثوان)');
+        assert.strictEqual(sink1.edits, 1, 'اللوحة أُرسلت فعلاً بعد التأجيل — لا تعليق تحميل');
+        assert.ok(sink1.payload, 'الحمولة موجودة');
+        assert.strictEqual(sink1.payload.flags, 32768, 'علم Components V2 حاضر (1<<15)');
+        assert.ok(Array.isArray(sink1.payload.components) && sink1.payload.components.length > 0, 'مكونات V2 مُرسلة');
+        assert.ok(JSON.stringify(sink1.payload).includes('agent_select'), 'الصفحة الأولى (اختيار الوكيل) هي ما وصل للمالك');
+
+        // حالة الفشل: قاعدة البيانات ترمي → لوحة خطأ حمراء تُرسل بدل التعليق
+        cfgMod.agents_col = { find: () => { throw new Error('DB down'); } };
+        const sink2 = { defer: 0, edits: 0, replies: 0, payload: null };
+        await panel.handleGamesInteraction(makeCommandInteraction(sink2), fakeManager);
+        assert.strictEqual(sink2.edits, 1, 'حتى عند فشل القاعدة: لوحة خطأ تُرسل — لا تحميل أبدي');
+        assert.ok(String(sink2.payload && JSON.stringify(sink2.payload)).includes('DB down'), 'رسالة الخطأ ظاهرة للمالك');
+
+        // الأمر الغريب: ليس لنا → يُترك للوحة المدير (لا تدخل ولا اعتراض)
+        const stranger = makeCommandInteraction({ defer: 0, edits: 0, replies: 0, payload: null });
+        stranger.commandName = 'رصد';
+        const handled3 = await panel.handleGamesInteraction(stranger, fakeManager);
+        assert.strictEqual(handled3, false, 'أوامر غيرنا تمر للوحة المدير كما هي');
+    }
+
     // ── تنظيف ──
     player.agentStop(AGENT_A);
     player.agentStop(AGENT_B);
     overrides.clear();
     policy.clearLocks();
 
-    console.log('✅ games_player.test.js — كل الفحوصات مرت (15 مجموعة)');
+    console.log('✅ games_player.test.js — كل الفحوصات مرت (16 مجموعة)');
 }
 
 run().catch((error) => {
