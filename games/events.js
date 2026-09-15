@@ -645,6 +645,9 @@ const MAFIA_EVENTS = [
                     buttonLabel: clicked.label,
                     delayMs: clicked.delayMs,
                     players: collectMentions(message), // يُسجلون في الجلسة من player.js بعد الإنشاء
+                    // 🧠 v7.17: «رسالة اللوبي نفسها يتم إرسالها للوكيل» — النص يُخزّن
+                    // في الجلسة ويقرؤه الذكاء في كل قرار وكلام وسياق محادثة
+                    lobbyText: text.slice(0, 400),
                 },
             };
         },
@@ -665,6 +668,8 @@ const MAFIA_EVENTS = [
             if (!session) return { handled: false };
 
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'roles');
+            // 🧠 الوعي (v7.17)
+            sessions.pushEvent(ctx.agentId, message.guild.id, 'بدأ توزيع الرتب — الجولة الأولى قادمة');
 
             // رد الفعل على الدور — صمت المافيا ينطبق على التمني أيضاً
             const role = session.mafia.role;
@@ -703,6 +708,8 @@ const MAFIA_EVENTS = [
             if (!session) return { handled: false };
 
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'night_kill');
+            // 🧠 الوعي (v7.17)
+            sessions.pushEvent(ctx.agentId, message.guild.id, 'الليل: المافيا ستختار ضحية');
 
             // المافيا لا ترجى أثناء دورها — هي من يقتل
             if (session.mafia.role !== 'mafia') {
@@ -736,6 +743,8 @@ const MAFIA_EVENTS = [
             if (!session) return { handled: false };
 
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'night_save');
+            // 🧠 الوعي (v7.17)
+            sessions.pushEvent(ctx.agentId, message.guild.id, 'الليل: الطبيب سيختار من يحميه');
 
             // الطبيب هو من يختار — لا يطلب حماية لنفسه
             if (session.mafia.role !== 'doctor') {
@@ -772,6 +781,10 @@ const MAFIA_EVENTS = [
             const match = text.match(/<@!?(\d+)>/);
             const victimId = match ? match[1] : null;
             if (victimId) sessions.mafiaMarkDead(ctx.agentId, message.guild.id, victimId);
+            // 🧠 الوعي (v7.17) — باسم القتيل إن عرفناه
+            const victimPlayer = victimId ? session.mafia.players.get(victimId) : null;
+            sessions.pushEvent(ctx.agentId, message.guild.id,
+                `قتلت المافيا ${victimPlayer ? `«${victimPlayer.name}»` : (victimId ? `لاعباً (${victimId})` : 'لاعباً')}`);
 
             return { handled: true, silent: true, result: 'phase', gameName: 'مافيا', type: 'game_play', message: 'إعلان قتيل المافيا', details: { victimId } };
         },
@@ -794,6 +807,8 @@ const MAFIA_EVENTS = [
             if (!session) return { handled: false };
 
             sessions.mafiaSetPhase(ctx.agentId, message.guild.id, 'day_discuss');
+            // 🧠 الوعي (v7.17)
+            sessions.pushEvent(ctx.agentId, message.guild.id, 'نقاش النهار: بدأ التحقق والشك بين اللاعبين');
 
             // «يراقب ان هذا الشخص لم يتكلم طوال الجولة فيشك فيه»
             const silentPlayers = [...session.mafia.players.values()]
@@ -858,6 +873,9 @@ const MAFIA_EVENTS = [
             // تأخير بشري — قصير في الوضع الذكي لأن مهلة التصويت 15ث والذكاء يستهلك منها
             const clicked = await mafia.humanClick(message, target, { minDelay: 900, maxDelay: 1800 }).catch(() => null);
             if (!clicked) return { handled: false };
+
+            // 🧠 الوعي (v7.17) — صوّتنا على أحد
+            sessions.pushEvent(ctx.agentId, message.guild.id, `صوّت على طرد «${target.label || '؟'}» (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`);
 
             return {
                 handled: true,

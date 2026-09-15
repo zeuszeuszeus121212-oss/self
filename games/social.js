@@ -51,6 +51,21 @@ const USER_REPLY_COOLDOWN = 45_000;  // لا يزعج نفس الشخص كل ث�
 const AI_TIMEOUT_MS = 8000;
 const MAX_LEN = 140;
 
+// 🧠 تبليغ فشل الذكاء — مرة كل 3 دقائق لكل وكيل (بلاغ المالك v7.17:
+// «الاثنان لا يتفاعلون» — كان السقوط للجمل الجاهزة/العشوائي صامتاً كلياً)
+const AI_FAIL_NOTIFY_MS = 3 * 60_000;
+const aiFailLast = new Map(); // agentId → ts
+function notifyAiFail(agentId, where, reason) {
+    try {
+        const now = Date.now();
+        const last = aiFailLast.get(String(agentId)) || 0;
+        if (now - last < AI_FAIL_NOTIFY_MS) return;
+        aiFailLast.set(String(agentId), now);
+        console.warn(`[Games AI] فشل استشارة الذكاء (${where}): ${reason}`);
+        store.pushRecentEvent(String(agentId), { kind: 'ai', text: `🧠 استشارة الذكاء فشلت (${where}) — السبب: ${String(reason || 'غير معروف').slice(0, 80)} — سقط للحل الاحتياطي` }).catch(() => {});
+    } catch (_) {}
+}
+
 // ⏱️ التأخير البشري قبل الكلام — قابل للضبط من الاختبارات فقط
 const TIMING = { minDelay: 600, maxDelay: 1500 };
 
@@ -169,6 +184,20 @@ function socialEnabled(settings) {
     return Boolean(settings && settings.enabled && settings.social && settings.social.enabled);
 }
 
+/**
+ * 🧠 بوابة الكلام الحقيقية (v7.17 — بلاغ المالك: «ووضع التلقائي او الاجتماعي
+ * لا يوجد اختلاف بيهم — الاثنان لا يتفاعلون»): الوضع الذكي (mode === 'ai')
+ * يعني أن الوكيل يلعب بوعي — الكلام جزء من لعبه حتى لو كان زر التفاعل
+ * الاجتماعي معطلاً. التلقائي يبقى كما هو: صمت إلا إذا فُعّل زر 🫧.
+ */
+function speechAllowed(settings, session) {
+    if (!settings || !settings.enabled) return false;
+    if (settings.social && settings.social.enabled) return true;
+    const engineId = session && session.engineId;
+    if (engineId && settings.engines && settings.engines[engineId] && settings.engines[engineId].mode === 'ai') return true;
+    return false;
+}
+
 function canSpeak(session, { userId = null } = {}) {
     if (!session) return false;
     if (session.socialCount >= SESSION_MAX_SOCIAL) return false;
@@ -207,7 +236,10 @@ function cleanComment(raw) {
 async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
     try {
         const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') return null;
+        if (!providerObj || typeof providerObj.chat !== 'function') {
+            notifyAiFail(runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', 'لا مزود متاح');
+            return null;
+        }
         const personality = String(runtimeSettings?.personality || '').trim().slice(0, 300);
         const prompt =
             `أنت تلعب لعبة ديسكورد باسم «${agentName}» داخل قناة عربية.\n` +
@@ -217,12 +249,14 @@ async function aiComment(runtimeSettings, { agentName, eventLine, session }) {
             'اكتب سطراً واحداً قصيراً جداً (3 إلى 12 كلمة) تقوله في الشات الآن: عامي عربي طبيعي يناسب الموقف.\n' +
             'قواعد صارمة: سطر واحد فقط، بلا markdown، بلا قوائم، بلا ذكر أنك بوت أو ذكاء اصطناعي.';
         const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig }),
+            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
             new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
         ]);
         return cleanComment(result && (result.fullText || result.reply || result.text));
-    } catch (_) {
-        return null; // أي فشل → الجمل الجاهزة (دائماً)
+    } catch (error) {
+        // 🧠 v7.17: أي فشل → الجمل الجاهزة، لكن الفشل نفسه يصبح مرئياً للمالك
+        notifyAiFail(runtimeSettings?.agentId, 'كلام اجتماعي', error?.message || String(error));
+        return null;
     }
 }
 
@@ -252,7 +286,7 @@ async function speak({ client, channel, agentId, guildId, kind, eventLine, runti
  *  probability تُمرَّر عبر effectiveChance من الاستدعاءات — هنا لا تلمس */
 function maybeSpeak(ctx) {
     const { settings, session, kind, userId = null, probability } = ctx;
-    if (!socialEnabled(settings)) return false;
+    if (!speechAllowed(settings, session)) return false;
     if (!canSpeak(session, { userId })) return false;
     if (!chance(probability)) return false;
     reserve(session, { userId });
@@ -273,16 +307,17 @@ async function handleChatMessage({ client, message, agentId, runtimeSettings, ag
     try {
         if (!message?.guild || !message.author || message.author.bot) return false;
         if (message.author.id === client?.user?.id) return false;
-        if (!socialEnabled(settings)) return false;
 
         const guildId = message.guild.id;
         const session = sessions.touchSession(agentId, guildId);
         if (!session) return false; // بلا جلسة لعب حية — صفر تدخل
 
-        // 🕵️ عدّاد الكلام يعمل دائماً (بلوقل الشك في الصامتين) — حتى بلا تفاعل اجتماعي
+        // 🕵️ عدّاد الكلام يعمل دائماً داخل جلسة حية (سبب الشك في الصامتين)
+        // 🐞 v7.17: كان بعد بوابة socialEnabled — يعني بلا زر 🫧 العدّاد ميت
+        // والذكاء لا يرى الصامتين أبداً — الآن أول شيء بعد الجلسة
         sessions.bumpTalk(agentId, guildId, message.author.id);
 
-        if (!socialEnabled(settings)) return false;
+        if (!speechAllowed(settings, session)) return false;
         const name = message.member?.displayName || message.author.username || 'لاعب';
         sessions.pushChatLine(agentId, guildId, { name, text: message.content });
 
@@ -327,11 +362,11 @@ async function observeBotMessage({ client, message, agentId, runtimeSettings, ag
     try {
         if (!message?.guild || !message.author || !message.author.bot) return false;
         if (message.author.id === client?.user?.id) return false;
-        if (!socialEnabled(settings)) return false;
 
         const guildId = message.guild.id;
         session = session || sessions.touchSession(agentId, guildId);
         if (!session) return false;
+        if (!speechAllowed(settings, session)) return false;
 
         const lines = String(message.content || '').split('\n').map(l => l.trim()).filter(Boolean);
         // 1) طرد شخص آخر — هل هو صديق؟
@@ -410,5 +445,7 @@ module.exports = {
     maybeSpeak,        // 🕵️ معالجات المافيا في events.js تستعملها مباشرة (v7.16)
     effectiveChance,
     CHANCES,           // الاحتمالات الأساسية (الاستدعاءات تمررها عبر effectiveChance)
+    speechAllowed,     // 🧠 بوابة الكلام: زر 🫧 أو الوضع الذكي (v7.17)
+    notifyAiFail,      // تبليغ فشل الذكاء المرئي — تستعمله mafia.js أيضاً
     __testHooks,
 };

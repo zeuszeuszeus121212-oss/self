@@ -279,6 +279,23 @@ function identifierBeforePhrase(lower, phraseStart, identifiers) {
     return identifiers.some(id => before.includes(id));
 }
 
+/**
+ * 🏆 قائمة الفائزين تتضمننا؟ (v7.17 — بلاغ المالك: «يحسب انه البوت الذي فاز
+ * وليس هو من فاز») — كانت تتطلب mentionsMe، لكن منشنات الإيمبد لا تدخل
+ * message.mentions أصلاً فكانت قوائم الفائزين في الإيمبد تضيع.
+ * الآن: نفحص ما بعد العبارة لمنشننا صراحةً (أو معرفنا بحدود أرقام) —
+ * بلا اعتماد على mentionsMe إطلاقاً.
+ */
+function winnersLineIncludesMe(line, lower, phraseEnd, identifiers) {
+    const rest = lower.slice(phraseEnd);
+    return identifiers.some((id) => {
+        if (id.startsWith('<@')) return rest.includes(id); // صيغة منشن حرفية
+        // معرف خام — بحدود أرقام حتى لا يطابق جزءاً من معرف أطول
+        const re = new RegExp(`(^|\\D)${id}($|\\D)`);
+        return re.test(rest);
+    });
+}
+
 function outcomeFromMessage(message, client) {
     if (!message || !message.author || !message.author.bot) return null;
     if (message.id && processedOutcomeMessages.has(message.id)) return null;
@@ -309,11 +326,16 @@ function outcomeFromMessage(message, client) {
                 const hit = firstMentionAfterIsMe(line, lower, phraseEnd, identifiers)
                     || identifierBeforePhrase(lower, idx, identifiers)
                     || (mentionsMe && (lower.includes('فزت') || lower.includes('فوزك')))
-                    // 🕰️ إعلان الفائزين في المافيا: قائمة منشنات — اسمنا في نفس السطر يكفي
-                    || (mentionsMe && phrase === 'الفائز' && identifiers.some(id => lower.slice(phraseEnd).includes(id)));
+                    // 🏆 إعلان الفائزين في المافيا (v7.17): قائمة منشنات في نفس
+                    // السطر فيها اسمنا تكفي — تعمل حتى لو كانت في إيمبد
+                    // (منشنات الإيمبد لا تصل message.mentions — كان يضيع الفوز)
+                    || (phrase === 'الفائز' && winnersLineIncludesMe(line, lower, phraseEnd, identifiers));
                 if (hit) {
                     rememberProcessedOutcome(message.id);
-                    return { result: 'win', kind: 'win', level: 'success', reason: `رسالة بوت تحتوي: ${phrase}` };
+                    return {
+                        result: 'win', kind: 'win', level: 'success',
+                        reason: `أُعلن فوزنا فعلاً (عبارة «${phrase}» واسم الوكيل في نفس السطر)`,
+                    };
                 }
                 idx = lower.indexOf(phrase, phraseEnd);
             }
@@ -330,7 +352,15 @@ function outcomeFromMessage(message, client) {
                     const isKick = lower.includes('طرد') || lower.includes('طُرد') || lower.includes('انطرد');
                     const isKilled = lower.includes('قتل');
                     rememberProcessedOutcome(message.id);
-                    return { result: 'loss', kind: isKick ? 'kick' : (isKilled ? 'killed' : 'loss'), level: 'warning', reason: `رسالة بوت تحتوي: ${phrase}` };
+                    return {
+                        result: 'loss',
+                        kind: isKick ? 'kick' : (isKilled ? 'killed' : 'loss'),
+                        level: 'warning',
+                        // 🧾 v7.17: نص لا لبس فيه — هو من قُتل/طُرد، وليس البوت
+                        reason: isKilled ? 'أُعلن قتلنا في المافيا (اسمنا منشن بعد «تم قتل»)'
+                            : isKick ? 'أُعلن طردنا من اللعبة (اسمنا منشن بعد العبارة)'
+                            : `أُعلنت خسارتنا (عبارة «${phrase}»)`,
+                    };
                 }
                 idx = lower.indexOf(phrase, phraseEnd);
             }
@@ -343,24 +373,29 @@ async function processOutcome({ agentId, client, message, settings }) {
     const outcome = outcomeFromMessage(message, client);
     if (!outcome) return null;
     const guildId = message.guild.id;
+    const agentName = (agents.get(String(agentId)) || {}).agentName || String(agentId);
 
     // 🐞 v7.15: كان clearLocks() يحرر أقفال كل الوكلاء على المنصة —
     // الآن تحرير مُقيّد بأقفال هذا الوكيل وحده
     policy.releaseLocksForAgent(String(agentId));
     sessions.endSession(agentId, guildId); // الجولة انتهت — الجلسة تُغلق
     store.incrementStats(agentId, guildId, outcome.result === 'win' ? 'wins' : 'losses');
-    await store.pushRecentEvent(agentId, {
-        kind: 'result',
-        text: outcome.result === 'win'
-            ? `🏆 فوز في ${message.guild.name} — ${outcome.reason}`
-            : `💀 خسارة في ${message.guild.name} — ${outcome.reason}`,
-    });
-    await store.logGameEvent(agentId, guildId, { type: 'game_result', result: outcome.result, reason: outcome.reason, message_id: message.id });
+    // 🧾 v7.17: نصوص لا لبس فيها — الفائز/المقتول هو الوكيل نفسه وليس البوت
+    const resultText = outcome.result === 'win'
+        ? `🏆 الوكيل «${agentName}» فاز فعلاً في ${message.guild.name}`
+        : outcome.kind === 'killed'
+            ? `💀 الوكيل «${agentName}» قُتل في المافيا (${message.guild.name})`
+            : outcome.kind === 'kick'
+                ? `💀 الوكيل «${agentName}» طُرد من اللعبة (${message.guild.name})`
+                : `💀 الوكيل «${agentName}» خسر في ${message.guild.name}`;
+    await store.pushRecentEvent(agentId, { kind: 'result', text: `${resultText} — ${outcome.reason}` });
+    await store.logGameEvent(agentId, guildId, { type: 'game_result', result: outcome.result, kind: outcome.kind, reason: outcome.reason, message_id: message.id });
     await notifyGameEvent({
         agentId,
+        agentName,
         guildId,
-        title: outcome.result === 'win' ? '🏆 فوز في لعبة' : '💀 خسارة في لعبة',
-        message: `**${store.statsFor(agentId, guildId).wins} فوز / ${store.statsFor(agentId, guildId).losses} خسارة** هذه الجلسة`,
+        title: outcome.result === 'win' ? '🏆 فوز الوكيل نفسه' : outcome.kind === 'killed' ? '💀 قُتل الوكيل في المافيا' : outcome.kind === 'kick' ? '💀 طُرد الوكيل من اللعبة' : '💀 خسارة الوكيل',
+        message: `**«${agentName}»** — ${outcome.reason}`,
         level: outcome.result === 'win' ? 'success' : 'warning',
         extra: { reason: outcome.reason },
     });
@@ -523,6 +558,14 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                     if (Array.isArray(result.details?.players) && result.details.players.length) {
                         sessions.mafiaSetPlayers(agentId, guildId, result.details.players);
                     }
+                    // 🧠 v7.17: «رسالة اللوبي نفسها يتم إرسالها للوكيل» — النص الحقيقي يُخزّن في الجلسة
+                    if (result.details?.lobbyText) {
+                        sessions.setLobbyText(agentId, guildId, result.details.lobbyText);
+                    }
+                    const lobbyPlayers = Array.isArray(result.details?.players) ? result.details.players.length : 0;
+                    sessions.pushEvent(agentId, guildId, lobbyPlayers
+                        ? `دخلنا اللوبي — اللاعبون معي: ${lobbyPlayers}`
+                        : 'دخلنا اللوبي');
                 } else {
                     sessions.touchSession(agentId, guildId);
                 }
@@ -674,10 +717,14 @@ module.exports = {
     canClickButtons,
     getAgentInfo,
     getZarLoops,
+    // 🧠 v7.17: سياق «أنا ألعب الآن» للمحادثة الرئيسية — يستعمله agentRuntime
+    buildLiveGameContext: ({ agentId, guildId }) => {
+        try { return sessions.buildLiveGameContext({ agentId, guildId }); } catch (_) { return null; }
+    },
     // لأغراض الاختبار
     __internals: {
         agents, zarLoops, processedOutcomeMessages,
         cleanAiAnswer, outcomeFromMessage, answerWithAi,
-        linesFromMessage,
+        linesFromMessage, winnersLineIncludesMe,
     },
 };

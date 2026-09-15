@@ -26,6 +26,7 @@
 'use strict';
 
 const sessions = require('./sessions');
+const social = require('./social');
 const { getProviderOrFallback } = require('../providers');
 
 const AI_TIMEOUT_MS = 6500;
@@ -194,17 +195,25 @@ function buildDecisionPrompt({ kind, agentName, role, session, candidates }) {
 async function aiPick(runtimeSettings, ctx) {
     try {
         const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') return null;
+        if (!providerObj || typeof providerObj.chat !== 'function') {
+            social.notifyAiFail(runtimeSettings?.agentId, 'قرار المافيا', 'لا مزود متاح');
+            return null;
+        }
         const prompt = buildDecisionPrompt(ctx);
         const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig }),
+            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
             new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
         ]);
         const raw = result && (result.fullText || result.reply || result.text);
-        if (!raw) return null;
+        if (!raw) {
+            social.notifyAiFail(runtimeSettings?.agentId, 'قرار المافيا', 'رد فارغ من المزود');
+            return null;
+        }
         return String(raw).split('\n').map(l => l.trim()).filter(Boolean)[0] || null;
-    } catch (_) {
-        return null; // أي فشل → عشوائي (الدور لا يتوقف)
+    } catch (error) {
+        // 🧠 v7.17: أي فشل → عشوائي (الدور لا يتوقف) لكن الفشل يصبح مرئياً للمالك
+        social.notifyAiFail(runtimeSettings?.agentId, 'قرار المافيا', error?.message || String(error));
+        return null;
     }
 }
 
@@ -219,7 +228,10 @@ async function decideVote({ runtimeSettings, agentName, role, session, candidate
 async function decideKick({ runtimeSettings, agentName, session, candidates }) {
     try {
         const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') return null;
+        if (!providerObj || typeof providerObj.chat !== 'function') {
+            social.notifyAiFail(runtimeSettings?.agentId, 'طرد الروليت', 'لا مزود متاح');
+            return null;
+        }
         const names = candidates.map(b => String(b.label || '؟')).filter(l => l && l !== '؟');
         if (names.length === 0) return null;
         const prompt =
@@ -228,12 +240,13 @@ async function decideKick({ runtimeSettings, agentName, session, candidates }) {
             `سياق الجلسة:\n${sessions.contextSummary(session) || '- لا معلومات بعد'}\n\n` +
             'اكتب اسم اللاعب الذي تطرده فقط — الاسم كما هو بدون أي كلام إضافي.';
         const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig }),
+            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
             new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
         ]);
         const raw = result && (result.fullText || result.reply || result.text);
         return raw ? matchButtonByName(candidates, String(raw).split('\n').map(l => l.trim()).filter(Boolean)[0]) : null;
-    } catch (_) {
+    } catch (error) {
+        social.notifyAiFail(runtimeSettings?.agentId, 'طرد الروليت', error?.message || String(error));
         return null; // أي فشل → العشوائي (النظام الحالي)
     }
 }
@@ -307,6 +320,11 @@ async function handleSecretMessage({ client, message, agentId, runtimeSettings, 
 
     const clicked = await humanClick(message, target).catch(() => null);
     if (!clicked) return null;
+
+    // 🧠 الوعي (v7.17) — حركتنا السرية تسجل في سجل ما يحصل
+    sessions.pushEvent(agentId, guildId, kind === 'kill'
+        ? `اختار سراً ضحية المافيا: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`
+        : `اختار سراً من يُحمى: ${target.label || '؟'} (${source === 'ai' ? 'قرار الذكاء' : 'عشوائي'})`);
 
     return {
         handled: true,

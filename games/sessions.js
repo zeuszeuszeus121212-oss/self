@@ -20,6 +20,8 @@
 
 const TTL_MS = 15 * 60 * 1000;      // جولة عالقة تنتهي وحدها بعد 15 دقيقة صمت
 const CHAT_RING_MAX = 12;           // آخر كلام القناة الذي يراه الذكاء
+const EVENTS_MAX = 8;               // آخر أحداث اللعبة التي يراها الذكاء
+const LOBBY_TEXT_MAX = 400;         // نص اللوبي المخزّن
 const sessions = new Map();         // `${agentId}:${guildId}` → session
 
 function key(agentId, guildId) {
@@ -46,6 +48,9 @@ function newSession(data = {}) {
         lastMentionReply : new Map(), // userId → ts (تبريد لكل شخص)
         // 🕵️ المافيا (v7.16) — ذاكرة الدور واللاعبين ومن سكت
         talkCounts: new Map(),   // userId → كم رسالة كتبها في الشات خلال الجلسة
+        // 🧠 الوعي (v7.17 — بلاغ المالك: «رسالة اللوبي نفسها تُرسل للوكيل»)
+        lobbyText : null,        // نص رسالة اللوبي كما وصلت — يقرأه الذكاء
+        events    : [],          // سجل ما يحصل في اللعبة (آخر 8) — «لا يعرف ماذا يحصل بها»
         mafia     : {
             role  : null,        // 'mafia' | 'doctor' | 'detective' | 'citizen' | null
             phase : 'lobby',     // lobby | roles | night_kill | night_save | day | day_discuss | day_vote | ended
@@ -121,6 +126,30 @@ function addPlayer(agentId, guildId, userId) {
 function addFriend(agentId, guildId, userId) {
     const session = getSession(agentId, guildId);
     if (session && userId) session.friends.add(String(userId));
+    return session;
+}
+
+// ════════════════════════════════════════════════════════════
+//  🧠 الوعي (v7.17) — «رسالة اللوبي نفسها تُرسل للوكيل» و«لا يعرف
+//  ماذا يحصل بها» — نص اللوبي + سجل أحداث يقرؤهما الذكاء في كل قرار
+//  وكلام، وسياق المحادثة الرئيسية يبثهما حين يسأله أحد وهو داخل لعبة
+// ════════════════════════════════════════════════════════════
+
+/** خزّن نص رسالة اللوبي الحقيقي (يُقص) — يقرأه الذكاء حرفياً */
+function setLobbyText(agentId, guildId, text) {
+    const session = getSession(agentId, guildId);
+    const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, LOBBY_TEXT_MAX);
+    if (session && clean) session.lobbyText = clean;
+    return session;
+}
+
+/** سجّل حدثاً في سجل الوعي — «ماذا يحصل الآن» */
+function pushEvent(agentId, guildId, text) {
+    const session = getSession(agentId, guildId);
+    const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!session || !clean) return session;
+    session.events.push({ at: Date.now(), text: clean });
+    if (session.events.length > EVENTS_MAX) session.events.shift();
     return session;
 }
 
@@ -212,9 +241,16 @@ function contextSummary(session) {
     if (!session) return '';
     const lines = [];
     lines.push(`- اللعبة: ${session.gameName || 'غير معروفة'}`);
+    if (session.lobbyText) lines.push(`- رسالة اللوبي كما وصلت: «${session.lobbyText}»`);
     if (session.kicked.size) lines.push(`- المطرودون: ${[...session.kicked].length} لاعب`);
     if (session.players.size) lines.push(`- لاعبون مرئيون: ${session.players.size}`);
     if (session.friends.size) lines.push(`- تحدث معك: ${session.friends.size} لاعب`);
+    if (session.events.length) {
+        lines.push('- ما يحصل في اللعبة (الأحدث أولاً):');
+        for (const ev of session.events.slice(-4).reverse()) {
+            lines.push(`  • ${ev.text}`);
+        }
+    }
     // 🕵️ حالة المافيا — الدور واللاعبون الأحياء ومن سكت
     if (session.engineId === 'mafia' || session.mafia.role) {
         lines.push(`- دورك في المافيا: ${session.mafia.role || 'غير معروف بعد'}`);
@@ -235,6 +271,36 @@ function contextSummary(session) {
             lines.push(`  • ${item.name}: ${item.text}`);
         }
     }
+    return lines.join('\n');
+}
+
+/**
+ * 🧠 سياق «أنا ألعب الآن» للمحادثة الرئيسية (v7.17) — بلاغ المالك:
+ * «ولا يعرف اللعبة اصلا ولا يعرف ماذا يحصل بها» — حين يكلّمه أحد وهو
+ * داخل جلسة لعبة حية يرى عقله كل شيء: اللوبي، اللاعبون، الدور، المرحلة،
+ * الأحداث الأخيرة. بلا جلسة → null (صفر تغيير على المحادثة العادية).
+ */
+function buildLiveGameContext({ agentId, guildId, now = Date.now } = {}) {
+    const session = getSession(String(agentId || ''), String(guildId || ''));
+    if (!session) return null;
+    const minutes = Math.max(0, Math.round(((now() || Date.now()) - session.joinedAt) / 60000));
+    const lines = [];
+    lines.push('[🎮 أنت داخل لعبة جارية الآن — لا تذكر أنك ذكاء اصطناعي]');
+    lines.push(`- اللعبة: ${session.gameName || 'غير معروفة'} — بدأت قبل ~${minutes} دقيقة في قناة هذه المحادثة أو جارتها`);
+    if (session.lobbyText) lines.push(`- رسالة اللوبي التي انضممت بعدها: «${session.lobbyText}»`);
+    if (session.mafia.players.size) {
+        const alive = [...session.mafia.players.values()].filter(p => p.alive);
+        lines.push(`- اللاعبون معك (${alive.length}): ${alive.map(p => p.name).join('، ') || '—'}`);
+    }
+    if (session.engineId === 'mafia' || session.mafia.role) {
+        lines.push(`- دورك في المافيا: ${session.mafia.role || 'غير معروف بعد'} — المرحلة: ${session.mafia.phase}`);
+        if (session.mafia.lastVictim) lines.push(`- آخر قتيل: ${session.mafia.lastVictim.name || session.mafia.lastVictim.id}`);
+    }
+    if (session.events.length) {
+        lines.push('- آخر ما حدث (الأحدث أولاً):');
+        for (const ev of session.events.slice(-5).reverse()) lines.push(`  • ${ev.text}`);
+    }
+    lines.push('- إن سألك أحد عن اللعبة فأجب كلاعب يعرف ما يجري حوله تماماً.');
     return lines.join('\n');
 }
 
@@ -262,5 +328,9 @@ module.exports = {
     mafiaMarkDead,
     findMafiaSessionByBot,
     normalizeName,
+    // 🧠 الوعي (v7.17)
+    setLobbyText,
+    pushEvent,
+    buildLiveGameContext,
     __reset,
 };

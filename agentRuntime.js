@@ -1409,6 +1409,15 @@ client.on('messageCreate', async (message) => {
         if (memCtx) botContext = `${botContext}\n\n${memCtx}`;
     } catch (_) {}
 
+    // 🎮 حقن وعي اللعبة الحية (v7.17 — بلاغ المالك: «ولا يعرف اللعبة اصلا
+    // ولا يعرف ماذا يحصل بها») — حين يكون الوكيل داخل جلسة لعبة (مافيا
+    // أو روليت أو غيرها) يرى عقله كل شيء: اللوبي، اللاعبون، الدور، المرحلة،
+    // آخر الأحداث. بلا جلسة حية → null — صفر تغيير على المحادثة العادية.
+    try {
+        const gameCtx = gamesPlayer.buildLiveGameContext({ agentId, guildId: message.guild.id });
+        if (gameCtx) botContext = `${botContext}\n\n${gameCtx}`;
+    } catch (_) {}
+
     // 🧷 الحفظ التلقائي الحتمي — «تذكر أنني...» يُحفظ فوراً من النظام نفسه
     // حتى لو لم يستدعِ النموذج أداة remember (ضمان عمل الذاكرة — v7.11)
     memory.maybeAutoCapture({ agentId, guildId: message.guild.id, userId: author.id, text: content })

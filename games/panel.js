@@ -39,6 +39,7 @@ const engines = require('./engines');
 const policy = require('./policy');
 const store = require('./store');
 const player = require('./player');
+const sessions = require('./sessions');
 
 const PREFIX = 'games';
 const MODAL_PREFIX = 'gmodal';
@@ -236,6 +237,16 @@ async function renderGamesPage(agentId, guildId, manager) {
         '## إحصائيات هذه الجلسة',
         `- 🚪 انضمامات: **${stats.joins}** • 🎮 حركات: **${stats.plays}** • 🏆 فوز: **${stats.wins}** • 💀 خسارة: **${stats.losses}** • ⚠️ أخطاء: **${stats.errors}**`,
         recent.length ? `\n**آخر الأحداث:**\n${recent.slice(0, 6).map(e => `- ${e.text}`).join('\n')}` : '',
+        // 🧠 v7.17: «لا اعرف انه الان يلعب» — الجلسة الحية ظاهرة للمالك هنا
+        (() => {
+            const live = sessions.getSession(agentId, guildId);
+            if (!live) return '';
+            const mins = Math.max(0, Math.round((Date.now() - live.joinedAt) / 60000));
+            const mafiaBit = (live.engineId === 'mafia' || live.mafia.role)
+                ? ` • الدور: ${live.mafia.role || 'غير معروف'} • المرحلة: ${live.mafia.phase}`
+                : '';
+            return `\n## 🟢 الجلسة الحية: يلعب الآن\n- اللعبة: **${live.gameName || live.engineId || '؟'}** منذ ~${mins} د • اللاعبون المرئيون: ${live.mafia.players.size || live.players.size}${mafiaBit}`;
+        })(),
     ].filter(Boolean).join('\n');
 
     // صف الأزرار 1: الرئيسي + أزرار المحركات
