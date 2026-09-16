@@ -26,6 +26,7 @@
 const sessions = require('./sessions');
 const social = require('./social');
 const mafia = require('./mafia');
+const brain = require('./brain'); // 🧠 v7.21 — العقل يقرر بنفسه كإنسان
 
 // ════════════════════════════════════════════════════════════
 //  أدوات مشتركة (نفس مساعدات Auto)
@@ -97,16 +98,23 @@ function pickJoinButton(allButtons) {
     return candidates[Math.floor(Math.random() * candidates.length)];
 }
 
+/** مطابقة زر باسمه (قرار الذكاء يعيد اسم الزر — نلصقه بالزر الحقيقي) */
+function matchButtonLabel(allButtons, label) {
+    const want = sessions.normalizeName(label);
+    if (!want) return null;
+    return (allButtons || []).find(b => sessions.normalizeName(String(b.label || '')) === want) || null;
+}
+
 function collectButtons(message) {
     if (!message.components || message.components.length === 0) return [];
     return message.components.flatMap(row => row.components || [])
         .filter(button => button && button.customId && !button.disabled);
 }
 
-// 🧑 محاكاة البشر لدور الروليت — الأرقام المنقولة حرفياً من Auto roulettePlay
-// (قابلة للضبط من الاختبارات فقط — ليس واجهة عامة)
+// 🧑 توقيت بشري لدور الروليت — تأخير طبيعي فقط.
+// 🚫 v7.21 حُذف skip العشوائي (بلاغ المالك: «كله كاذب... انا أردت الذكاء
+// الاصطناعي نفسه» — تخطي الدور عشوائياً وليس بقرار الذكاء = تمثيل مزيّف).
 const HUMAN_SIM = {
-    skip     : 0.01,   // احتمال تخطي الدور (تردد بشري)
     minDelay : 800,
     maxDelay : 2500,
     extraProb: 0.10,   // احتمال تأخير أطول (تشتت/كتابة)
@@ -131,58 +139,11 @@ async function clickWithHumanDelay(message, button, minDelay = 1000, maxDelay = 
 }
 
 // ════════════════════════════════════════════════════════════
-//  قاموس ريبلكا — منقول حرفياً من Auto replkaPlay.js
+//  🚫 v7.21 حُذف قاموس ريبلكا المبرمج كلياً (بلاغ المالك الحرفي:
+//  «كله كاذب... انا أردت الذكاء الاصطناعي نفسه لكنك عملت تعليقات
+//  وهمية؟ احذفهم!») — 33 إجابة جاهزة كانت تجيب بدل عقل الوكيل.
+//  الإجابة من الذكاء حصراً — فشله = لا إجابة + تبليغ مرئي.
 // ════════════════════════════════════════════════════════════
-
-const REPLKA_DATA = {
-    'أ': { human: 'أيوب',    animal: 'أسد',    plant: 'أناناس', object: 'أريكه',  country: 'أفغانستان' },
-    'ب': { human: 'بسمة',    animal: 'بطة',    plant: 'برقوق',  object: 'باب',    country: 'بولندا' },
-    'ت': { human: 'تامر',    animal: 'تمساح',  plant: 'تفاح',   object: 'تاج',    country: 'تونس' },
-    'ث': { human: 'ثري',     animal: 'ثعلب',   plant: 'ثوم',    object: 'ثياب',   country: 'لا يوجد' },
-    'ح': { human: 'حاتم',    animal: 'حوت',    plant: 'حرنكش',  object: 'حبر',    country: 'لا يوجد' },
-    'ج': { human: 'جمال',    animal: 'جمل',    plant: 'جرجير',  object: 'جسر',    country: 'جورجيا' },
-    'خ': { human: 'خالد',    animal: 'خروف',   plant: 'خس',     object: 'خاتم',   country: 'لا يوجد' },
-    'د': { human: 'داليا',   animal: 'دب',     plant: 'دراق',   object: 'دبوس',   country: 'دنمارك' },
-    'ذ': { human: 'ذبيان',   animal: 'ذباب',   plant: 'ذرة',    object: 'ذهب',    country: 'لا يوجد' },
-    'ر': { human: 'رامي',    animal: 'راكون',  plant: 'رمان',   object: 'رمل',    country: 'رومانيا' },
-    'ز': { human: 'زين',     animal: 'زرافة',  plant: 'زنجبيل', object: 'زجاجة',  country: 'زامبيا' },
-    'س': { human: 'سامح',    animal: 'سنجاب',  plant: 'سمسم',   object: 'سيارة',  country: 'سوريا' },
-    'ش': { human: 'شريف',    animal: 'شبل',    plant: 'شمام',   object: 'شباك',   country: 'شيلي' },
-    'ص': { human: 'صابر',    animal: 'صرصور',  plant: 'صنوبر',  object: 'صندوق',  country: 'صومال' },
-    'ض': { human: 'ضياء',    animal: 'ضبع',    plant: 'ضرم',    object: 'ضرس',    country: 'لا يوجد' },
-    'ط': { human: 'طاهر',    animal: 'طاووس',  plant: 'طماطم',  object: 'طاولة',  country: 'لا يوجد' },
-    'ظ': { human: 'ظاهر',    animal: 'ظبي',    plant: 'ظيان',   object: 'ظرف',    country: 'لا يوجد' },
-    'ع': { human: 'عادل',    animal: 'عصفور',  plant: 'عنب',    object: 'علبة',   country: 'عمان' },
-    'غ': { human: 'غيث',     animal: 'غراب',   plant: 'غدير',   object: 'غرفة',   country: 'غينيا' },
-    'ف': { human: 'فارس',    animal: 'فهد',    plant: 'فراولة', object: 'فرن',    country: 'فلسطين' },
-    'ق': { human: 'قاسم',    animal: 'قطة',    plant: 'قرنبيط', object: 'قلعة',   country: 'قطر' },
-    'ك': { human: 'كامل',    animal: 'كلب',    plant: 'كيوي',   object: 'كتاب',   country: 'كوريا' },
-    'ل': { human: 'لارا',    animal: 'لاما',   plant: 'ليمون',  object: 'لعبة',   country: 'لبنان' },
-    'م': { human: 'مرام',    animal: 'ماعز',   plant: 'موز',    object: 'مقص',    country: 'مصر' },
-    'ن': { human: 'ناصر',    animal: 'نمر',    plant: 'نعناع',  object: 'نظارة',  country: 'نيجيريا' },
-    'ه': { human: 'هيثم',    animal: 'هدهد',   plant: 'هليون',  object: 'هاتف',   country: 'هولندا' },
-    'و': { human: 'وسام',    animal: 'وطواط',  plant: 'ورس',    object: 'ورقة',   country: 'لا يوجد' },
-    'ي': { human: 'ياسر',    animal: 'يعسوب',  plant: 'يانسون', object: 'يخت',    country: 'يمن' },
-};
-
-function mapReplkaType(arabicType) {
-    switch (arabicType) {
-        case 'اسم إنسان': return 'human';
-        case 'حيوان':     return 'animal';
-        case 'نبات':      return 'plant';
-        case 'جماد':      return 'object';
-        case 'دولة':      return 'country';
-        default:          return null;
-    }
-}
-
-function answerFromDictionary(letter, type) {
-    const entry = REPLKA_DATA[letter];
-    if (!entry) return null;
-    const answer = entry[type];
-    if (!answer || answer === 'لا يوجد') return null;
-    return answer;
-}
 
 // ════════════════════════════════════════════════════════════
 //  المعالجات — المنقول الحرفي
@@ -379,29 +340,27 @@ const EVENTS = [
         async execute(message, client, ctx) {
             if (!message.author || !message.author.bot) return { handled: false };
             if (!message.content || !message.content.startsWith(`<@${client.user.id}>`)) return { handled: false };
-            if (!message.content.includes('لديك **15 ثانية** لإرسال')) return { handled: false };
+            if (!message.content.includes('لديك') || !message.content.includes('لإرسال')) return { handled: false }; // 🧠 v7.21: صيغة عامة — أي مهلة
 
             const matches = message.content.match(/\*\*(.*?)\*\*/g);
             if (!matches) return { handled: false };
 
             const results = matches.map(match => match.replace(/\*\*/g, ''));
-            const type = mapReplkaType(results[1]);
+            const category = results[1];
             const letter = results[2];
-            if (!type || !letter) return { handled: false };
+            if (!category || !letter) return { handled: false };
 
-            // 🧠 الإجابة: الذكاء أولاً (إن سُمح) ثم القاموس المنقول حرفياً
+            // 🚫 v7.21: الذكاء حصراً (بلاغ المالك: «انا أردت الذكاء الاصطناعي نفسه»)
+            // — حُذف القاموس المبرمج نهائياً؛ فشل الذكاء = لا إجابة + تبليغ مرئي
             let answer = null;
-            let source = null;
             const askAi = typeof ctx.answerWithAi === 'function' && ctx.settings && ctx.settings.ai_answers !== false;
             if (askAi) {
-                answer = await ctx.answerWithAi({ category: results[1], letter }).catch(() => null);
-                if (answer) source = 'ai';
+                answer = await ctx.answerWithAi({ category, letter }).catch(() => null);
             }
             if (!answer) {
-                answer = answerFromDictionary(letter, type);
-                if (answer) source = 'dictionary';
+                social.notifyAiFail(ctx.agentId, 'إجابة ريبلكا', `لا إجابة من الذكاء (${category} — ${letter})`);
+                return { handled: false };
             }
-            if (!answer) return { handled: false };
 
             // ⏱️ التوقيت البشري المنقول حرفياً: (طول الكلمة × 325) + 825ms
             const time = (answer.length * 325) + 825;
@@ -417,8 +376,8 @@ const EVENTS = [
                 type: 'game_play',
                 result: 'play',
                 gameName: 'ريبلكا',
-                message: 'بدأ الحساب التفاعل داخل جولة ريبلكا.',
-                details: { category: type, letter, answer, source },
+                message: 'أجاب بعقله على سؤال ريبلكا',
+                details: { category, letter, answer, source: 'ai' },
             };
         },
     },
@@ -486,10 +445,8 @@ const EVENTS = [
                 ? `⚔️ [هجوم ذكي] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`
                 : `⚔️ [هجوم] استهداف لاعب: [${targetButton.label || 'بدون اسم'}]`;
 
-            // 🔁 محاكاة بشرية — أرقام Auto حرفياً (800-2500ms + 10% تأخير أطول + 1% تخطي)
-            if (Math.random() < HUMAN_SIM.skip) {
-                return { handled: true, silent: true, result: 'skip', gameName: 'روليت', type: 'game_play', message: 'تخطي الدور (محاكاة بشرية)' };
-            }
+            // 🔁 توقيت بشري — أرقام Auto حرفياً (800-2500ms + 10% تأخير أطول)
+            // 🚫 v7.21: حُذف skip العشوائي — تخطي الدور بغير قرار الذكاء = تمثيل مزيّف
             let delay = Math.floor(Math.random() * (HUMAN_SIM.maxDelay - HUMAN_SIM.minDelay + 1)) + HUMAN_SIM.minDelay;
             if (Math.random() < HUMAN_SIM.extraProb) {
                 delay += Math.floor(Math.random() * (HUMAN_SIM.extraMax - HUMAN_SIM.extraMin + 1)) + HUMAN_SIM.extraMin;
@@ -565,12 +522,9 @@ const EVENTS = [
 //  بالاحتمالات (قاعدة صمت المافيا داخل social.effectiveChance).
 // ════════════════════════════════════════════════════════════
 
-// نصوص المراحل — ليست لوبي دخول أبداً
-const MAFIA_PHASE_TEXT = [
-    'توزيع الرتب', 'تم توزيع', 'انتظار المافيا', 'انتظار الطبيب',
-    'تم قتل', 'للتحقق بين', 'اختيار شخص', 'اختار شخصا', 'اختر شخصا',
-    'لطرده', 'التصويت على', 'انتهت اللعبة', 'الفائز',
-];
+// 🚫 v7.21 حُذف «حارس التصويت» نهائياً (سؤال المالك الحرفي: «ولماذا يوجد حارس
+// تصويت اصلا؟») — قوائم كلمات مبرمجة كانت ترفض رسائل أو تسمح لها بدل عقل الوكيل.
+// من اليوم: النص الحرفي يُمرَّر للذكاء وهو يقرر كإنسان — انضم أو صوّت أو تجاهل.
 
 // رسائل التصويت — استبعاد رسالة النقاش التي تحمل «للتحقق بين»
 const VOTE_TEXT = /اختيار\s*شخص\s*لطرد|للتصويت\s*على\s*طرد|تصويت\s*على\s*طرد|اختر\s*شخصا\s*لطرد|طرد\s*من\s*اللعبة/;
@@ -750,21 +704,38 @@ const MAFIA_EVENTS = [
             if (allButtons.length === 0) return { handled: false };
             const explicitJoinBtn = allButtons.find(isJoinLabeled);
 
-            if (!explicitJoinBtn) {
-                if (MAFIA_PHASE_TEXT.some(marker => text.includes(marker))) return { handled: false };
-                // 🗳️ v7.19: رسالة التصويت قد تحتوي «مافيا» («صوتوا على من تظنونه مافيا»)
-                // — كانت تُفهم لوبياً ويضغط زر تصويت عشوائياً! (تبقى مرفوضة بلا زر انضمام)
-                if (looksLikeVote(text)) return { handled: false };
+            // 🧠 v7.21 (بلاغ المالك: «طلبت فقط أن يتم تمرير له رسائل الالعاب ويستطيع
+            // هو التصرف والتعليق والكلام ويعرف اللعبة وكأنه بشري»):
+            //  • زر انضمام صريح → لوبي واضح، انضمام فوري هيكلياً (سرعة سباق اللوبيات)
+            //  • بلا زر انضمام → النص + الأزرار تُمرَّر للذكاء وهو يقرر بنفسه:
+            //    لوبي فينضم / تصويت فيتجاهله هنا (معالج التصويت يتكفل) / مرحلة فيتجاهل
+            //  • فشل الذكاء → لا ضغط أعمى (لا تخمين مزيّف) — والتشخيص المرئي يعلن السبب
+            let targetButton = explicitJoinBtn || null;
+            let decision = null;
+            if (!targetButton) {
+                decision = await brain.decide({
+                    runtimeSettings: ctx.runtimeSettings,
+                    agentName: ctx.agentName,
+                    scene: { text, buttons: allButtons.map(b => ({ label: b.label })), hint: 'رسالة من بوت المافيا — هل هذا لوبي تنضم إليه أم شيء آخر؟' },
+                });
+                if (!decision || decision.act === 'none') return { handled: false };
+                if (decision.act === 'join' || decision.act === 'click') {
+                    const chosen = decision.button
+                        ? (matchButtonLabel(allButtons, decision.button) || pickJoinButton(allButtons))
+                        : pickJoinButton(allButtons);
+                    if (!chosen) return { handled: false };
+                    targetButton = chosen;
+                } else {
+                    return { handled: false };
+                }
             }
-            // 🐞 v7.20 (بلاغ المالك الحرفي: «بعد تعديلك الاخير أصبح لا يدخل اي لعبة
-            // اصلا... اي رسالة لوبي من الألعاب لا يدخلها»): حارس v7.19 كان يرفض
-            // اللوبي نفسه — نص قواعد اللعبة في رسالة اللوبي يذكر «التصويت/الطرد»
-            // فتُصنّف اللوبي تصويتاً ولا انضمام أبداً! زر انضمام صريح = لوبي مهما
-            // ذُكر في النص — ورسالة التصويت بلا زر انضمام تبقى مرفوضة.
-            const targetButton = explicitJoinBtn || pickJoinButton(allButtons);
-            if (!targetButton) return { handled: false };
 
             const clicked = await clickWithHumanDelay(message, targetButton);
+            // 🗣️ v7.21: تعليق قرار الذكاء نفسه (say) — نصه حرفياً بلا توليد ثانٍ
+            if (decision && decision.say) {
+                void social.sendText({ client, channel: message.channel, agentId: ctx.agentId,
+                    guildId: message.guild.id, text: decision.say, kind: 'join_say' }).catch(() => {});
+            }
             // 🐞 v7.18: الأسماء من الإيمبد نفسه — لا من message.mentions فقط
             const players = await extractPlayerMentions(message);
             return {
@@ -1258,6 +1229,95 @@ EVENTS.push(premiumJoinEvent({ engineId: 'replka', gameName: 'ريبلكا', key
 // 🕵️ معالجات المافيا — في النهاية حتى لا تلمس أي محرك قديم (صفر كسر)
 EVENTS.push(...MAFIA_EVENTS);
 
+// ════════════════════════════════════════════════════════════
+//  🧠 v7.21 — أي لعبة أخرى: بلاغ المالك الحرفي
+//  «طلبت فقط أن يتم تمرير له رسائل الالعاب ويستطيع هو التصرف
+//   والتعليق والكلام ويعرف اللعبة وكأنه بشري هل هذا صعب؟»
+//  أي رسالة بوت فيها أزرار لا يفهمها معالج معروف → تُمرَّر لعقل
+//  الوكيل حرفياً فيقرر كإنسان: ينضم / يضغط / يتجاهل + يقول سطره.
+//  • الألعاب المعروفة (كراسي/روليت/مافيا/ريبلكا) لها معالجاتها —
+//    لا نتدخل فيها (نحترم تعطيل كل محرك على حدة)
+//  • فشل الذكاء → زر انضمام صريح/أخضر فقط (سرعة سباق اللوبي)،
+//    وإلا لا ضغط أعمى — والتشخيص المرئي يعلن ما حدث
+// ════════════════════════════════════════════════════════════
+EVENTS.push({
+    engineId: 'universal',
+    name: 'universalLobby',
+    trigger: 'messageCreate',
+    eventType: 'game_join',
+    gameName: 'لعبة',
+    async execute(message, client, ctx) {
+        if (!message.author || !message.author.bot) return { handled: false };
+        const myId = client.user && client.user.id;
+
+        const text = textFromMessage(message);
+        if (!text || !String(text).trim()) return { handled: false };
+        // رسالة موجّهة للوكيل (دوره/نتيجته) → معالجات الدور تتكفل
+        if (myId && (text.includes(`<@${myId}>`) || text.includes(`<@!${myId}>`))) return { handled: false };
+
+        const allButtons = collectButtons(message);
+        if (allButtons.length === 0) return { handled: false };
+
+        // الألعاب المعروفة لها محركاتها — لو محركها معطل فتعطيله متعمد: لا نتخطاه هنا
+        const knownGame = ['كراسي', 'الكراسي', 'روليت', 'العجلة', 'مافيا', 'ريبلكا']
+            .find(word => text.includes(word));
+        if (knownGame) return { handled: false };
+
+        const session = sessions.getSession(ctx.agentId, message.guild.id);
+        const decision = await brain.decide({
+            runtimeSettings: ctx.runtimeSettings,
+            agentName: ctx.agentName,
+            session,
+            scene: {
+                text,
+                buttons: allButtons.map(b => ({ label: b.label })),
+                hint: session
+                    ? `أنت الآن داخل جلسة «${session.gameName || 'لعبة'}» — رسالة جديدة من بوت مختلف`
+                    : 'رسالة من بوت لعبة — لوبي انضمام محتمل لأي لعبة',
+            },
+        });
+
+        const gameTitle = (message.embeds && message.embeds[0] && message.embeds[0].title) || 'لعبة';
+
+        if (decision && (decision.act === 'join' || decision.act === 'click')) {
+            const chosen = decision.button
+                ? (matchButtonLabel(allButtons, decision.button) || pickJoinButton(allButtons))
+                : pickJoinButton(allButtons);
+            if (!chosen) return { handled: false };
+            const clicked = await clickWithHumanDelay(message, chosen);
+            if (decision.say) {
+                void social.sendText({ client, channel: message.channel, agentId: ctx.agentId,
+                    guildId: message.guild.id, text: decision.say, kind: 'universal_say' }).catch(() => {});
+            }
+            return {
+                handled: true,
+                type: 'game_join',
+                result: 'join',
+                gameName: gameTitle,
+                message: `انضم بقرار عقله إلى «${gameTitle}» بالزر: ${clicked.label || '؟'}`,
+                details: { buttonLabel: clicked.label, delayMs: clicked.delayMs, source: 'ai', decision: decision.act },
+            };
+        }
+
+        if (decision && decision.act === 'none') {
+            return { handled: false, silent: true, result: 'ai_skip', details: { reason: 'قرار الذكاء: تجاهل' } };
+        }
+
+        // فشل الذكاء — سرعة سباق اللوبي: زر انضمام صريح أو أخضر فقط، بلا تخمين أعمى
+        const fallback = allButtons.find(b => isJoinLabeled(b) || isGreenButton(b));
+        if (!fallback) return { handled: false };
+        const clicked = await clickWithHumanDelay(message, fallback);
+        return {
+            handled: true,
+            type: 'game_join',
+            result: 'join',
+            gameName: gameTitle,
+            message: `انضم (احتياط هيكلي بعد فشل الذكاء) إلى «${gameTitle}» بالزر: ${clicked.label || '؟'}`,
+            details: { buttonLabel: clicked.label, delayMs: clicked.delayMs, source: 'fallback' },
+        };
+    },
+});
+
 function eventsForTrigger(trigger) {
     return EVENTS.filter(event => event.trigger === trigger);
 }
@@ -1272,13 +1332,10 @@ module.exports = {
     pickJoinButton,
     collectButtons,
     HUMAN_SIM,
-    REPLKA_DATA,
-    mapReplkaType,
-    answerFromDictionary,
     // 🗳️ التصويت (v7.19) — لأغراض الاختبار
     looksLikeVote,
     parseVoteLabel,
     recordVoteTally,
     // 🕵️ المافيا (v7.16) — لأغراض الاختبار
-    __mafiaHooks: { votedMessages, MAFIA_PHASE_TEXT, VOTE_TEXT, rememberVoted, MAFIA_EVENTS, registerNamePlayers, collectMentions },
+    __mafiaHooks: { votedMessages, VOTE_TEXT, rememberVoted, MAFIA_EVENTS, registerNamePlayers, collectMentions, matchButtonLabel },
 };

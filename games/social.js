@@ -27,7 +27,8 @@
 
 const sessions = require('./sessions');
 const store = require('./store');
-const { getProviderOrFallback } = require('../providers');
+const brain = require('./brain'); // 🧠 v7.21 — سلّم التعافي نفسه للشات الرئيسي
+const { getProviderOrFallback } = require('../providers'); // للتوافق القديم فقط
 
 // 🎲 احتمالات الكلام — «ليس دائماً يتكلم»
 const CHANCES = {
@@ -188,11 +189,6 @@ function cleanComment(raw) {
 
 async function aiComment(runtimeSettings, { agentName, eventLine, session, agentId = null }) {
     try {
-        const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') {
-            notifyAiFail(agentId || runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', 'لا مزود متاح');
-            return null;
-        }
         const personality = String(runtimeSettings?.personality || '').trim().slice(0, 300);
         const prompt =
             `أنت تلعب لعبة ديسكورد باسم «${agentName}» داخل قناة عربية.\n` +
@@ -201,13 +197,12 @@ async function aiComment(runtimeSettings, { agentName, eventLine, session, agent
             `سياق القناة:\n${sessions.contextSummary(session) || '- لا كلام بعد'}\n\n` +
             'اكتب سطراً واحداً قصيراً جداً (3 إلى 12 كلمة) تقوله في الشات الآن: عامي عربي طبيعي يناسب الموقف.\n' +
             'قواعد صارمة: سطر واحد فقط، بلا markdown، بلا قوائم، بلا ذكر أنك بوت أو ذكاء اصطناعي.';
-        const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
-        ]);
-        return cleanComment(result && (result.fullText || result.reply || result.text));
+        // 🧠 v7.21 (بلاغ المالك: «لمادا اتكلم معه ينجح لكن تعليقك تقول انه يفشل؟»):
+        // نفس سلّم التعافي الذي ينجح في الشات الرئيسي — سلسلة مزودين × مفاتيح × محاولات
+        const result = await brain.chatSmart(runtimeSettings, { prompt, timeoutMs: AI_TIMEOUT_MS });
+        return cleanComment(result);
     } catch (error) {
-        // 🧠 v7.17: أي فشل → الجمل الجاهزة، لكن الفشل نفسه يصبح مرئياً للمالك
+        // فشل الذكاء → صمت تام، لكن الفشل نفسه يصبح مرئياً للمالك
         notifyAiFail(agentId || runtimeSettings?.agentId || session?.botId, 'كلام اجتماعي', error?.message || String(error));
         return null;
     }
@@ -420,11 +415,38 @@ function __testHooks() {
     return { CHANCES, canSpeak, reserve, cleanComment, TIMING, effectiveChance };
 }
 
+// 🗣️ v7.21 — إرسال نص جاهز مصدره قرار الذكاء نفسه (قرار brain.decide «say»):
+// لا استدعاء ذكاء ثانٍ — النص الذي قرره العقل هو ما يُقال حرفياً.
+// فشل الإرسال لا يُسقط شيء؛ والنص الفارغ يُهمل.
+async function sendText({ client, channel, agentId, guildId, text, kind = 'ai_decision_say', replyToMessageId = null }) {
+    try {
+        const clean = cleanComment(text);
+        if (!clean || !channel || typeof channel.send !== 'function') return false;
+        await new Promise(r => setTimeout(r, TIMING.minDelay + Math.floor(Math.random() * (TIMING.maxDelay - TIMING.minDelay))));
+        try {
+            if (replyToMessageId) {
+                await channel.send({ content: clean.slice(0, MAX_LEN), reply: { messageReference: replyToMessageId } });
+            } else {
+                await channel.send(clean.slice(0, MAX_LEN));
+            }
+        } catch (_) {
+            try { await channel.send(clean.slice(0, MAX_LEN)); } catch (_) { return false; }
+        }
+        if (agentId && guildId) {
+            store.incrementStats(agentId, guildId, 'plays');
+            await store.pushRecentEvent(agentId, { kind: 'social', text: `🫧 تعليق (${kind}): ${clean.slice(0, 60)}` });
+            await store.logGameEvent(agentId, guildId, { type: 'social_comment', social_kind: kind, text: clean });
+        }
+        return true;
+    } catch (_) { return false; }
+}
+
 module.exports = {
     handleChatMessage,
     observeBotMessage,
     maybeSpeak,        // 🕵️ معالجات المافيا في events.js تستعملها مباشرة (v7.16)
     speak,             // 🛰️ v7.18: رد اللوبي يستدعيها مباشرة بعد بوابة speechGate
+    sendText,          // 🗣️ v7.21: إرسال نص قرار الذكاء نفسه (say) — يستعمله brain/universal
     maybeVoteAnnounce, // 🗣️ v7.19: إعلان التصويت في الوضع الاجتماعي
     effectiveChance,
     CHANCES,           // الاحتمالات الأساسية (الاستدعاءات تمررها عبر effectiveChance)

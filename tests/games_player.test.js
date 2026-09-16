@@ -85,6 +85,8 @@ const policy = require('../games/policy');
 const engines = require('../games/engines');
 const eventsMod = require('../games/events');
 const player = require('../games/player');
+// 🧠 v7.21: عزل الاختبارات القديمة من نداءات المزود الحقيقية — العقل الافتراضي في هذه الملفات: تجاهل (والاختبارات المخصصة للعقل في games_brain.test.js)
+require('../games/brain').__setDecide(() => ({ act: 'none' }));
 
 // ════════════════════════════════════════════════════════════
 //  نسخة اختبار من store — تخزين بالذاكرة بدل MongoDB
@@ -174,12 +176,12 @@ async function run() {
         assert.strictEqual(updateSwallow, false, 'messageUpdate الافتراضي أيضاً بلا فعل');
     }
 
-    // ── 2) السجل: 4 محركات كما في Auto + مافيا (v7.16) ──
+    // ── 2) السجل: 4 محركات كما في Auto + مافيا (v7.16) + الألعاب العامة (v7.21) ──
     {
         const ids = engines.engineIds().sort();
-        assert.deepStrictEqual(ids, ['karasi', 'mafia', 'replka', 'roulette', 'zar'], 'المحركات الخمسة (مافيا أُضيفت v7.16)');
+        assert.deepStrictEqual(ids, ['karasi', 'mafia', 'replka', 'roulette', 'universal', 'zar'], 'المحركات الستة (universal أُضيفت v7.21 — أي لعبة تُمرر للعقل)');
         const names = engines.getEngines().map(e => e.displayName);
-        for (const expected of ['زر', 'روليت', 'كراسي', 'ريبلكا', 'مافيا']) assert(names.includes(expected), `اسم المحرك ${expected}`);
+        for (const expected of ['زر', 'روليت', 'كراسي', 'ريبلكا', 'مافيا', 'ألعاب أخرى']) assert(names.includes(expected), `اسم المحرك ${expected}`);
     }
 
     // ── 3) تفعيل الوكيل أ لهذا السيرفر + كل المحركات ──
@@ -293,7 +295,7 @@ async function run() {
         assert.ok(/^ka[1-4]$/.test(karasiMsg.__clicks[0]), 'الضغطة من أزرار الجولة نفسها');
     }
 
-    // ── 10) ريبلكا: الذكاء أولاً ثم القاموس المنقول ──
+    // ── 10) ريبلكا: 🚫 v7.21 الذكاء حصراً — لا قاموس إطلاقاً (بلاغ المالك «احذفهم») ──
     {
         const question = (letter, cat) => makeMessage({
             content: `<@${AGENT_USER_ID}> لديك **15 ثانية** لإرسال كلمة من فئة **${cat}** تبدأ بـ **${letter}**`,
@@ -301,31 +303,31 @@ async function run() {
         let sent = [];
         const answerAiCalls = [];
 
-        // الذكاء ينجح — له الأولوية
+        // الذكاء ينجح — يجيب
         const ctxAi = { agentId: AGENT_A, settings: { ai_answers: true }, answerWithAi: async (q) => { answerAiCalls.push(q); return 'أرنب'; } };
         const ev = eventsMod.eventsForTrigger('messageCreate').find(e => e.name === 'replkaPlay');
         const msg1 = question('أ', 'حيوان');
         msg1.channel.send = async (text) => { sent.push(text); };
         const res1 = await ev.execute(msg1, makeClient(), ctxAi);
         assert.strictEqual(res1.handled, true, 'ريبلكا معالجة');
-        assert.strictEqual(res1.details.source, 'ai', 'الذكاء له الأولوية');
+        assert.strictEqual(res1.details.source, 'ai', 'الإجابة من الذكاء حصراً');
         assert.strictEqual(res1.details.answer, 'أرنب');
 
-        // الذكاء يفشل — القاموس المنقول من Auto يتولى (س → سوريا/دولة)
+        // الذكاء يفشل — لا إجابة ولا إرسال (لا قاموس يستبدل عقله)
         const msg2 = question('س', 'دولة');
         sent = [];
         msg2.channel.send = async (text) => { sent.push(text); };
         const res2 = await ev.execute(msg2, makeClient(), { agentId: AGENT_A, settings: { ai_answers: true }, answerWithAi: async () => null });
-        assert.strictEqual(res2.details.source, 'dictionary', 'القاموس احتياط');
-        assert.strictEqual(res2.details.answer, 'سوريا', 'قاموس Auto: س + دولة = سوريا');
+        assert.strictEqual(res2.handled, false, 'فشل الذكاء = لا حركة');
+        assert.strictEqual(sent.length, 0, 'صفر كلمات وهمية في القناة');
 
-        // القاموس وحده (ai_answers=false): م + جماد = مقص
+        // ai_answers=false: لا استدعاء ذكاء أصلاً ولا إجابة
         const msg3 = question('م', 'جماد');
         sent = [];
         msg3.channel.send = async (text) => { sent.push(text); };
         const res3 = await ev.execute(msg3, makeClient(), { agentId: AGENT_A, settings: { ai_answers: false }, answerWithAi: async () => 'لن يُستدعى' });
-        assert.strictEqual(res3.details.source, 'dictionary');
-        assert.strictEqual(res3.details.answer, 'مقص', 'قاموس Auto: م + جماد = مقص');
+        assert.strictEqual(res3.handled, false, 'بلا ذكاء = بلا إجابة');
+        assert.strictEqual(sent.length, 0, 'صفر إرسال');
 
         // التنظيف: إجابة الذكاء المتسخة تُنظف
         assert.strictEqual(player.__internals.cleanAiAnswer('**بغداد**.\nالجواب هو'), 'بغداد', 'تنظيف الإجابة');
@@ -372,14 +374,21 @@ async function run() {
         assert.ok(typeof s2.enabled === 'boolean', 'إعدادات ب مستقلة');
     }
 
-    // ── 14) قاموس Auto سليم: عينات مطابقة للمصدر ──
+    // ── 14) 🚫 v7.21 القاموس المبرمج محذوف نهائياً — بلاغ المالك «كله كاذب... احذفهم» ──
     {
-        const { answerFromDictionary } = eventsMod;
-        assert.strictEqual(answerFromDictionary('أ', 'country'), 'أفغانستان');
-        assert.strictEqual(answerFromDictionary('ب', 'human'), 'بسمة');
-        assert.strictEqual(answerFromDictionary('ث', 'country'), null, 'لا يوجد → null');
-        assert.strictEqual(eventsMod.mapReplkaType('اسم إنسان'), 'human');
-        assert.strictEqual(eventsMod.mapReplkaType('دولة'), 'country');
+        assert.strictEqual(eventsMod.REPLKA_DATA, undefined, 'لا قاموس في الصادرات');
+        assert.strictEqual(eventsMod.answerFromDictionary, undefined, 'لا إجابات جاهزة في الصادرات');
+        assert.strictEqual(eventsMod.mapReplkaType, undefined, 'لا خريطة قاموس في الصادرات');
+        // الإجابة الآن عبر answerWithAi → brain.chatSmart (سلّم التعافي):
+        // سلسلة مزود وهمية ترد «مصر» فيثبت المسار الذكي حصراً بلا أي سقوط لقاموس
+        const brain = require('../games/brain');
+        brain.__setBuilders({ chain: [{ id: 'fake', obj: { chat: async () => ({ fullText: 'مصر' }) }, config: {} }] });
+        try {
+            const answer = await player.__internals.answerWithAi(runtimeSettings, { category: 'دولة', letter: 'م' });
+            assert.strictEqual(answer, 'مصر', 'الإجابة من سلّم الذكاء مباشرة (ذكاء حصراً)');
+        } finally {
+            brain.__setBuilders(null); // تنظيف الحقن للاختبارات التالية
+        }
     }
 
     // ── 15) صفحات اللوحة V2 سليمة بلا رميات ──
@@ -593,7 +602,9 @@ async function run() {
         assert.strictEqual(turnMsg.__clicks.length, 1, 'الدور: ضغطة واحدة');
         assert.ok(['p_khaled', 'p_sami'].includes(turnMsg.__clicks[0]), `الضغط على لاعب فقط — كانت ${turnMsg.__clicks[0]}`);
 
-        // تخطي الدور (محاكاة بشرية 1%) — صامت: بلا ضغط ولا إحصائية والجلسة باقية
+        // 🚫 v7.21 (بلاغ المالك: «كله كاذب... انا أردت الذكاء الاصطناعي نفسه»):
+        // حُذف تخطي الدور العشوائي نهائياً — حتى لو حاول أحد ضبط skip=1 يبقى
+        // الحقل مهملًا والدور ينقر دائماً (لا تمثيل مزيّف بقرار عشوائي)
         sim.skip = 1;
         const turnSkip = makeMessage({
             id: 'mskip1',
@@ -601,8 +612,8 @@ async function run() {
             components: [{ components: [btn('خالد', 'p_k2')] }],
         });
         await player.handleMessage({ client: makeClient(), message: turnSkip, agentId: AGENT_A, runtimeSettings });
-        assert.strictEqual(turnSkip.__clicks.length, 0, 'التخطي: صفر ضغط');
-        assert.ok(sessionsMod.getSession(AGENT_A, GUILD), 'التخطي لا يغلق الجلسة');
+        assert.strictEqual(turnSkip.__clicks.length, 1, 'لا تخطي عشوائي: الدور ينقر دائماً');
+        assert.ok(sessionsMod.getSession(AGENT_A, GUILD), 'الجلسة باقية');
         Object.assign(sim, savedSim);
     }
 

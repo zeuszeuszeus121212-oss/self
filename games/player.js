@@ -25,7 +25,8 @@ const store = require('./store');
 const eventsMod = require('./events');
 const sessions = require('./sessions');
 const social = require('./social');
-const { getProviderOrFallback } = require('../providers');
+const gamesBrain = require('./brain'); // 🧠 v7.21 — سلّم التعافي نفسه للشات الرئيسي
+const { getProviderOrFallback } = require('../providers'); // للتوافق القديم فقط
 
 // هوية الوكلاء الحية — يملؤها agentReady
 const agents = new Map(); // agentId → { client, tokenType, agentName, kind }
@@ -220,18 +221,15 @@ function cleanAiAnswer(raw) {
 
 async function answerWithAi(runtimeSettings, { category, letter }) {
     try {
-        const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') return null;
         const prompt =
             `أنت لاعب خبير في لعبة ريبلكا العربية. السؤال: أعطني كلمة واحدة من فئة «${category}» تبدأ بالحرف «${letter}».\n` +
             'أجب بالكلمة العربية وحدها فقط — بدون شرح وبدون علامات ترقيم وبدون أي كلام آخر.';
-        const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings.providerConfig }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), 7000)),
-        ]);
-        return cleanAiAnswer(result && (result.fullText || result.reply || result.text));
+        // 🧠 v7.21: نفس سلّم التعافي (مزود × مفاتيح × محاولات) — والقاموس المبرمج
+        // حُذف نهائياً بطلب المالك «انا أردت الذكاء الاصطناعي نفسه» — فشله = لا إجابة
+        const result = await gamesBrain.chatSmart(runtimeSettings, { prompt, timeoutMs: 7000 });
+        return cleanAiAnswer(result);
     } catch (_) {
-        return null; // أي فشل → القاموس يتولى (دائماً)
+        return null; // أي فشل → لا إجابة + تبليغ مرئي من المعالج
     }
 }
 
@@ -735,6 +733,9 @@ async function handleMessage({ client, message, agentId, runtimeSettings }) {
                 if (liveAtEnd && String(liveAtEnd.botId || '') === String(message.author.id)) {
                     sessions.endSession(agentId, guildId);
                 }
+                // 🐞 v7.21: نهاية الجولة تحرر أقفال هذا الوكيل في هذا السيرفر —
+                // القفل اليتيم كان يمنع انضمام الجولات التالية («لا يدخل اي لعبة اصلا»)
+                policy.releaseLocksForAgent(String(agentId), { serverId: String(guildId) });
             }
         } catch (_) {}
 
@@ -878,5 +879,6 @@ module.exports = {
         agents, zarLoops, processedOutcomeMessages,
         cleanAiAnswer, outcomeFromMessage, answerWithAi,
         linesFromMessage, winnersLineIncludesMe,
+        brain: gamesBrain,
     },
 };

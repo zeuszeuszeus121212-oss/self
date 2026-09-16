@@ -56,6 +56,8 @@ const store = require('../games/store');
 const sessions = require('../games/sessions');
 const social = require('../games/social');
 const player = require('../games/player');
+// 🧠 v7.21: عزل الاختبارات القديمة من نداءات المزود الحقيقية — العقل الافتراضي في هذه الملفات: تجاهل (والاختبارات المخصصة للعقل في games_brain.test.js)
+require('../games/brain').__setDecide(() => ({ act: 'none' }));
 const eventsMod = require('../games/events');
 const policy = require('../games/policy');
 

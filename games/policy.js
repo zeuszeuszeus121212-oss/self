@@ -20,6 +20,16 @@ const { getEngines } = require('./engines');
 const DEFAULT_KEY = 'default';
 const activeLocks = new Map(); // key → lock (كما في Auto — ذاكرة عملية)
 
+// 🐞 v7.21 (بلاغ المالك الحرفي: «كراسي دخلها ببوت ولم يدخلها في البوت الاخر»
+// ثم «حاليا لا يدخل او يلعب اي لعبة»): القفل يلتقطه أول حساب ولا يُحرر إلا
+// عند كشف نتيجة فوز/خسارة — إذا فاتت صيغة النتيجة ظل القفل معلقاً **للأبد**
+// فحُجب الحساب الثاني ثم تراكمت الأقفال فحُجبت كل الألعاب في السيرفر.
+// الآن عمر القفل الأقصى 10 دقائق — القفل اليتيم لا يمنع أحداً بعد اليوم.
+const LOCK_TTL_MS = 10 * 60_000;
+function lockExpired(lock) {
+    return !lock || !lock.acquiredAt || (Date.now() - new Date(lock.acquiredAt).getTime()) > LOCK_TTL_MS;
+}
+
 function mapToObject(value) {
     if (!value) return {};
     if (value instanceof Map) return Object.fromEntries(value);
@@ -166,7 +176,9 @@ function acquireLock({ policy, engineId, serverId, gameName, agentId, agentName 
     if (!isOverlapLockEnabled(policy, engineId)) return { acquired: true, locked: false };
     const key = lockKey(engineId, serverId, gameName);
     const existing = activeLocks.get(key);
-    if (existing && existing.agentId !== agentId) return { acquired: false, locked: true, owner: existing, key };
+    if (existing && !lockExpired(existing) && existing.agentId !== agentId) {
+        return { acquired: false, locked: true, owner: existing, key };
+    }
     const lock = { key, engineId, serverId, gameName, agentId, agentName, acquiredAt: new Date() };
     activeLocks.set(key, lock);
     return { acquired: true, locked: true, owner: lock, key };
@@ -179,13 +191,14 @@ function releaseLock(key, agentId) {
     return true;
 }
 
-function releaseLocksForAgent(agentId, engineId) {
+function releaseLocksForAgent(agentId, { engineId, serverId } = {}) {
     let released = 0;
     for (const [key, lock] of activeLocks.entries()) {
-        if (lock.agentId === agentId && (!engineId || lock.engineId === engineId)) {
-            activeLocks.delete(key);
-            released += 1;
-        }
+        if (lock.agentId !== agentId) continue;
+        if (engineId && lock.engineId !== engineId) continue;
+        if (serverId && String(lock.serverId || '') !== String(serverId)) continue;
+        activeLocks.delete(key);
+        released += 1;
     }
     return released;
 }

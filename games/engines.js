@@ -57,6 +57,13 @@ const engines = [
         // mode: 'auto' (عشوائي — النظام الحالي) | 'ai' (الذكاء يقتل/يحمي/يصوّت) — v7.16
         defaultSettings: { delay: 0, roundTimeout: 300, mode: 'auto' },
     },
+    {
+        id        : 'universal',
+        displayName: 'ألعاب أخرى',
+        icon      : '🎲',
+        description: '🧠 v7.21 بلاغ المالك: «طلبت فقط أن يتم تمرير له رسائل الالعاب ويستطيع هو التصرف» — أي رسالة لعبة بأزرار من أي بوت تُمرَّر لعقل الوكيل فيقرر بنفسه كإنسان: ينضم أم لا، يضغط أي زر، وماذا يقول. لا حواجز كلمات بعد اليوم',
+        defaultSettings: { delay: 0, roundTimeout: 60 },
+    },
 ];
 
 const engineMap = new Map(engines.map(engine => [engine.id, engine]));

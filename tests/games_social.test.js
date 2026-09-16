@@ -48,6 +48,8 @@ const sessions = require('../games/sessions');
 const social = require('../games/social');
 const policy = require('../games/policy');
 const player = require('../games/player');
+// 🧠 v7.21: عزل الاختبارات القديمة من نداءات المزود الحقيقية — العقل الافتراضي في هذه الملفات: تجاهل (والاختبارات المخصصة للعقل في games_brain.test.js)
+require('../games/brain').__setDecide(() => ({ act: 'none' }));
 
 const AGENT_A = 'a1000000000000000000000aa';
 const AGENT_B = 'b2000000000000000000000bb';

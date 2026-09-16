@@ -27,7 +27,7 @@
 
 const sessions = require('./sessions');
 const social = require('./social');
-const { getProviderOrFallback } = require('../providers');
+const brain = require('./brain'); // 🧠 v7.21 — سلّم التعافي نفسه للشات الرئيسي
 
 const AI_TIMEOUT_MS = 6500;
 
@@ -272,17 +272,11 @@ function buildDecisionPrompt({ kind, agentName, role, session, candidates, rawTe
 
 async function aiPick(runtimeSettings, ctx) {
     try {
-        const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') {
-            social.notifyAiFail(runtimeSettings?.agentId, 'قرار المافيا', 'لا مزود متاح');
-            return null;
-        }
         const prompt = buildDecisionPrompt(ctx);
-        const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
-        ]);
-        const raw = result && (result.fullText || result.reply || result.text);
+        // 🧠 v7.21 (بلاغ المالك: «لمادا اتكلم معه ينجح لكن تعليقك تقول انه يفشل؟»):
+        // كانت نداء المزود مباشرة بمفتاح واحد — مفتاح تالف = الشات ينجح وقرار المافيا
+        // يفشل دائماً. الآن نفس سلّم التعافي (سلسلة مزودين × مفاتيح × محاولات).
+        const raw = await brain.chatSmart(runtimeSettings, { prompt, timeoutMs: AI_TIMEOUT_MS });
         if (!raw) {
             social.notifyAiFail(runtimeSettings?.agentId, 'قرار المافيا', 'رد فارغ من المزود');
             return null;
@@ -305,11 +299,6 @@ async function decideVote({ runtimeSettings, agentName, role, session, candidate
  *  «وضع الذكاء الاصطناعي هو من يختار يطرد ووضع تلقائي وهو الحالي من النظام») */
 async function decideKick({ runtimeSettings, agentName, session, candidates }) {
     try {
-        const providerObj = getProviderOrFallback(runtimeSettings?.provider);
-        if (!providerObj || typeof providerObj.chat !== 'function') {
-            social.notifyAiFail(runtimeSettings?.agentId, 'طرد الروليت', 'لا مزود متاح');
-            return null;
-        }
         const names = candidates.map(b => String(b.label || '؟')).filter(l => l && l !== '؟');
         if (names.length === 0) return null;
         const prompt =
@@ -317,11 +306,8 @@ async function decideKick({ runtimeSettings, agentName, session, candidates }) {
             `اللاعبون المتاحون: ${names.join('، ')}\n` +
             `سياق الجلسة:\n${sessions.contextSummary(session) || '- لا معلومات بعد'}\n\n` +
             'اكتب اسم اللاعب الذي تطرده فقط — الاسم كما هو بدون أي كلام إضافي.';
-        const result = await Promise.race([
-            providerObj.chat({ prompt, config: runtimeSettings?.providerConfig, agentId: runtimeSettings?.agentId }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('ai_timeout')), AI_TIMEOUT_MS)),
-        ]);
-        const raw = result && (result.fullText || result.reply || result.text);
+        // 🧠 v7.21: نفس سلّم التعافي — لا فشل صامت لمفتاح وحيد بعد اليوم
+        const raw = await brain.chatSmart(runtimeSettings, { prompt, timeoutMs: AI_TIMEOUT_MS });
         return raw ? matchButtonByName(candidates, String(raw).split('\n').map(l => l.trim()).filter(Boolean)[0]) : null;
     } catch (error) {
         social.notifyAiFail(runtimeSettings?.agentId, 'طرد الروليت', error?.message || String(error));

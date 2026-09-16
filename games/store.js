@@ -57,7 +57,11 @@ function normalize(doc) {
         merged.engines[engine.id] = {
             ...merged.engines[engine.id],
             ...Object.fromEntries(Object.entries(saved).filter(([, v]) => v !== undefined && v !== null)),
-            enabled: Boolean(saved.enabled),
+            // 🐞 v7.21 (بلاغ المالك الحرفي: «اصلا اللوبي لا يدخله!» — «لا يدخل اي
+            // لعبة اصلا»): كل محرك كان يحتاج تفعيلاً يدوياً ثانياً حتى مع المفتاح
+            // الرئيسي مفعلاً — فخ مزدوج يجعل كل الألعاب صامتة. الآن المحرك يتبع
+            // المفتاح الرئيسي ما لم يُمنع صراحةً (false محفوظ يبقى false).
+            enabled: saved.enabled === undefined ? merged.enabled : Boolean(saved.enabled),
         };
         // 🧠 وضع اللعب (v7.18): 'social' = اجتماعي (يلعب ويتفاعل بالكلام كاملاً)
         //                    'auto'  = تلقائي (يلعب ويقرر بعقله لكن كلامه محدود بموقعه)
@@ -193,6 +197,7 @@ async function logGameEvent(agentId, guildId, event) {
 
 module.exports = {
     defaultSettings,
+    normalize,         // 🧠 v7.21: مُصدَّرة للاختبارات — المحركات تتبع المفتاح الرئيسي
     getGameSettings,
     updateGameSettings,
     invalidateAgent,
